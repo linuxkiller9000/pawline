@@ -197,7 +197,7 @@ fn main() {
                 .inner_size(start_w, start_h)
                 .visible(false)
                 .decorations(false)
-                .transparent(false)
+                .transparent(true)
                 .always_on_top(true)
                 .skip_taskbar(true)
                 .build()?;

@@ -14,6 +14,21 @@ pub fn try_answer(input: &str) -> Option<String> {
     }
     let lower = t.to_lowercase();
 
+    // linear equations in x: "solve 2x + 4 = 10"
+    if lower.starts_with("solve") {
+        if let Some(ans) = solve_linear(&lower) {
+            return Some(ans);
+        }
+        // an equation shape we do not solve deterministically: say so
+        // plainly instead of letting the model guess algebra
+        if lower.contains('=') && lower.contains('x') {
+            return Some(
+                "I can only solve linear equations in x so far (like \"solve 2x + 4 = 10\")."
+                    .into(),
+            );
+        }
+    }
+
     // "20% of 85" style
     if let Some(ans) = percent_of(&lower) {
         return Some(ans);
@@ -86,6 +101,84 @@ fn percent_of(lower: &str) -> Option<String> {
         fmt_num(base),
         fmt_num(pct / 100.0 * base)
     ))
+}
+
+/// Deterministic solver for linear equations in one variable:
+/// "solve 2x + 4 = 10" -> "2x + 4 = 10  =>  x = 3". Only linear terms
+/// (ax + b = cx + d); anything more complex is refused so the model never
+/// guesses algebra either.
+fn solve_linear(lower: &str) -> Option<String> {
+    let body = lower
+        .strip_prefix("solve for x:")
+        .or_else(|| lower.strip_prefix("solve for x"))
+        .or_else(|| lower.strip_prefix("solve:"))
+        .or_else(|| lower.strip_prefix("solve"))?
+        .trim()
+        .trim_end_matches(['?', ' '])
+        .trim();
+    let (lhs, rhs) = body.split_once('=')?;
+    if rhs.contains('=') || !body.contains('x') {
+        return None;
+    }
+    let (a1, b1) = linear_side(lhs)?;
+    let (a2, b2) = linear_side(rhs)?;
+    let eq = format!("{} = {}", lhs.trim(), rhs.trim());
+    let (a, b) = (a1 - a2, b2 - b1);
+    if a == 0.0 {
+        return Some(if b == 0.0 {
+            format!("{eq}  =>  true for every x (infinitely many solutions)")
+        } else {
+            format!("{eq}  =>  no solution")
+        });
+    }
+    Some(format!("{eq}  =>  x = {}", fmt_num(b / a)))
+}
+
+/// Parse one side of a linear equation into (x_coefficient, constant).
+/// Terms: numbers, kx, k*x, x, -x; joined by + or -. Anything else is not
+/// linear-for-us and is refused.
+fn linear_side(s: &str) -> Option<(f64, f64)> {
+    let s = s.replace(' ', "");
+    if s.is_empty()
+        || !s
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | '*' | 'x'))
+    {
+        return None;
+    }
+    // split into signed terms without regex
+    let mut terms: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if (c == '+' || c == '-') && i > 0 {
+            terms.push(std::mem::take(&mut cur));
+        }
+        cur.push(c);
+    }
+    terms.push(cur);
+    let (mut a, mut b) = (0.0, 0.0);
+    for term in terms {
+        if term.is_empty() || term == "+" || term == "-" {
+            return None;
+        }
+        let (sign, t) = match term.strip_prefix('-') {
+            Some(r) => (-1.0, r),
+            None => (1.0, term.strip_prefix('+').unwrap_or(&term)),
+        };
+        if let Some(coeff) = t.strip_suffix('x') {
+            let k = if coeff.is_empty() {
+                1.0
+            } else if let Some(c) = coeff.strip_suffix('*') {
+                c.parse().ok()?
+            } else {
+                coeff.parse().ok()?
+            };
+            a += sign * k;
+        } else {
+            b += sign * t.parse::<f64>().ok()?;
+        }
+    }
+    Some((a, b))
 }
 
 fn fmt_num(v: f64) -> String {
@@ -251,6 +344,20 @@ mod tests {
         assert_eq!(a("delete the folder called math"), None);
         assert_eq!(a("what is the weather"), None);
         assert_eq!(a("how much is my folder worth"), None);
+    }
+
+    #[test]
+    fn solve_linear_equations() {
+        assert_eq!(a("solve 2x + 4 = 10").as_deref(), Some("2x + 4 = 10  =>  x = 3"));
+        assert_eq!(a("solve for x: 3x - 9 = 0").as_deref(), Some("3x - 9 = 0  =>  x = 3"));
+        assert_eq!(a("solve x + 5 = 2x - 3").as_deref(), Some("x + 5 = 2x - 3  =>  x = 8"));
+        assert_eq!(a("solve 2x = 2x").as_deref(), Some("2x = 2x  =>  true for every x (infinitely many solutions)"));
+        assert_eq!(a("solve 2x + 1 = 2x + 5").as_deref(), Some("2x + 1 = 2x + 5  =>  no solution"));
+        // not linear: plain refusal, never model-guessed
+        assert_eq!(
+            a("solve x^2 = 4").as_deref(),
+            Some("I can only solve linear equations in x so far (like \"solve 2x + 4 = 10\").")
+        );
     }
 
     #[test]
