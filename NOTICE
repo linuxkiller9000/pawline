@@ -1,0 +1,15 @@
+Pawline includes third-party components:
+
+Needle3 model weights (needle3.cact)
+  Source: https://huggingface.co/Cactus-Compute/needle3
+  License: Apache License 2.0
+
+cactus runtime, prebuilt static library (libcactus.a)
+  Source: https://github.com/cactus-compute/cactus
+  License: Apache License 2.0
+  Note: the cactus *engine source repository*
+  (https://github.com/cactus-compute/engine) is under a restricted
+  license; only the prebuilt Apache-2.0 binaries are used here.
+
+Both are used under the terms of the Apache License, Version 2.0
+(http://www.apache.org/licenses/LICENSE-2.0).
