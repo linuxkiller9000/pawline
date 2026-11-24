@@ -48,7 +48,12 @@ fn wikipedia_summary(query: &str) -> Result<String, PawError> {
     let v = get_json(&url)?;
     if let Some(extract) = v.get("extract").and_then(|e| e.as_str()) {
         let title = v.get("title").and_then(|t| t.as_str()).unwrap_or(query);
-        return Ok(format!("Wikipedia - {title}: {extract}"));
+        let link = v
+            .pointer("/content_urls/desktop/page")
+            .and_then(|u| u.as_str())
+            .map(|u| format!("\nSource: {u}"))
+            .unwrap_or_default();
+        return Ok(format!("Wikipedia - {title}: {extract}{link}"));
     }
     Ok(format!("Wikipedia has no article summary for \"{query}\"."))
 }
@@ -62,7 +67,13 @@ fn duckduckgo_instant(query: &str) -> Result<String, PawError> {
     for key in ["AbstractText", "Answer"] {
         if let Some(t) = v.get(key).and_then(|t| t.as_str()) {
             if !t.is_empty() {
-                return Ok(t.to_string());
+                let link = v
+                    .get("AbstractURL")
+                    .and_then(|u| u.as_str())
+                    .filter(|u| !u.is_empty())
+                    .map(|u| format!("\nSource: {u}"))
+                    .unwrap_or_default();
+                return Ok(format!("{t}{link}"));
             }
         }
     }
