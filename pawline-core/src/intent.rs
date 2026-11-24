@@ -165,6 +165,25 @@ fn split_clauses(s: &str) -> Vec<&str> {
 
 fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawError> {
     let lower = cmd.to_lowercase();
+    for (pre, engine) in [
+        ("search the web for ", crate::plan::SearchEngine::Web),
+        ("search online for ", crate::plan::SearchEngine::Web),
+        ("web search ", crate::plan::SearchEngine::Web),
+        ("search wikipedia for ", crate::plan::SearchEngine::Wiki),
+        ("wikipedia ", crate::plan::SearchEngine::Wiki),
+        ("wiki ", crate::plan::SearchEngine::Wiki),
+    ] {
+        if let Some(q) = lower.strip_prefix(pre) {
+            let q = q.trim().trim_end_matches(['?', ' ']).trim();
+            if !q.is_empty() {
+                return Ok(Directive::Search {
+                    engine,
+                    query: q.to_string(),
+                });
+            }
+        }
+    }
+    let lower = cmd.to_lowercase();
     let first = lower.split_whitespace().next().unwrap_or("");
 
     if CREATE_VERBS.contains(&first) || lower.starts_with("create ") || lower.starts_with("make ") {

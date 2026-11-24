@@ -9,6 +9,15 @@ pub enum CreateKind {
     File { ext_hint: Option<String> },
 }
 
+/// Which online source an explicit search uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchEngine {
+    /// DuckDuckGo instant answers.
+    Web,
+    /// Wikipedia article summary.
+    Wiki,
+}
+
 /// One parsed directive before paths are resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Directive {
@@ -22,6 +31,9 @@ pub enum Directive {
     /// A side-effect-free computed answer (deterministic math). Never
     /// touches disk, never needs confirmation.
     Answer { text: String },
+    /// An explicit online search the user asked for by name. Sends the
+    /// query to the named source and shows the result; no local effects.
+    Search { engine: SearchEngine, query: String },
 }
 
 /// A place the user pointed at, before resolution against the session context.
@@ -53,6 +65,7 @@ pub enum Operation {
     List { path: PathBuf },
     OpenApp { name: String },
     Answer { text: String },
+    Search { engine: SearchEngine, query: String },
 }
 
 impl Operation {
@@ -69,6 +82,10 @@ impl Operation {
             Operation::List { path } => format!("List {}", path.display()),
             Operation::OpenApp { name } => format!("Open {name}"),
             Operation::Answer { text } => text.clone(),
+            Operation::Search { engine, query } => match engine {
+                SearchEngine::Web => format!("Search the web for \"{query}\""),
+                SearchEngine::Wiki => format!("Search Wikipedia for \"{query}\""),
+            },
         }
     }
 

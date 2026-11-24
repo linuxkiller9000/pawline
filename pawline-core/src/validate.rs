@@ -257,6 +257,10 @@ impl Validator {
                 }
                 Directive::OpenApp { name } => ops.push(Operation::OpenApp { name: name.clone() }),
                 Directive::Answer { text } => ops.push(Operation::Answer { text: text.clone() }),
+                Directive::Search { engine, query } => ops.push(Operation::Search {
+                    engine: *engine,
+                    query: query.clone(),
+                }),
             }
         }
 

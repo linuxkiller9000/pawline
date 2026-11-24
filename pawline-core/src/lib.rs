@@ -13,6 +13,7 @@ pub mod exec;
 pub mod intent;
 pub mod math;
 pub mod plan;
+pub mod search;
 pub mod validate;
 
 use assist::Assist;

@@ -3,7 +3,34 @@ use glib::object::ObjectType;
 use gtk::prelude::WidgetExt;
 use pawline_core::plan::Plan;
 use pawline_core::{Engine, Response};
-use pawline_core::exec::DirectFsBackend;
+use pawline_core::exec::{DirectFsBackend, ExecutionBackend, OpOutcome};
+use pawline_core::error::PawError;
+use pawline_core::plan::{Operation, SearchEngine};
+
+/// UI backend: confined fs execution plus the explicit online search the
+/// user asked for by name.
+struct UiBackend {
+    inner: DirectFsBackend,
+}
+
+impl ExecutionBackend for UiBackend {
+    fn execute(&self, op: &Operation) -> Result<OpOutcome, PawError> {
+        if let Operation::Search { engine, query } = op {
+            let text = pawline_core::search::run(*engine, query)?;
+            return Ok(OpOutcome {
+                op: op.clone(),
+                detail: text,
+            });
+        }
+        self.inner.execute(op)
+    }
+    fn name(&self) -> &'static str {
+        "ui"
+    }
+    fn search(&self, engine: SearchEngine, query: &str) -> Result<String, PawError> {
+        pawline_core::search::run(engine, query)
+    }
+}
 use pawline_needle::assist::NeedleAssist;
 use serde::Serialize;
 use tauri::Manager;
@@ -55,7 +82,7 @@ fn ui_state<'a>(app: &'a tauri::AppHandle) -> tauri::State<'a, Mutex<UiState>> {
 }
 
 fn handle_text(state: &mut UiState, input: &str) -> UiReply {
-    let backend = match DirectFsBackend::new(&state.root) {
+    let backend = match DirectFsBackend::new(&state.root).map(|inner| UiBackend { inner }) {
         Ok(b) => b,
         Err(e) => return reply("error", format!("backend: {e}")),
     };
@@ -79,7 +106,17 @@ fn handle_text(state: &mut UiState, input: &str) -> UiReply {
             {
                 done.join("\n")
             } else {
-                format!("Done:\n{}", done.join("\n"))
+                let lines: Vec<String> = ops
+                    .iter()
+                    .map(|o| match &o.op {
+                        pawline_core::plan::Operation::Search { .. }
+                        | pawline_core::plan::Operation::List { .. } => {
+                            format!("{}\n{}", o.op.describe(), o.detail)
+                        }
+                        _ => o.op.describe(),
+                    })
+                    .collect();
+                format!("Done:\n{}", lines.join("\n"))
             };
             reply("executed", body)
         }
@@ -126,7 +163,7 @@ fn confirm(app: tauri::AppHandle) -> UiReply {
         Some(p) => p,
         None => return reply("error", "Nothing waiting for confirmation.".into()),
     };
-    let backend = match DirectFsBackend::new(&state.root) {
+    let backend = match DirectFsBackend::new(&state.root).map(|inner| UiBackend { inner }) {
         Ok(b) => b,
         Err(e) => return reply("error", format!("backend: {e}")),
     };
@@ -138,7 +175,17 @@ fn confirm(app: tauri::AppHandle) -> UiReply {
             {
                 done.join("\n")
             } else {
-                format!("Done:\n{}", done.join("\n"))
+                let lines: Vec<String> = ops
+                    .iter()
+                    .map(|o| match &o.op {
+                        pawline_core::plan::Operation::Search { .. }
+                        | pawline_core::plan::Operation::List { .. } => {
+                            format!("{}\n{}", o.op.describe(), o.detail)
+                        }
+                        _ => o.op.describe(),
+                    })
+                    .collect();
+                format!("Done:\n{}", lines.join("\n"))
             };
             reply("executed", body)
         }

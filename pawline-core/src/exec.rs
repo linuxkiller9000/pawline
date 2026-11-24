@@ -24,8 +24,15 @@ pub struct OpOutcome {
 }
 
 pub trait ExecutionBackend {
+    /// Run an explicit online search. The fs backend has no network; UI
+    /// layers override this. Default: refused, never silently skipped.
     fn execute(&self, op: &Operation) -> Result<OpOutcome, PawError>;
     fn name(&self) -> &'static str;
+    fn search(&self, _engine: crate::plan::SearchEngine, _query: &str) -> Result<String, PawError> {
+        Err(PawError::Exec(
+            "online search is not available in this backend".into(),
+        ))
+    }
 }
 
 /// Real filesystem backend, confined to a root directory handle.
@@ -125,6 +132,13 @@ impl ExecutionBackend for DirectFsBackend {
                 op: op.clone(),
                 detail: text.clone(),
             }),
+            Operation::Search { engine, query } => {
+                let text = self.search(*engine, query)?;
+                Ok(OpOutcome {
+                    op: op.clone(),
+                    detail: text,
+                })
+            }
         }
     }
 }
