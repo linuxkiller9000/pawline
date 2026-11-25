@@ -318,7 +318,7 @@ impl App {
         let (w, h) = (self.w as f32, self.h as f32);
         fill(pm, &rrect(0.0, 0.0, w, h, 18.0), (30, 28, 40, 245));
         self.orb(pm, 34.0, 32.0, 17.0, self.busy);
-        let title = if !self.voice_status.is_empty() { format!("Pawline  ({})", self.voice_status) } else if self.busy { "Pawline  (thinking...)".to_string() } else { "Pawline".to_string() };
+        let title = if !self.voice_status.is_empty() { "Pawline".to_string() } else if self.busy { "Pawline  (thinking...)".to_string() } else { "Pawline".to_string() };
         self.text(pm, &title, 62.0, 38.0, 18.0, (235, 230, 250), (0.0, h));
         // collapse button
         self.r_collapse = (w - 44.0, 14.0, 30.0, 30.0);
@@ -414,7 +414,11 @@ impl App {
             y += bh + 8.0;
         }
         pm.draw_pixmap(0, top as i32, cp.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
-        if self.chat_max > 0.0 && self.scroll < self.chat_max - 1.0 {
+        if !self.voice_status.is_empty() {
+            // fitted status row under the title (listening / downloading / Esc hint)
+            let st = self.voice_status.clone();
+            self.text(pm, &st, PAD + 6.0, top - 4.0, 12.0, (250, 220, 140), (0.0, h));
+        } else if self.chat_max > 0.0 && self.scroll < self.chat_max - 1.0 {
             // in the free band under the title, so it never covers message text
             self.text(pm, "^ older messages above (PageUp / wheel)", PAD + 6.0, top - 4.0, 12.0, (190, 185, 215), (0.0, h));
         }
@@ -1018,9 +1022,9 @@ fn need_model_text() -> String {
     let p = &pawline_voice::download::EN_TINY;
     let mb = p.total_bytes() as f64 / 1e6;
     format!(
-        "Voice needs a speech model. Download it now?\n\nModel: {} (English)\nFrom: {}\nSize: {:.1} MB (about {:.0} MB free space needed)\nSaved to: {}\n\nEach file is checked against a fixed checksum and installed only if all pass. If a check fails, you cancel (Esc) or you close Pawline, nothing usable is kept; leftovers are deleted on the next try. {}Nothing downloads unless you choose Download. To remove it later, delete that folder.",
+        "Voice needs a speech model. Download it now?\n\nModel: {} (English)\nFrom: {}\nSize: {:.1} MB (about {:.0} MB of additional free space; not checked in advance)\nSaved to: {}\n\nEach file is checked against a fixed checksum and installed only if all pass. If a check fails, you cancel (Esc) or you close Pawline, nothing usable is kept; leftovers are deleted on the next try. {}Nothing downloads unless you choose Download. To remove it later, delete that folder.",
         p.id, p.host(), mb, mb.ceil(), voice_cfg::model_dir().display(),
-        if voice_cfg::model_dir().exists() { "A model already there failed its check; it is replaced only after the new one passes. " } else { "" }
+        if voice_cfg::model_dir().exists() { "A model already there failed its check; it stays until the new one passes, so both take space briefly. " } else { "" }
     )
 }
 
@@ -1053,16 +1057,11 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
                         let _ = b2.send(bridge::reply("dl-progress", format!("downloading speech model {:.0} / {:.0} MB", d as f64 / 1e6, t as f64 / 1e6)));
                     }
                 });
-                match r {
-                    Err(e) => bridge::reply("voice-error", format!("Model download stopped: {e}. Nothing was kept.")),
-                    Ok(()) if c.load(std::sync::atomic::Ordering::SeqCst) => {
-                        // Cancel arrived after the last file finished. Cancel wins: voice stays off.
-                        if !had_model {
-                            let _ = std::fs::remove_dir_all(voice_cfg::model_dir());
-                        }
-                        bridge::reply("voice-error", "Download cancelled. Voice stays off and the new model was not kept.".into())
-                    }
-                    Ok(()) => match voice_runtime() {
+                use pawline_voice::download::{settle, Settled};
+                match settle(r, c.load(std::sync::atomic::Ordering::SeqCst), had_model, &voice_cfg::model_dir()) {
+                    Settled::Failed(e) => bridge::reply("voice-error", format!("Model download stopped: {e}. Nothing was kept.")),
+                    Settled::CancelledLate => bridge::reply("voice-error", "Download cancelled. Voice stays off and the new model was not kept.".into()),
+                    Settled::Proceed => match voice_runtime() {
                         Ok(rt) => {
                             vrt = Some(rt);
                             bridge::reply("voice-ready", "Model downloaded and verified. Voice is on. Hold F9 and talk, release to get a transcript to review. F8 turns it off. Audio stays in memory and is not saved.".into())

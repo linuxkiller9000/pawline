@@ -169,6 +169,28 @@ fn fetch_all(pin: &ModelPin, base: &str, stage: &Path, cancel: &AtomicBool, prog
     Ok(())
 }
 
+/// What the app does once `download_model` returned. Cancel always wins: a
+/// download that finished after the user cancelled is discarded (unless a
+/// verified copy existed before, which is never deleted) and voice stays off.
+#[derive(Debug, PartialEq)]
+pub enum Settled {
+    Failed(String),
+    CancelledLate,
+    Proceed,
+}
+pub fn settle(result: Result<(), VoiceError>, cancelled: bool, had_model: bool, dest: &Path) -> Settled {
+    match result {
+        Err(e) => Settled::Failed(e.to_string()),
+        Ok(()) if cancelled => {
+            if !had_model {
+                let _ = fs::remove_dir_all(dest);
+            }
+            Settled::CancelledLate
+        }
+        Ok(()) => Settled::Proceed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,5 +347,23 @@ mod tests {
     fn real_en_pin_totals_match_published_size() {
         assert_eq!(EN_TINY.total_bytes(), 45_398_523);
         assert_eq!(EN_TINY.host(), "download.moonshine.ai");
+    }
+    #[test]
+    fn late_cancel_discards_new_model_but_never_a_preexisting_one() {
+        let d = data();
+        let pin = mk(&d);
+        let t = tmp("late");
+        let dest = t.join("models/en");
+        download_inner(pin, &served(&d, false), &dest, &AtomicBool::new(false), &|_, _| {}, false).unwrap();
+        // finished OK, cancel arrived afterwards, no model before: removed
+        assert_eq!(settle(Ok(()), true, false, &dest), Settled::CancelledLate);
+        assert!(!dest.exists());
+        // a verified model existed before: kept, voice still not enabled
+        download_inner(pin, &served(&d, false), &dest, &AtomicBool::new(false), &|_, _| {}, false).unwrap();
+        assert_eq!(settle(Ok(()), true, true, &dest), Settled::CancelledLate);
+        assert!(verify_dir(pin, &dest));
+        // no cancel: proceed; an error is reported as failed
+        assert_eq!(settle(Ok(()), false, false, &dest), Settled::Proceed);
+        assert!(matches!(settle(Err(VoiceError::Model("x".into())), false, false, &dest), Settled::Failed(_)));
     }
 }
