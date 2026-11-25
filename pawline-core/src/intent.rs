@@ -312,7 +312,7 @@ fn small_talk(lower: &str) -> Option<String> {
     const HELLO: &[&str] = &["hello", "hi", "hey", "hiya", "yo", "good morning", "good evening", "good afternoon", "hello there", "hi there", "hey there", "salam", "assalamu alaikum"];
     const THANKS: &[&str] = &["thanks", "thank you", "thx", "ty"];
     const HELP: &[&str] = &["help", "what can you do", "what do you do", "how do i use this", "how does this work", "commands", "examples"];
-    const HELP_TEXT: &str = "I can:\n- make files and folders: make a folder called kitten paws\n- delete, rename, move, copy and list them (deleting and moving ask first)\n- open an installed app: open mpv (I show the exact command and ask first)\n- set a wallpaper: set wallpaper to ~/Pictures/a.png\n- search: search for what is a cat, or search wikipedia for cats\n- simple math: what is 12 * 7\n- undo the last change: undo\nI can't generate images or chat in depth yet.";
+    const HELP_TEXT: &str = "I can:\n- make files and folders: make a folder called kitten paws\n- delete, rename, move, copy and list them (deleting and moving ask first)\n- open an installed app: open mpv (I show the exact command and ask first)\n- set a wallpaper: set wallpaper to ~/Pictures/a.png\n- search: search for what is a cat, or search wikipedia for cats\n- simple math: what is 12 * 7\n- undo the last change: undo\nTips: Ctrl+C / Ctrl+V copy and paste, click a reply to copy it.\nI can't generate images or chat in depth yet.";
     if HELLO.contains(&t.as_str()) {
         return Some("Hi! I can work with files and folders, open apps, search and do math. Say \"help\" for examples.".into());
     }

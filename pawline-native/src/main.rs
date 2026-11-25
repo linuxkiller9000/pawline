@@ -1079,7 +1079,7 @@ fn main() {
         dragging: false,
         bubbles: Vec::new(),
         toast: None,
-        msgs: vec![Msg { user: false, kind: "message".into(), text: "Hi, I am Pawline. Try: make a folder called kitten paws".into() }],
+        msgs: vec![Msg { user: false, kind: "message".into(), text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it.".into() }],
         confirm: None,
         focus: Btn::No,
         scroll: 0.0,
