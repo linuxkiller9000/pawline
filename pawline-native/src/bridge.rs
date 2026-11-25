@@ -142,6 +142,9 @@ pub struct UiState {
     pub carried: std::time::Duration,
     /// Commands a chooser pick may have filled in; the next input equal to one of them always shows a confirmation.
     pub picks: Vec<String>,
+    /// Steps of an organize plan waiting for a yes, and of the last organize that ran (for "undo organize"). Memory only.
+    pub organize_pending: Option<usize>,
+    pub undo_batch: Option<usize>,
 }
 
 pub fn startup_notes_from(root: &std::path::Path) -> Vec<String> {
@@ -271,6 +274,9 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
         }
         return r;
     }
+    if let Some(r) = organize_command(state, input) {
+        return r;
+    }
     if let Some((text_search, q)) = pawline_core::finder::parse(input) {
         // Pawline's own data folder is never searched, besides the journal store the scope always leaves out.
         let own_dir: Vec<std::path::PathBuf> = pawline_core::searchmem::default_path().and_then(|p| p.parent().map(|d| d.to_path_buf())).into_iter().collect();
@@ -386,6 +392,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     }
     match r {
         Ok(Response::Executed(ops)) => {
+            state.undo_batch = None; // anything else that ran since an organize means "undo organize" is no longer the last thing
             let done: Vec<String> = ops.iter().map(|o| o.op.describe()).collect();
             if let Some(p) = pawline_core::dirs::own_path() {
                 pawline_core::dirs::record_own(&p, &folders_of(&ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>()), pawline_core::searchmem::now_secs());
@@ -465,6 +472,7 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
         None => return reply("error", "Nothing waiting for confirmation.".into()),
     };
     let request = state.pending_request.take();
+    let organize_n = state.organize_pending.take();
     let backend = match DirectFsBackend::new(&state.root).map(|inner| UiBackend { inner }) {
         Ok(b) => b,
         Err(e) => return reply("error", format!("backend: {e}")),
@@ -472,6 +480,7 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
     state.notes.extend(backend.inner.recovery_notes().iter().cloned());
     match state.engine.execute_plan(plan, &backend) {
         Ok(Response::Executed(ops)) => {
+            state.undo_batch = organize_n;
             // Recorded only after the confirmed plan fully succeeded (cancelled and failed plans arrive as Failed).
             if let Some(p) = pawline_core::dirs::own_path() {
                 pawline_core::dirs::record_own(&p, &folders_of(&ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>()), pawline_core::searchmem::now_secs());
@@ -513,6 +522,8 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
     let notes = startup_notes_from(&root);
     UiState {
         picks: vec![],
+        organize_pending: None,
+        undo_batch: None,
         carried: std::time::Duration::ZERO,
         engine: Engine::new(root.clone()),
         root,
@@ -524,10 +535,89 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
     }
 }
 
+/// "organize <place>": plan moves of the loose files into type folders and ask. "undo organize" reverses the last one that ran.
+fn organize_command(state: &mut UiState, input: &str) -> Option<UiReply> {
+    let low = input.trim().trim_end_matches(['.', '!']).to_lowercase();
+    if matches!(low.as_str(), "undo organize" | "undo the organize" | "undo organizing" | "undo all") {
+        let Some(n) = state.undo_batch.take() else {
+            return Some(reply("message", "I only remember the last organize in this session, and there is none to undo. Say \"undo\" to undo the last single step.".into()));
+        };
+        let backend = match DirectFsBackend::new(&state.root).map(|inner| UiBackend { inner }) {
+            Ok(b) => b,
+            Err(e) => return Some(reply("error", format!("backend: {e}"))),
+        };
+        let mut done = 0;
+        for _ in 0..n {
+            // Each step is the journal's own reverse of one organize step; the whole batch was reviewed when it ran.
+            match state.engine.handle_with("undo", &backend, false, None) {
+                Ok(Response::Executed(_)) => done += 1,
+                Ok(Response::Confirm(plan)) => match state.engine.execute_plan(plan, &backend) {
+                    Ok(Response::Executed(_)) => done += 1,
+                    _ => break,
+                },
+                _ => break,
+            }
+        }
+        return Some(if done == n {
+            reply("message", format!("Undid the organize: {done} step(s) put back."))
+        } else {
+            reply("failed", format!("Undid {done} of {n} steps, then stopped. Say \"undo\" to continue one step at a time."))
+        });
+    }
+    if low == "undo" || low.starts_with("undo ") {
+        state.undo_batch = None; // a single undo or any other undo changes what "the last organize" would reverse
+    }
+    let words = pawline_core::organize::parse(input)?;
+    {
+        let hints = match pawline_core::dirs::own_path() {
+            Some(own) => pawline_core::dirs::ranked(pawline_core::dirs::zoxide_ranked(), &own, pawline_core::searchmem::now_secs(), "").1.into_iter().map(|r| r.path).collect(),
+            None => vec![],
+        };
+        state.engine.set_dir_hints(hints);
+    }
+    let folder = match state.engine.resolve_place(&words) {
+        Ok(Some(f)) => f,
+        Ok(None) => return Some(reply("message", format!("I found no folder for \"{words}\". Say the full path, for example \"organize /path/to/folder\". Nothing was changed."))),
+        Err(PawError::Ambiguous { words: w, choices }) => {
+            let rows: Vec<String> = choices.iter().map(|c| format!("{}\torganize {}", c.display(), c.display())).collect();
+            let list = choices.iter().enumerate().map(|(k, c)| format!("{}. {}", k + 1, c.display())).collect::<Vec<_>>().join("\n");
+            state.picks = rows.iter().filter_map(|r| r.split_once('\t').map(|x| x.1.to_string())).collect();
+            let mut out = reply("message", format!("Which folder do you mean by \"{w}\"?\n{list}\nPick one (click, or Up/Down then Tab), then press Enter. You will see every move first. Nothing is changed yet."));
+            out.plan = Some(rows.join("\n"));
+            return Some(out);
+        }
+        Err(e) => return Some(reply("failed", e.to_string())),
+    };
+    let o = match pawline_core::organize::plan(&folder) {
+        Ok(o) => o,
+        Err(e) => return Some(reply("failed", e)),
+    };
+    let moves = o.ops.iter().filter(|p| matches!(p, Operation::Move { .. })).count();
+    if moves == 0 {
+        let extra = if o.notes.is_empty() { String::new() } else { format!("\n{}", o.notes.join("\n")) };
+        return Some(reply("message", format!("Nothing to organize in {}: no loose files of a known type.{extra}", folder.display())));
+    }
+    let n = o.ops.len();
+    let summary = o.ops.iter().enumerate().map(|(i, p)| format!("{}. {}", i + 1, p.describe())).collect::<Vec<_>>().join("\n");
+    let plan = Plan {
+        ops: o.ops,
+        needs_confirmation: true,
+        confirmation_reasons: vec![format!("This moves {moves} file(s) inside {}. Nothing is deleted or overwritten. Check the list before saying yes.", folder.display())],
+        assist_derived: false,
+        notes: o.notes.clone(),
+    };
+    state.pending = Some(plan);
+    state.pending_request = Some(input.trim().to_string());
+    state.organize_pending = Some(n);
+    let notes = if o.notes.is_empty() { String::new() } else { format!("\n{}", o.notes.join("\n")) };
+    Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\nOrganize {}: move {moves} file(s) into type folders.\n{summary}{notes}", folder.display()), plan: Some(summary) })
+}
+
 pub fn cancel(state: &mut UiState) -> UiReply {
     state.carried = std::time::Duration::ZERO;
     state.pending = None;
     state.pending_request = None;
+    state.organize_pending = None;
     reply("message", "Cancelled. Nothing was done.".into())
 }
 
@@ -627,6 +717,77 @@ mod memory_tests {
         assert!(!remember_steps(&p, "empty", &[], 1));
         assert_eq!(pawline_core::planmem::load(&p).len(), 1);
         assert!(!remember_steps(&p, "my password is abc make x", &[dir], 1));
+    }
+
+    fn org_root(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("pawline-org-bridge-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("Downloads")).unwrap();
+        for f in ["a.png", "b.pdf", "c.mp4", "x.unknown"] {
+            std::fs::write(d.join("Downloads").join(f), f).unwrap();
+        }
+        std::fs::canonicalize(&d).unwrap()
+    }
+
+    #[test]
+    fn organize_previews_every_move_cancels_cleanly_and_runs_then_undoes() {
+        let root = org_root("flow");
+        let dl = root.join("Downloads");
+        let mut st = new_state(root.clone());
+        // preview: every move listed, nothing touched
+        let r = handle_text(&mut st, "organize my downloads");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        for want in ["Create folder", "Images/a.png", "Documents/b.pdf", "Videos/c.mp4"] {
+            assert!(r.text.contains(want), "{want}: {}", r.text);
+        }
+        assert!(!r.text.contains("x.unknown") || r.text.contains("stay where they are"));
+        assert!(dl.join("a.png").exists() && !dl.join("Images").exists());
+        // cancel: nothing happens and nothing is pending
+        let c = cancel(&mut st);
+        assert!(c.text.contains("Nothing was done") && st.pending.is_none() && st.organize_pending.is_none());
+        assert!(dl.join("a.png").exists() && !dl.join("Images").exists());
+        // yes: runs
+        let r = handle_text(&mut st, "organize my downloads");
+        assert_eq!(r.kind, "confirm");
+        let done = confirm_exec(&mut st);
+        assert!(done.text.contains("Done"), "{}", done.text);
+        assert!(dl.join("Images/a.png").is_file() && dl.join("Documents/b.pdf").is_file() && dl.join("Videos/c.mp4").is_file());
+        assert!(dl.join("x.unknown").is_file() && !dl.join("a.png").exists());
+        assert!(st.undo_batch.is_some());
+        // undo organize: everything back, originals intact
+        let u = handle_text(&mut st, "undo organize");
+        assert!(u.text.contains("Undid the organize"), "{}", u.text);
+        for f in ["a.png", "b.pdf", "c.mp4", "x.unknown"] {
+            assert_eq!(std::fs::read_to_string(dl.join(f)).unwrap(), f);
+        }
+        assert!(!dl.join("Images").exists(), "folders it made are removed again");
+    }
+
+    #[test]
+    fn organize_collision_and_unknown_folder_and_ambiguity() {
+        let root = org_root("edge");
+        let dl = root.join("Downloads");
+        std::fs::create_dir_all(dl.join("Images")).unwrap();
+        std::fs::write(dl.join("Images/a.png"), "OLD").unwrap();
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "organize downloads");
+        assert_eq!(r.kind, "confirm");
+        assert!(r.text.contains("a.png stays") && !r.text.contains("Move") || !r.text.contains("Images/a.png to"), "{}", r.text);
+        let _ = confirm_exec(&mut st);
+        assert_eq!(std::fs::read_to_string(dl.join("Images/a.png")).unwrap(), "OLD", "never overwritten");
+        assert!(dl.join("a.png").exists(), "the colliding original stays");
+        // a folder that does not exist: a plain message, nothing planned
+        let r = handle_text(&mut st, "organize nonesuch");
+        assert!(r.kind == "message" && r.text.contains("no folder") && st.pending.is_none(), "{}", r.text);
+        // two folders with the same name: ask, offer both, never pick
+        std::fs::create_dir_all(root.join("a/Pics")).unwrap();
+        std::fs::create_dir_all(root.join("b/Pics")).unwrap();
+        std::fs::write(root.join("a/Pics/z.png"), "z").unwrap();
+        std::fs::write(root.join("b/Pics/y.png"), "y").unwrap();
+        st.engine.set_dir_hints(vec![root.join("a/Pics"), root.join("b/Pics")]);
+        // hints are rebuilt per request from zoxide/own data, so exercise the engine call directly
+        assert!(matches!(st.engine.resolve_place("pics"), Err(PawError::Ambiguous { .. })));
+        assert!(root.join("a/Pics/z.png").exists() && root.join("b/Pics/y.png").exists());
     }
 
     #[test]

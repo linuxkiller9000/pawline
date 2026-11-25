@@ -17,6 +17,7 @@ pub mod imagegen;
 pub mod intent;
 pub mod journal;
 pub mod math;
+pub mod organize;
 pub mod plan;
 pub mod planmem;
 pub mod search;
@@ -120,6 +121,27 @@ impl Engine {
     /// Next requests always wait for a yes (they came from a chooser pick).
     pub fn set_force_confirm(&mut self, on: bool) {
         self.validator.force_confirm.set(on);
+    }
+
+    /// A folder named in words (home child, session folder, or a remembered one), confined to the home area.
+    pub fn resolve_place(&self, words: &str) -> Result<Option<std::path::PathBuf>, PawError> {
+        let direct = self.ctx.resolve_named(words).or_else(|| Some(self.validator.root().join(words)).filter(|p| p.is_dir()));
+        if let Some(p) = direct.and_then(|p| std::fs::canonicalize(p).ok()).filter(|p| p.is_dir() && p.starts_with(self.validator.root())) {
+            return Ok(Some(p));
+        }
+        // "downloads" for ~/Downloads: a folder directly in home, ignoring case; several that differ only by case: ask
+        let want = words.trim().to_lowercase();
+        let root = self.validator.root();
+        let mut same: Vec<std::path::PathBuf> = std::fs::read_dir(root)
+            .map(|rd| rd.flatten().filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false) && e.file_name().to_string_lossy().to_lowercase() == want).map(|e| e.path()).collect())
+            .unwrap_or_default();
+        same.sort();
+        match same.len() {
+            1 => return Ok(std::fs::canonicalize(&same[0]).ok().filter(|p| p.starts_with(root))),
+            n if n > 1 => return Err(PawError::Ambiguous { words: words.trim().to_string(), choices: same }),
+            _ => {}
+        }
+        self.validator.find_place_pub(words, &self.ctx)
     }
 
     pub fn set_dir_hints(&mut self, hints: Vec<std::path::PathBuf>) {

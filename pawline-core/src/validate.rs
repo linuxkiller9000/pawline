@@ -148,6 +148,12 @@ impl Validator {
         }
     }
 
+    pub fn find_place_pub(&self, words: &str, ctx: &ContextManager) -> Result<Option<PathBuf>, PawError> {
+        let r = self.find_place(words, ctx);
+        self.hint_notes.borrow_mut().clear();
+        r
+    }
+
     fn split_in_destination(&self, names: &[String], parent: &LocationRef, ctx: &ContextManager) -> Result<(Vec<String>, Option<PathBuf>), PawError> {
         if self.literal_names.get() || !matches!(parent, LocationRef::CurrentDir) || names.len() != 1 {
             return Ok((names.to_vec(), None));
