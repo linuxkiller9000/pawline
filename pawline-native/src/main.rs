@@ -8,7 +8,13 @@ use bridge::UiReply;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,
-    delegate_registry, delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_window,
+    data_device_manager::{
+        data_device::{DataDevice, DataDeviceHandler},
+        data_offer::{DataOfferHandler, DragOffer},
+        data_source::{CopyPasteSource, DataSourceHandler},
+        DataDeviceManagerState, WritePipe,
+    },
+    delegate_data_device, delegate_registry, delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     reexports::{
         calloop::{self, channel, EventLoop},
@@ -90,6 +96,11 @@ struct App {
     pool: SlotPool,
     surf: Surf,
     qh: QueueHandle<App>,
+    ddm: Option<DataDeviceManagerState>,
+    ddev: Option<DataDevice>,
+    csrc: Option<CopyPasteSource>,
+    clip_text: String,
+    serial: u32,
     kb: Option<wl_keyboard::WlKeyboard>,
     ptr: Option<wl_pointer::WlPointer>,
     w: u32,
@@ -542,6 +553,33 @@ impl App {
                 }
                 self.draw();
             }
+            Keysym::c | Keysym::C if self.ctrl => {
+                // Ctrl+C: selected input text; with nothing typed or selected (or Shift held), the last result.
+                let text = if self.shift || self.input.is_blank() {
+                    self.last_result_text().unwrap_or_default()
+                } else {
+                    self.input.copy_text()
+                };
+                if !text.is_empty() {
+                    self.clip_copy(text);
+                }
+            }
+            Keysym::x | Keysym::X if self.ctrl => {
+                if !self.input.is_blank() {
+                    let t = self.input.cut();
+                    self.clip_copy(t);
+                    self.draw();
+                }
+            }
+            Keysym::v | Keysym::V | Keysym::Insert if self.ctrl || (self.shift && e.keysym == Keysym::Insert) => {
+                if !self.busy {
+                    if let Some(t) = self.clip_paste() {
+                        // inserted as sanitised text only; never submits anything
+                        self.input.insert(&t);
+                    }
+                }
+                self.draw();
+            }
             Keysym::a | Keysym::A if self.ctrl => {
                 self.input.select_all();
                 self.draw();
@@ -640,6 +678,9 @@ impl SeatHandler for App {
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, cap: Capability) {
         if cap == Capability::Keyboard && self.kb.is_none() {
             self.kb = self.seat.get_keyboard(qh, &seat, None).ok();
+            if let (Some(m), None) = (&self.ddm, &self.ddev) {
+                self.ddev = Some(m.get_data_device(qh, &seat));
+            }
         }
         if cap == Capability::Pointer && self.ptr.is_none() {
             self.ptr = self.seat.get_pointer(qh, &seat).ok();
@@ -658,9 +699,12 @@ impl SeatHandler for App {
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
 }
 impl KeyboardHandler for App {
-    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32, _: &[u32], _: &[Keysym]) {}
+    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, serial: u32, _: &[u32], _: &[Keysym]) {
+        self.serial = serial;
+    }
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32) {}
-    fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, e: KeyEvent) {
+    fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, serial: u32, e: KeyEvent) {
+        self.serial = serial;
         self.key(e);
     }
     fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent) {}
@@ -684,6 +728,83 @@ impl PointerHandler for App {
         }
     }
 }
+const CLIP_MIMES: [&str; 5] = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "TEXT", "STRING"];
+const CLIP_MAX: u64 = 64 * 1024;
+
+impl DataDeviceHandler for App {
+    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice, _: f64, _: f64, _: &wl_surface::WlSurface) {}
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
+    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice, _: f64, _: f64) {}
+    fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
+    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
+}
+impl DataOfferHandler for App {
+    fn source_actions(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: wl_data_device_manager::DndAction) {}
+    fn selected_action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: wl_data_device_manager::DndAction) {}
+}
+impl DataSourceHandler for App {
+    fn accept_mime(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_source::WlDataSource, _: Option<String>) {}
+    fn send_request(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_source::WlDataSource, mime: String, fd: WritePipe) {
+        if !CLIP_MIMES.contains(&mime.as_str()) {
+            return;
+        }
+        let text = self.clip_text.clone();
+        // write off the UI thread so a slow reader can never freeze the window
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let mut fd = fd;
+            let _ = fd.write_all(text.as_bytes());
+        });
+    }
+    fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_source::WlDataSource) {
+        self.csrc = None;
+    }
+    fn dnd_dropped(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_source::WlDataSource) {}
+    fn dnd_finished(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_source::WlDataSource) {}
+    fn action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_source::WlDataSource, _: wl_data_device_manager::DndAction) {}
+}
+
+impl App {
+    /// Put text on the system clipboard (CLIPBOARD selection).
+    fn clip_copy(&mut self, text: String) -> bool {
+        let (Some(m), Some(dev)) = (&self.ddm, &self.ddev) else { return false };
+        let src = m.create_copy_paste_source(&self.qh, CLIP_MIMES);
+        src.set_selection(dev, self.serial);
+        self.csrc = Some(src);
+        self.clip_text = text;
+        true
+    }
+    /// Read text from the system clipboard. Never blocks the UI for more than half a second.
+    fn clip_paste(&mut self) -> Option<String> {
+        if self.csrc.is_some() {
+            // we own the selection: a self-read would wait on our own event loop
+            return Some(self.clip_text.clone());
+        }
+        let dev = self.ddev.as_ref()?;
+        let offer = dev.data().selection_offer()?;
+        let mime = offer.with_mime_types(|ms| CLIP_MIMES.iter().find(|m| ms.iter().any(|x| x == **m)).map(|m| m.to_string()))?;
+        let pipe = offer.receive(mime).ok()?;
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = pipe.take(CLIP_MAX).read_to_end(&mut buf);
+            let _ = tx.send(buf);
+        });
+        let buf = rx.recv_timeout(std::time::Duration::from_millis(500)).ok()?;
+        Some(String::from_utf8_lossy(&buf).into_owned())
+    }
+    /// Text of the latest reply, without the "Took" line.
+    fn last_result_text(&self) -> Option<String> {
+        let m = self.msgs.iter().rev().find(|m| !m.user)?;
+        let t = match m.text.rsplit_once("\nTook ") {
+            Some((a, b)) if b.ends_with('s') && b.len() < 8 => a.to_string(),
+            _ => m.text.clone(),
+        };
+        Some(t)
+    }
+}
+
 impl ShmHandler for App {
     fn shm_state(&mut self) -> &mut Shm {
         &mut self.shm
@@ -698,6 +819,7 @@ delegate_pointer!(App);
 delegate_layer!(App);
 delegate_xdg_shell!(App);
 delegate_xdg_window!(App);
+delegate_data_device!(App);
 delegate_registry!(App);
 impl ProvidesRegistryState for App {
     fn registry(&mut self) -> &mut RegistryState {
@@ -862,6 +984,11 @@ fn main() {
         pool,
         surf,
         qh: qh.clone(),
+        ddm: DataDeviceManagerState::bind(&globals, &qh).ok(),
+        ddev: None,
+        csrc: None,
+        clip_text: String::new(),
+        serial: 0,
         kb: None,
         ptr: None,
         w: COMPACT,
