@@ -381,7 +381,7 @@ impl ExecutionBackend for DirectFsBackend {
                 let detail = self.undo(*entry)?;
                 Ok(done(op, &detail))
             }
-            Operation::SetWallpaper { image, via } => {
+            Operation::SetWallpaper { image, via, no_backup_ok } => {
                 // Open beneath the root handle, check the OPEN file (not the
                 // path), then copy its bytes into Pawline's private store.
                 // The external tool only ever sees that copy.
@@ -440,6 +440,11 @@ impl ExecutionBackend for DirectFsBackend {
                     }
                 }
 
+                if previous.is_none() && !*no_backup_ok {
+                    return Err(PawError::Validation(
+                        "your current wallpaper can no longer be backed up, so I changed nothing; ask again ending with \"anyway\" to proceed without a backup".into(),
+                    ));
+                }
                 let journal = self.read_journal();
                 let id_hint = crate::journal::next_id(&journal);
                 let planned = format!(

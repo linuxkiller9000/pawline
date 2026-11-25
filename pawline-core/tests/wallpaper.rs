@@ -30,9 +30,9 @@ fn setup() -> (PathBuf, Engine, DirectFsBackend, Arc<Mutex<Vec<PathBuf>>>) {
 fn wallpaper_always_needs_confirmation_and_does_nothing_before() {
     let (root, mut e, be, log) = setup();
     for phrase in [
-        "set wallpaper to ~/Pictures/sunset.png",
-        "Change my background to Pictures/sunset.png",
-        "set ~/Pictures/sunset.png as my wallpaper",
+        "set wallpaper to ~/Pictures/sunset.png anyway",
+        "Change my background to Pictures/sunset.png anyway",
+        "set ~/Pictures/sunset.png as my wallpaper anyway",
     ] {
         match e.handle(phrase, &be, false).unwrap() {
             Response::Confirm(p) => {
@@ -47,7 +47,7 @@ fn wallpaper_always_needs_confirmation_and_does_nothing_before() {
 #[test]
 fn confirmed_wallpaper_runs_once_with_canonical_path() {
     let (root, mut e, be, log) = setup();
-    let plan = e.plan("set wallpaper to ~/Pictures/sunset.png").unwrap();
+    let plan = e.plan("set wallpaper to ~/Pictures/sunset.png anyway").unwrap();
     assert!(plan.needs_confirmation);
     match e.execute_plan(plan, &be).unwrap() {
         Response::Executed(o) => assert_eq!(o.len(), 1),
@@ -65,7 +65,7 @@ fn confirmed_wallpaper_runs_once_with_canonical_path() {
 #[test]
 fn swapping_the_original_after_the_copy_cannot_change_what_the_tool_sees() {
     let (root, mut e, be, log) = setup();
-    let plan = e.plan("set wallpaper to ~/Pictures/sunset.png").unwrap();
+    let plan = e.plan("set wallpaper to ~/Pictures/sunset.png anyway").unwrap();
     e.execute_plan(plan, &be).unwrap();
     std::fs::write(root.join("Pictures/sunset.png"), b"evil").unwrap();
     let got = log.lock().unwrap().clone();
@@ -80,7 +80,7 @@ fn undo_returns_to_previous_pawline_wallpaper_and_refuses_without_one() {
         let p = e.plan(s).unwrap();
         e.execute_plan(p, &be).unwrap()
     };
-    run(&mut e, "set wallpaper to ~/Pictures/sunset.png");
+    run(&mut e, "set wallpaper to ~/Pictures/sunset.png anyway");
     // only one change so far: nothing earlier to return to
     assert!(matches!(run(&mut e, "undo"), Response::Failed { .. }));
     run(&mut e, "set wallpaper to ~/Pictures/two.jpg");
@@ -94,7 +94,7 @@ fn undo_returns_to_previous_pawline_wallpaper_and_refuses_without_one() {
 #[test]
 fn using_clause_selects_adapter_and_unknown_names_are_refused() {
     let (_root, e, _be, _log) = setup();
-    let p = e.plan("set wallpaper to ~/Pictures/sunset.png using awww").unwrap();
+    let p = e.plan("set wallpaper to ~/Pictures/sunset.png using awww anyway").unwrap();
     assert!(p.summary().contains("using awww"), "{}", p.summary());
     assert!(e.plan("set wallpaper to ~/Pictures/sunset.png using feh").is_err());
 }
@@ -119,7 +119,7 @@ fn symlink_out_of_home_is_refused() {
 #[test]
 fn execution_rechecks_file_after_plan_swapped_to_dir() {
     let (root, mut e, be, log) = setup();
-    let plan = e.plan("set wallpaper to ~/Pictures/sunset.png").unwrap();
+    let plan = e.plan("set wallpaper to ~/Pictures/sunset.png anyway").unwrap();
     std::fs::remove_file(root.join("Pictures/sunset.png")).unwrap();
     std::fs::create_dir(root.join("Pictures/sunset.png")).unwrap();
     match e.execute_plan(plan, &be).unwrap() {
@@ -127,4 +127,30 @@ fn execution_rechecks_file_after_plan_swapped_to_dir() {
         _ => panic!("expected failure"),
     }
     assert!(log.lock().unwrap().is_empty());
+}
+
+#[test]
+fn without_a_known_previous_wallpaper_plain_request_is_refused_and_changes_nothing() {
+    let (root, mut e, be, log) = setup();
+    if pawline_core::wallpaper::current_swaybg_image().is_some() {
+        return; // a real swaybg on the test machine makes the previous wallpaper knowable
+    }
+    let err = e.plan("set wallpaper to ~/Pictures/sunset.png").unwrap_err().to_string();
+    assert!(err.contains("Nothing was changed") && err.contains("anyway"), "{err}");
+    assert!(e.handle("set wallpaper to ~/Pictures/sunset.png", &be, true).is_err());
+    assert!(log.lock().unwrap().is_empty());
+    assert!(!root.join(".local/share/pawline/wallpapers").exists());
+    // with the explicit acknowledgment the card carries the limitation
+    let p = e.plan("set wallpaper to ~/Pictures/sunset.png anyway").unwrap();
+    assert!(p.summary().contains("without a backup"), "{}", p.summary());
+}
+
+#[test]
+fn second_change_needs_no_acknowledgment() {
+    let (root, mut e, be, _log) = setup();
+    std::fs::write(root.join("Pictures/two.jpg"), b"y").unwrap();
+    let p = e.plan("set wallpaper to ~/Pictures/sunset.png anyway").unwrap();
+    e.execute_plan(p, &be).unwrap();
+    let p = e.plan("set wallpaper to ~/Pictures/two.jpg").unwrap();
+    assert!(!p.summary().contains("without a backup"));
 }

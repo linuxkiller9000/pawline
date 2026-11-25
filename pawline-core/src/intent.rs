@@ -404,7 +404,17 @@ fn parse_wallpaper(cmd: &str) -> Option<Result<Directive, PawError>> {
         return None;
     }
     let is_wp = |w: &str| matches!(w, "wallpaper" | "background" | "backdrop");
-    let words: Vec<&str> = cmd.split_whitespace().collect();
+    let mut words: Vec<&str> = cmd.split_whitespace().collect();
+    // Explicit acknowledgment that the current wallpaper cannot be backed up.
+    let mut no_backup_ok = false;
+    let joined = words.join(" ").to_lowercase();
+    for suffix in [" anyway", " without backup", " with no backup", " no backup"] {
+        if joined.ends_with(suffix) {
+            words.truncate(words.len() - suffix.split_whitespace().count());
+            no_backup_ok = true;
+            break;
+        }
+    }
     let lw: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
     // "<verb> [the|my] <wallpaper-word> [to] <path...>"
     let mut i = 1;
@@ -448,5 +458,5 @@ fn parse_wallpaper(cmd: &str) -> Option<Result<Directive, PawError>> {
     if target.is_empty() {
         return Some(Err(PawError::Parse("which picture should be the wallpaper?".into())));
     }
-    Some(Ok(Directive::SetWallpaper { image: name_to_location(target), via }))
+    Some(Ok(Directive::SetWallpaper { image: name_to_location(target), via, no_backup_ok }))
 }

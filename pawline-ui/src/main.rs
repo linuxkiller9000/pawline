@@ -64,6 +64,12 @@ struct UiState {
     pending: Option<Plan>,
     assist: Option<NeedleAssist>,
     assist_tried: bool,
+    /// Journal recovery findings not yet shown to the user.
+    notes: Vec<String>,
+}
+
+fn startup_notes_from(root: &std::path::Path) -> Vec<String> {
+    DirectFsBackend::new(root).map(|b| b.recovery_notes().to_vec()).unwrap_or_default()
 }
 
 #[derive(Serialize)]
@@ -86,6 +92,7 @@ fn handle_text(state: &mut UiState, input: &str) -> UiReply {
         Ok(b) => b,
         Err(e) => return reply("error", format!("backend: {e}")),
     };
+    state.notes.extend(backend.inner.recovery_notes().iter().cloned());
     // Lazily load the embedded model on first parser gap; if it fails,
     // Pawline stays parser-only.
     if !state.assist_tried {
@@ -152,13 +159,36 @@ fn send(app: tauri::AppHandle, text: String) -> UiReply {
     let st = ui_state(&app);
     let mut state = st.lock().unwrap();
     state.pending = None;
-    handle_text(&mut state, &text)
+    let r = handle_text(&mut state, &text);
+    with_notes(&mut state, r)
+}
+
+/// Put any journal recovery findings in front of the reply, once.
+fn with_notes(state: &mut UiState, mut r: UiReply) -> UiReply {
+    if !state.notes.is_empty() {
+        let n = state.notes.drain(..).collect::<Vec<_>>().join("\n");
+        r.text = format!("After an interrupted run I checked the undo journal:\n{n}\n\n{}", r.text);
+    }
+    r
+}
+
+/// Recovery findings from startup, shown when the window first loads.
+#[tauri::command]
+fn startup_notes(app: tauri::AppHandle) -> Vec<String> {
+    let st = ui_state(&app);
+    let mut state = st.lock().unwrap();
+    state.notes.drain(..).collect()
 }
 
 #[tauri::command]
 fn confirm(app: tauri::AppHandle) -> UiReply {
     let st = ui_state(&app);
     let mut state = st.lock().unwrap();
+    let r = confirm_inner(&mut state);
+    with_notes(&mut state, r)
+}
+
+fn confirm_inner(state: &mut UiState) -> UiReply {
     let plan = match state.pending.take() {
         Some(p) => p,
         None => return reply("error", "Nothing waiting for confirmation.".into()),
@@ -167,6 +197,7 @@ fn confirm(app: tauri::AppHandle) -> UiReply {
         Ok(b) => b,
         Err(e) => return reply("error", format!("backend: {e}")),
     };
+    state.notes.extend(backend.inner.recovery_notes().iter().cloned());
     match state.engine.execute_plan(plan, &backend) {
         Ok(Response::Executed(ops)) => {
             let done: Vec<String> = ops.iter().map(|o| o.op.describe()).collect();
@@ -227,6 +258,7 @@ fn main() {
         (COMPACT_W, COMPACT_H, KB_NONE)
     };
 
+    let notes_root = root.clone();
     tauri::Builder::default()
         .manage(Mutex::new(UiState {
             engine: Engine::new(root.clone()),
@@ -234,8 +266,9 @@ fn main() {
             pending: None,
             assist: None,
             assist_tried: false,
+            notes: startup_notes_from(&notes_root),
         }))
-        .invoke_handler(tauri::generate_handler![send, confirm, cancel, set_mode])
+        .invoke_handler(tauri::generate_handler![send, confirm, cancel, set_mode, startup_notes])
         .setup(move |app| {
             let url = if start_expanded { "index.html#expanded" } else { "index.html" };
             let win = tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App(url.into()))

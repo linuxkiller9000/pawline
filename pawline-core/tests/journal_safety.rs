@@ -137,23 +137,11 @@ fn first_wallpaper_change_captures_baseline_so_undo_restores_it() {
         current: Some(outside.join("old.png")),
         log: log.clone(),
     }));
-    go(&mut e, &be, "set wallpaper to ~/Pictures/new.png");
+    go(&mut e, &be, "set wallpaper to ~/Pictures/new.png anyway");
     assert!(matches!(go(&mut e, &be, "undo"), Response::Executed(_)));
     let l = log.lock().unwrap().clone();
     assert_eq!(l.len(), 2);
     assert_eq!(std::fs::read(&l[1]).unwrap(), b"OLD");
     // user's original file untouched
     assert_eq!(std::fs::read(outside.join("old.png")).unwrap(), b"OLD");
-}
-
-#[test]
-fn unknown_previous_wallpaper_is_stated_on_the_confirm_card() {
-    let (root, e) = setup("note");
-    std::fs::create_dir_all(root.join("Pictures")).unwrap();
-    std::fs::write(root.join("Pictures/a.png"), b"x").unwrap();
-    // only meaningful when no swaybg is running on the machine running the test
-    if pawline_core::wallpaper::current_swaybg_image().is_none() {
-        let p = e.plan("set wallpaper to ~/Pictures/a.png").unwrap();
-        assert!(p.summary().contains("Note: I can't see your current wallpaper"), "{}", p.summary());
-    }
 }

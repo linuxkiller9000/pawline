@@ -143,6 +143,7 @@ document.getElementById('no').addEventListener('click', async () => {
 });
 
 add('paw', 'Hi, I am Pawline. Try: make a folder called kitten paws');
+invoke('startup_notes').then(n => { if (n && n.length) add('paw', 'After an interrupted run I checked the undo journal:\n' + n.join('\n'), 'error'); }).catch(() => {});
 function tryExpand(n) {
   if (window.__pawline_start_expanded || location.hash === '#expanded') {
     body.classList.add('expanded'); inp.focus();

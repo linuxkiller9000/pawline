@@ -159,6 +159,15 @@ impl Validator {
         name.to_string()
     }
 
+    /// True when the wallpaper in place now can be restored later: Pawline set
+    /// it before, a baseline was captured, or the running manager reveals it.
+    fn wallpaper_backup_known(&self) -> bool {
+        let text = std::fs::read_to_string(self.root.join(crate::journal::JOURNAL)).unwrap_or_default();
+        crate::journal::last_open_of(&text, "wallpaper").is_some()
+            || crate::journal::last_open_of(&text, "wallpaper_base").is_some()
+            || crate::wallpaper::current_swaybg_image().is_some()
+    }
+
     pub fn build_plan(
         &self,
         directives: &[Directive],
@@ -267,7 +276,7 @@ impl Validator {
                     })?;
                     ops.push(Operation::Undo { entry: e.id, summary: e.describe_undo() });
                 }
-                Directive::SetWallpaper { image, via } => {
+                Directive::SetWallpaper { image, via, no_backup_ok } => {
                     let path = self.resolve_location(image, &sim)?;
                     let meta = std::fs::metadata(&path).map_err(|_| {
                         PawError::Validation(format!("no such image: {}", path.display()))
@@ -292,7 +301,14 @@ impl Validator {
                         })?),
                         None => None,
                     };
-                    ops.push(Operation::SetWallpaper { image: path, via });
+                    let known = self.wallpaper_backup_known();
+                    if !known && !*no_backup_ok {
+                        return Err(PawError::Validation(
+                            "I can't see your current wallpaper, so I can't back it up and Undo couldn't restore it. Nothing was changed. To go ahead anyway, say the same thing again ending with \"anyway\"."
+                                .into(),
+                        ));
+                    }
+                    ops.push(Operation::SetWallpaper { image: path, via, no_backup_ok: *no_backup_ok && !known });
                 }
                 Directive::OpenApp { name } => ops.push(Operation::OpenApp { name: name.clone() }),
                 Directive::Answer { text } => ops.push(Operation::Answer { text: text.clone() }),
@@ -309,17 +325,11 @@ impl Validator {
             .map(|o| o.describe())
             .collect();
         let mut notes = Vec::new();
-        if ops.iter().any(|o| matches!(o, Operation::SetWallpaper { .. })) {
-            let text = std::fs::read_to_string(self.root.join(crate::journal::JOURNAL)).unwrap_or_default();
-            let known = crate::journal::last_open_of(&text, "wallpaper").is_some()
-                || crate::journal::last_open_of(&text, "wallpaper_base").is_some()
-                || crate::wallpaper::current_swaybg_image().is_some();
-            if !known {
-                notes.push(
-                    "I can't see your current wallpaper, so Undo won't be able to put it back. It can only return to wallpapers I set. Say no if you want to keep it restorable."
-                        .to_string(),
-                );
-            }
+        if ops.iter().any(|o| matches!(o, Operation::SetWallpaper { no_backup_ok: true, .. })) {
+            notes.push(
+                "You chose to go ahead without a backup: I can't see your current wallpaper, so Undo won't be able to put it back. It can only return to wallpapers I set from now on."
+                    .to_string(),
+            );
         }
         Ok(Plan {
             notes,
