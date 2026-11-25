@@ -182,6 +182,8 @@ struct Msg {
     user: bool,
     kind: String,
     text: String,
+    /// Pawline's own plain answers are drawn as Markdown (looks only; nothing is run, opened or fetched).
+    md: bool,
     thumb: Option<Pixmap>,
     /// Short preview of the message this one replied to. Local only: never sent to the model or online.
     quote: Option<String>,
@@ -574,17 +576,35 @@ impl App {
         let bot = bot0 - if hint_bot { 20.0 } else { 0.0 };
         // layout all messages
         let bub_w = inner_w - 40.0;
-        let mut items: Vec<(bool, String, Vec<String>, f32, Option<Pixmap>, Option<String>)> = Vec::new();
+        let mut items: Vec<(bool, String, Vec<String>, f32, Option<Pixmap>, Option<String>, Option<Vec<md::VLine>>)> = Vec::new();
         let mut texts: Vec<String> = Vec::new();
         self.bubbles.clear();
         let mut total = 0.0;
-        let msgs: Vec<(bool, String, String, Option<Pixmap>, Option<String>)> = self.msgs.iter().map(|m| (m.user, m.kind.clone(), m.text.clone(), m.thumb.clone(), m.quote.clone())).collect();
-        for (user, kind, text, thumb, quote) in msgs {
-            let lines = self.wrap(&text, PX, bub_w - 20.0);
-            let bh = lines.len() as f32 * LH + 14.0 + quote.as_ref().map_or(0.0, |_| 18.0) + thumb.as_ref().map_or(0.0, |t| t.height() as f32 + 6.0);
+        let msgs: Vec<(bool, String, String, Option<Pixmap>, Option<String>, bool)> = self.msgs.iter().map(|m| (m.user, m.kind.clone(), m.text.clone(), m.thumb.clone(), m.quote.clone(), m.md)).collect();
+        for (user, kind, text, thumb, quote, is_md) in msgs {
+            let mdl = if is_md {
+                let spaced = match text.rsplit_once("\nTook ") {
+                    Some((b, t)) => format!("{b}\n\nTook {t}"),
+                    None => text.clone(),
+                };
+                let blocks = md::parse(&spaced);
+                let sh = &mut self.shaper;
+                Some(md::layout(&blocks, bub_w - 20.0, &mut |c, px| {
+                    let mut b = [0u8; 4];
+                    sh.measure(c.encode_utf8(&mut b), px, shape::Mode::Auto)
+                }))
+            } else {
+                None
+            };
+            let lines = if mdl.is_some() { vec![] } else { self.wrap(&text, PX, bub_w - 20.0) };
+            let body_h = match &mdl {
+                Some(m) => md::height(m),
+                None => lines.len() as f32 * LH,
+            };
+            let bh = body_h + 14.0 + quote.as_ref().map_or(0.0, |_| 18.0) + thumb.as_ref().map_or(0.0, |t| t.height() as f32 + 6.0);
             total += bh + 8.0;
             texts.push(text.clone());
-            items.push((user, kind, lines, bh, thumb, quote));
+            items.push((user, kind, lines, bh, thumb, quote, mdl));
         }
         let view = bot - top;
         self.chat_max = (total - view).max(0.0);
@@ -594,7 +614,7 @@ impl App {
         // y of content start so that the bottom aligns with `bot` + scroll
         let mut cp = Pixmap::new(w as u32, view as u32).unwrap();
         let mut y = view - total + self.scroll;
-        for (idx, (user, kind, lines, bh, thumb, quote)) in items.into_iter().enumerate() {
+        for (idx, (user, kind, lines, bh, thumb, quote, mdl)) in items.into_iter().enumerate() {
             let mut bw0 = 0.0f32;
             for l in &lines {
                 bw0 = bw0.max(self.measure(l, PX, line_mode(l)));
@@ -603,6 +623,12 @@ impl App {
                 Some(q) => (self.measure(q, 12.0, shape::Mode::Auto) + 8.0).min(bub_w - 20.0),
                 None => 0.0,
             };
+            if let Some(m) = &mdl {
+                for vl in m {
+                    let t: String = vl.runs.iter().map(|r| r.text.as_str()).collect();
+                    bw0 = bw0.max(vl.indent + self.measure(&t, vl.px, line_mode(&t)) + if vl.marker.is_some() { 0.0 } else { 0.0 });
+                }
+            }
             let bw = bw0.max(qw).max(thumb.as_ref().map_or(0.0, |t| t.width() as f32)) + 20.0;
             let bx = if user { w - PAD - bw } else { PAD };
             if y + bh > 0.0 && y < view {
@@ -620,11 +646,19 @@ impl App {
                     fill(&mut cp, &rrect(bx + 8.0, y + 7.0, 3.0, 14.0, 1.5), (34, 211, 238, 255));
                     self.text(&mut cp, q, bx + 16.0, y + 18.0, 12.0, (170, 165, 195), (0.0, view));
                 }
+                if let Some(m) = &mdl {
+                    let mut yy = y + qh + 7.0;
+                    for vl in m {
+                        self.draw_vline(&mut cp, vl, bx + 10.0, bw - 20.0, yy, (0.0, view));
+                        yy += vl.h;
+                    }
+                }
                 for (i, l) in lines.iter().enumerate() {
                     self.para(&mut cp, l, bx + 10.0, bw - 20.0, y + qh + 7.0 + (i as f32 + 1.0) * LH - 5.0, PX, (235, 232, 245), (0.0, view), line_mode(l));
                 }
                 if let Some(t) = &thumb {
-                    let ty = y + qh + 7.0 + lines.len() as f32 * LH + 2.0;
+                    let body_h = mdl.as_ref().map_or(lines.len() as f32 * LH, |m| md::height(m));
+                    let ty = y + qh + 7.0 + body_h + 2.0;
                     cp.draw_pixmap((bx + 10.0) as i32, ty as i32, t.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
                 }
             }
@@ -636,6 +670,56 @@ impl App {
         }
         if hint_bot {
             self.text(pm, "v newer (PageDown)", PAD + 6.0, bot0 - 5.0, 12.0, (170, 165, 195), (0.0, h));
+        }
+    }
+
+    /// One Markdown line: heading size, bold (drawn twice, 0.7 px apart), code on a darker pad, links underlined
+    /// with their address visible, quote bar, bullet markers. Text only; nothing here is clickable.
+    fn draw_vline(&mut self, pm: &mut Pixmap, vl: &md::VLine, x: f32, w: f32, top: f32, clip: (f32, f32)) {
+        let base = top + vl.h - 5.0 - if matches!(vl.kind, md::Kind::Heading) { 3.0 } else { 0.0 };
+        match vl.kind {
+            md::Kind::Rule => {
+                fill(pm, &rrect(x, top + vl.h / 2.0, w, 1.5, 0.7), (110, 104, 140, 255));
+                return;
+            }
+            md::Kind::Quote => fill(pm, &rrect(x, top, 3.0, vl.h, 1.5), (34, 211, 238, 255)),
+            md::Kind::Code => {
+                let tw: f32 = vl.runs.iter().map(|r| r.text.as_str()).collect::<String>().chars().count() as f32;
+                let _ = tw;
+                fill(pm, &rrect(x, top, w, vl.h, 4.0), (28, 25, 42, 255));
+            }
+            _ => {}
+        }
+        if let Some(m) = &vl.marker {
+            self.text(pm, m, x + vl.indent - 16.0, base, vl.px, (190, 185, 215), clip);
+        }
+        let all: String = vl.runs.iter().map(|r| r.text.as_str()).collect();
+        if shape::has_rtl(&all) {
+            // right-to-left lines are drawn as one piece (bold/code styling is dropped on those lines)
+            self.para(pm, &all, x + vl.indent, w - vl.indent, base, vl.px, (235, 232, 245), clip, line_mode(&all));
+            return;
+        }
+        let mut cx = x + vl.indent + if matches!(vl.kind, md::Kind::Code) { 0.0 } else { 0.0 };
+        for r in &vl.runs {
+            let wdt = self.measure(&r.text, vl.px, line_mode(&r.text));
+            let (col, boldish) = match (r.style, &vl.kind) {
+                (md::Style::Bold, _) | (_, md::Kind::Heading) => ((255, 255, 255), true),
+                (md::Style::Code, _) | (_, md::Kind::Code) => ((150, 230, 220), false),
+                (md::Style::Link, _) => ((120, 190, 255), false),
+                (_, md::Kind::Quote) => ((190, 185, 215), false),
+                _ => ((235, 232, 245), false),
+            };
+            if matches!(r.style, md::Style::Code) && !matches!(vl.kind, md::Kind::Code) {
+                fill(pm, &rrect(cx - 2.0, top + 1.0, wdt + 4.0, vl.h - 2.0, 4.0), (28, 25, 42, 255));
+            }
+            self.text_m(pm, &r.text, cx, base, vl.px, col, clip, line_mode(&r.text));
+            if boldish {
+                self.text_m(pm, &r.text, cx + 0.7, base, vl.px, col, clip, line_mode(&r.text));
+            }
+            if matches!(r.style, md::Style::Link) {
+                fill(pm, &rrect(cx, base + 2.0, wdt, 1.2, 0.5), (120, 190, 255, 255));
+            }
+            cx += wdt;
         }
     }
 
@@ -770,7 +854,7 @@ impl App {
 
     fn push(&mut self, user: bool, kind: &str, text: String, quote: Option<String>) {
         let thumb = if user { None } else { saved_picture(&text).and_then(|p| thumb::load(&p, THUMB_W, THUMB_H)) };
-        self.msgs.push(Msg { user, kind: kind.into(), text, thumb, quote });
+        self.msgs.push(Msg { user, kind: kind.into(), text, md: false, thumb, quote });
         self.scroll = 0.0;
     }
 
@@ -912,6 +996,11 @@ impl App {
     fn on_reply(&mut self, r: UiReply) {
         self.busy = false;
         self.push(false, &r.kind, r.text.clone(), None);
+        if r.kind == "md" {
+            if let Some(m) = self.msgs.last_mut() {
+                m.md = true;
+            }
+        }
         self.zi_rows = if r.kind == "message" { r.plan.as_deref().map(|p| p.lines().map(String::from).collect()).unwrap_or_default() } else { vec![] };
         self.zi_sel = 0;
         if r.kind == "confirm" {
@@ -1802,7 +1891,7 @@ fn main() {
         bubbles: Vec::new(),
         toast: None,
         reply: None,
-        msgs: vec![Msg { user: false, kind: "message".into(), text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it. Right-click a message (or Ctrl+R) to reply to it.".into(), thumb: None, quote: None }],
+        msgs: vec![Msg { user: false, kind: "message".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it. Right-click a message (or Ctrl+R) to reply to it.".into(), thumb: None, quote: None }],
         confirm: None,
         focus: Btn::No,
         scroll: 0.0,
@@ -1879,6 +1968,16 @@ fn main() {
             }
         })
         .unwrap();
+    // debug builds only: show a Markdown sample file as a reply (for screenshots)
+    #[cfg(debug_assertions)]
+    if let Some(f) = std::env::var_os("PAWLINE_DEMO_MD") {
+        if let Ok(t) = std::fs::read_to_string(f) {
+            app.push(false, "md", t, None);
+            if let Some(m) = app.msgs.last_mut() {
+                m.md = true;
+            }
+        }
+    }
     if app.xb.is_some() {
         app.draw();
     }

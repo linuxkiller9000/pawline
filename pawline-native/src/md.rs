@@ -67,7 +67,9 @@ pub fn inline(s: &str) -> Vec<Run> {
             }
         }
         if c[i] == '*' && c.get(i + 1) == Some(&'*') {
-            if let Some(j) = (i + 2..c.len().saturating_sub(1)).find(|&j| c[j] == '*' && c[j + 1] == '*') {
+            // an opener is followed by a non-space and its closer preceded by one (so "5 ** 3 ... **" stays literal)
+            let opens = c.get(i + 2).map_or(false, |x| !x.is_whitespace());
+            if let Some(j) = (i + 2..c.len().saturating_sub(1)).find(|&j| c[j] == '*' && c[j + 1] == '*' && !c[j - 1].is_whitespace()).filter(|_| opens) {
                 if j > i + 2 {
                     flush(&mut buf, &mut out);
                     push(&mut out, &c[i + 2..j].iter().collect::<String>(), Style::Bold);
@@ -183,19 +185,18 @@ pub const BODY_PX: f32 = 15.0;
 const LH: f32 = 20.0;
 
 fn words(runs: &[Run]) -> Vec<(String, Style, bool)> {
-    // (word, style, preceded by a space)
+    // (word, style, preceded by a space); a space at the end of one run counts for the next run's first word
     let mut out: Vec<(String, Style, bool)> = vec![];
+    let mut pending = false;
     for r in runs {
-        let mut first = true;
         for (k, w) in r.text.split(' ').enumerate() {
-            let lead_space = k > 0 || (!first && false);
-            if w.is_empty() {
-                continue;
+            if k > 0 {
+                pending = true;
             }
-            // a space sits before this word if it was split off, or the run starts with a space
-            let sp = lead_space || (k == 0 && r.text.starts_with(' '));
-            out.push((w.to_string(), r.style, sp));
-            first = false;
+            if !w.is_empty() {
+                out.push((w.to_string(), r.style, pending));
+                pending = false;
+            }
         }
     }
     out
@@ -376,5 +377,20 @@ mod tests {
         assert!(plain(&l[0].runs).contains("مرحبا"));
         let l = layout(&parse(&format!("```\n{}\n```", "y".repeat(500))), 200.0, &mut adv);
         assert_eq!(l.iter().map(|v| plain(&v.runs).len()).sum::<usize>(), 500);
+    }
+}
+
+#[cfg(test)]
+mod space_tests {
+    use super::*;
+    #[test]
+    fn a_space_between_runs_survives_wrapping() {
+        let runs = inline("**Files**: `make it` now");
+        let lines = wrap_runs(&runs, 15.0, 1000.0, &mut |_, px| px * 0.5);
+        let t: String = lines[0].iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(t, "Files: make it now");
+        let runs = inline("a **b** c");
+        let t: String = wrap_runs(&runs, 15.0, 1000.0, &mut |_, px| px * 0.5)[0].iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(t, "a b c");
     }
 }

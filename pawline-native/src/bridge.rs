@@ -413,9 +413,8 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             if let Some(p) = pawline_core::planmem::default_path() {
                 remember_steps(&p, input, &ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>(), pawline_core::searchmem::now_secs());
             }
-            let body = if ops.len() == 1
-                && matches!(ops[0].op, pawline_core::plan::Operation::Answer { .. })
-            {
+            let answer_only = ops.len() == 1 && matches!(ops[0].op, pawline_core::plan::Operation::Answer { .. });
+            let body = if answer_only {
                 done.join("\n")
             } else {
                 let lines: Vec<String> = ops
@@ -435,7 +434,8 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                     .collect();
                 format!("Done:\n{}", lines.join("\n"))
             };
-            reply("executed", body)
+            // Pawline's own plain answers are drawn as Markdown; everything that lists files or paths stays raw
+            reply(if answer_only { "md" } else { "executed" }, body)
         }
         Ok(Response::Confirm(plan)) => {
             let summary = plan.summary();
@@ -734,7 +734,7 @@ pub fn took(d: std::time::Duration) -> String {
 /// Add "Took N.Ns" to a finished result. A plan waiting for confirmation is not a result, and the
 /// time the user spends deciding is never included (the timer for a confirmed run starts at confirm).
 fn timed(mut r: UiReply, d: std::time::Duration) -> UiReply {
-    if matches!(r.kind.as_str(), "executed" | "failed" | "message" | "error") {
+    if matches!(r.kind.as_str(), "executed" | "failed" | "message" | "error" | "md") {
         r.text = format!("{}\nTook {}", r.text, took(d));
     }
     r
