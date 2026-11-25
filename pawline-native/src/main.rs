@@ -2,6 +2,7 @@
 //! buffers on a Wayland layer-shell surface (xdg-toplevel fallback). No
 //! OpenGL, EGL, GTK or WebKit is loaded.
 mod bridge;
+mod edit;
 
 use bridge::UiReply;
 use smithay_client_toolkit::{
@@ -94,7 +95,9 @@ struct App {
     w: u32,
     h: u32,
     expanded: bool,
-    input: String,
+    input: edit::Edit,
+    ctrl: bool,
+    shift: bool,
     msgs: Vec<Msg>,
     /// Plan text awaiting a decision.
     confirm: Option<String>,
@@ -309,12 +312,18 @@ impl App {
             self.draw_chat(pm, w, h, inner_w);
             // input box
             fill(pm, &rrect(PAD - 2.0, h - 52.0, w - 2.0 * PAD + 4.0, 40.0, 12.0), (52, 48, 70, 255));
-            let mut s = self.input.clone();
-            // keep the tail of long input visible
-            while s.chars().map(|c| self.adv(c, PX)).sum::<f32>() > inner_w - 20.0 {
-                s.remove(0);
+            let (mut before, mut after) = self.input.split();
+            // keep the caret visible: trim from the left first, then from the right
+            while before.chars().chain(after.chars()).map(|c| self.adv(c, PX)).sum::<f32>() > inner_w - 20.0 {
+                if !before.is_empty() {
+                    before.remove(0);
+                } else if !after.is_empty() {
+                    after.pop();
+                } else {
+                    break;
+                }
             }
-            let shown = format!("{s}|");
+            let shown = format!("{before}|{after}");
             let col = if self.busy { (150, 145, 165) } else { (255, 255, 255) };
             self.text(pm, &shown, PAD + 8.0, h - 26.0, PX, col, (0.0, h));
         }
@@ -437,7 +446,7 @@ impl App {
     }
 
     fn submit(&mut self) {
-        let t = self.input.trim().to_string();
+        let t = self.input.text().trim().to_string();
         if t.is_empty() || self.busy {
             return;
         }
@@ -511,7 +520,27 @@ impl App {
                 self.draw();
             }
             Keysym::BackSpace => {
-                self.input.pop();
+                self.input.backspace();
+                self.draw();
+            }
+            Keysym::Delete => {
+                self.input.delete();
+                self.draw();
+            }
+            Keysym::Left | Keysym::Right | Keysym::Home | Keysym::End => {
+                let (sh, word) = (self.shift, self.ctrl);
+                match (e.keysym, word) {
+                    (Keysym::Left, false) => self.input.left(sh),
+                    (Keysym::Right, false) => self.input.right(sh),
+                    (Keysym::Left, true) => self.input.word_left(sh),
+                    (Keysym::Right, true) => self.input.word_right(sh),
+                    (Keysym::Home, _) => self.input.home(sh),
+                    _ => self.input.end(sh),
+                }
+                self.draw();
+            }
+            Keysym::a | Keysym::A if self.ctrl => {
+                self.input.select_all();
                 self.draw();
             }
             Keysym::Page_Up | Keysym::Up => {
@@ -523,10 +552,10 @@ impl App {
                 self.draw();
             }
             _ => {
-                if !self.busy {
+                if !self.busy && !self.ctrl {
                     if let Some(t) = e.utf8 {
                         if !t.is_empty() && !t.chars().any(|c| c.is_control()) {
-                            self.input.push_str(&t);
+                            self.input.insert(&t);
                             self.draw();
                         }
                     }
@@ -632,7 +661,10 @@ impl KeyboardHandler for App {
         self.key(e);
     }
     fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent) {}
-    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: Modifiers, _: u32) {}
+    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, m: Modifiers, _: u32) {
+        self.ctrl = m.ctrl;
+        self.shift = m.shift;
+    }
 }
 impl PointerHandler for App {
     fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_pointer::WlPointer, evs: &[PointerEvent]) {
@@ -832,7 +864,9 @@ fn main() {
         w: COMPACT,
         h: COMPACT,
         expanded: false,
-        input: String::new(),
+        input: edit::Edit::default(),
+        ctrl: false,
+        shift: false,
         msgs: vec![Msg { user: false, kind: "message".into(), text: "Hi, I am Pawline. Try: make a folder called kitten paws".into() }],
         confirm: None,
         focus: Btn::No,
