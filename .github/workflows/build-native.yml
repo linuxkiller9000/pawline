@@ -14,6 +14,10 @@ on:
         description: "Attach the binary to the existing release"
         type: boolean
         default: false
+      new_test_tag:
+        description: "Create a NEW prerelease with this tag (must not exist yet) and attach a separately named test asset. Never touches an existing release."
+        required: false
+        default: ""
 permissions:
   contents: write
 jobs:
@@ -69,3 +73,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "${{ inputs.tag }}" out/pawline-0.2.1-beta-linux-x86_64 out/SHA256SUMS.txt --clobber
+      - name: Create new test prerelease (separate asset name, no overwrite)
+        if: ${{ inputs.new_test_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.new_test_tag }}
+        run: |
+          set -e
+          if gh release view "$TAG" >/dev/null 2>&1; then echo "release $TAG already exists, refusing"; exit 1; fi
+          A="pawline-test-${TAG}-linux-x86_64"
+          cp out/pawline-0.2.1-beta-linux-x86_64 "out/$A"
+          (cd out && sha256sum "$A" > "SHA256SUMS-$TAG.txt" && cat "SHA256SUMS-$TAG.txt")
+          printf 'TEST BUILD from commit %s. Not a stable release. Not tested on the target Dell or niri. Needs the SHA256SUMS file to verify. Features not built yet: inline images, reply quotes, movable orb, bar widget.\n' "$GITHUB_SHA" > notes.txt
+          gh release create "$TAG" "out/$A" "out/SHA256SUMS-$TAG.txt" --prerelease --target "$GITHUB_SHA" --title "Pawline test build $TAG" --notes-file notes.txt
