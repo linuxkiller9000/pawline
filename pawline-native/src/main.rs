@@ -4,6 +4,7 @@
 mod bridge;
 mod edit;
 mod shape;
+mod theme;
 mod md;
 mod thumb;
 
@@ -157,6 +158,19 @@ fn line_of(lines: &[(usize, usize)], caret: usize) -> usize {
     lines.len() - 1
 }
 
+trait Rgba {
+    fn rgba(self) -> (u8, u8, u8, u8);
+}
+impl Rgba for (u8, u8, u8) {
+    fn rgba(self) -> (u8, u8, u8, u8) {
+        (self.0, self.1, self.2, 255)
+    }
+}
+
+fn settings_path() -> Option<std::path::PathBuf> {
+    pawline_core::searchmem::default_path().map(|p| p.with_file_name("ui-settings.txt"))
+}
+
 /// Lines that carry a path are laid out strictly left to right with every path part in written order.
 fn line_mode(l: &str) -> shape::Mode {
     if l.contains("~/") || l.starts_with('/') || l.contains(" /") || l.contains(":/") {
@@ -243,6 +257,11 @@ struct App {
     zi_rows: Vec<String>,
     zi_sel: usize,
     shaper: shape::Shaper,
+    settings: theme::Settings,
+    settings_open: bool,
+    settings_sel: usize,
+    t0: std::time::Instant,
+    r_gear: (f32, f32, f32, f32),
     input_w: f32,
     tx: mpsc::Sender<Req>,
     exit: bool,
@@ -488,12 +507,93 @@ impl App {
         sf.commit();
     }
 
+    fn th(&self) -> &'static theme::Theme {
+        &theme::THEMES[self.settings.theme.min(theme::THEMES.len() - 1)]
+    }
+
+    /// Panel background: a three-colour diagonal gradient whose colours fade into each other, drifting slowly.
+    fn fill_bg(&self, pm: &mut Pixmap, w: f32, h: f32) {
+        let th = self.th();
+        let off = theme::drift_offset(self.t0.elapsed().as_secs_f32(), w, self.settings.drift);
+        let c = |k: usize| Color::from_rgba8(th.bg[k].0, th.bg[k].1, th.bg[k].2, 245);
+        let g = LinearGradient::new(
+            Point::from_xy(off, 0.0),
+            Point::from_xy(w + off, h),
+            vec![GradientStop::new(0.0, c(0)), GradientStop::new(0.5, c(1)), GradientStop::new(1.0, c(2))],
+            SpreadMode::Reflect,
+            Transform::identity(),
+        );
+        let mut p = Paint::default();
+        p.anti_alias = true;
+        match g {
+            Some(g) => p.shader = g,
+            None => p.set_color_rgba8(th.bg[0].0, th.bg[0].1, th.bg[0].2, 245),
+        }
+        pm.fill_path(&rrect(0.0, 0.0, w, h, 18.0), &p, FillRule::Winding, Transform::identity(), None);
+    }
+
+    fn settings_rows(&self) -> usize {
+        theme::THEMES.len() + 1
+    }
+
+    fn apply_setting(&mut self, row: usize) {
+        if row < theme::THEMES.len() {
+            self.settings.theme = row;
+        } else {
+            self.settings.drift = !self.settings.drift;
+        }
+        if let Some(p) = settings_path() {
+            let _ = theme::save(&p, &self.settings);
+        }
+    }
+
+    fn settings_geom(&self) -> (f32, f32) {
+        (CHAT_TOP + 34.0, 34.0)
+    }
+
+    fn draw_settings(&mut self, pm: &mut Pixmap, w: f32, h: f32) {
+        let _ = h;
+        self.text(pm, "Settings", PAD + 4.0, CHAT_TOP + 18.0, 16.0, (235, 230, 250), (0.0, h));
+        let (top, rh) = self.settings_geom();
+        for k in 0..self.settings_rows() {
+            let y = top + k as f32 * (rh + 6.0);
+            let sel = k == self.settings_sel;
+            fill(pm, &rrect(PAD - 2.0, y, w - 2.0 * PAD + 4.0, rh, 10.0), if sel { (70, 64, 110) } else { (44, 40, 64) }.rgba());
+            if k < theme::THEMES.len() {
+                let t = &theme::THEMES[k];
+                for (i, c) in t.bg.iter().enumerate() {
+                    fill(pm, &rrect(PAD + 8.0 + i as f32 * 18.0, y + 8.0, 18.0, 18.0, 4.0), (c.0, c.1, c.2, 255));
+                }
+                fill(pm, &rrect(PAD + 66.0, y + 8.0, 18.0, 18.0, 9.0), (t.accent.0, t.accent.1, t.accent.2, 255));
+                let label = format!("Theme: {}", t.name);
+                self.text(pm, &label, PAD + 96.0, y + 22.0, 14.0, (255, 255, 255), (0.0, h));
+                if k == self.settings.theme {
+                    self.text(pm, "selected", w - PAD - 74.0, y + 22.0, 12.0, (150, 230, 180), (0.0, h));
+                }
+            } else {
+                let label = format!("Colours drift slowly: {}", if self.settings.drift { "on" } else { "off" });
+                self.text(pm, &label, PAD + 10.0, y + 22.0, 14.0, (255, 255, 255), (0.0, h));
+            }
+        }
+        let note_y = top + self.settings_rows() as f32 * (rh + 6.0) + 14.0;
+        self.text(pm, "Up/Down choose, Enter applies, Esc closes.", PAD + 4.0, note_y, 12.0, (190, 185, 215), (0.0, h));
+        self.text(pm, "Saved on this computer only; no request text.", PAD + 4.0, note_y + 18.0, 12.0, (190, 185, 215), (0.0, h));
+    }
+
     fn draw_card(&mut self, pm: &mut Pixmap) {
         let (w, h) = (self.w as f32, self.h as f32);
-        fill(pm, &rrect(0.0, 0.0, w, h, 18.0), (30, 28, 40, 245));
+        self.fill_bg(pm, w, h);
         self.orb(pm, 34.0, 32.0, 17.0, self.busy);
         let title = if self.busy { "Pawline  (working, Esc cancels)" } else { "Pawline" };
         self.text(pm, title, 62.0, 38.0, 18.0, (235, 230, 250), (0.0, h));
+        // settings button (three slider lines), left of the collapse button
+        self.r_gear = (w - 80.0, 14.0, 30.0, 30.0);
+        fill(pm, &rrect(self.r_gear.0, self.r_gear.1, 30.0, 30.0, 8.0), if self.settings_open { self.th().accent } else { (52, 48, 70) }.rgba());
+        for (k, dx) in [8.0f32, 15.0, 10.0].iter().enumerate() {
+            let ly = self.r_gear.1 + 9.0 + k as f32 * 6.0;
+            fill(pm, &rrect(self.r_gear.0 + 6.0, ly, 18.0, 1.6, 0.8), (220, 215, 235, 255));
+            fill(pm, &rrect(self.r_gear.0 + 4.0 + dx, ly - 2.0, 4.0, 5.6, 2.0), (255, 255, 255, 255));
+        }
         // collapse button
         self.r_collapse = (w - 44.0, 14.0, 30.0, 30.0);
         fill(pm, &rrect(self.r_collapse.0, self.r_collapse.1, 30.0, 30.0, 8.0), (52, 48, 70, 255));
@@ -502,6 +602,8 @@ impl App {
         let inner_w = w - 2.0 * PAD;
         if self.confirm.is_some() {
             self.draw_confirm(pm, w, h, inner_w);
+        } else if self.settings_open {
+            self.draw_settings(pm, w, h);
         } else {
             self.draw_chat(pm, w, h, inner_w);
             // input box: wraps onto up to MAX_IN_LINES lines, then scrolls by line
@@ -533,7 +635,7 @@ impl App {
                 let label = format!("Reply (local, not sent): {prev}   [x]");
                 self.text(pm, &label, PAD + 12.0, sy + 16.0, 12.0, (200, 195, 225), (0.0, h));
             }
-            fill(pm, &rrect(PAD - 2.0, top, w - 2.0 * PAD + 4.0, bh, 12.0), (52, 48, 70, 255));
+            fill(pm, &rrect(PAD - 2.0, top, w - 2.0 * PAD + 4.0, bh, 12.0), self.th().input.rgba());
             let col = if self.busy { (150, 145, 165) } else { (255, 255, 255) };
             let sel = self.input.sel();
             for k in 0..nl {
@@ -547,7 +649,7 @@ impl App {
                     let (a, b) = (sa.max(ls), sb.min(le));
                     if b > a {
                         for (l, r) in laid.sel_rects(a - ls, b - ls) {
-                            fill(pm, &rrect(x0 + l, ly, r - l, LH, 3.0), (92, 80, 170, 255));
+                            fill(pm, &rrect(x0 + l, ly, r - l, LH, 3.0), self.th().accent.rgba());
                         }
                     }
                 }
@@ -634,7 +736,7 @@ impl App {
             if y + bh > 0.0 && y < view {
                 self.bubbles.push(((bx, top + y.max(0.0), bw, (bh).min(view - y.max(0.0)).min(y + bh)), texts[idx].clone()));
                 let col = if user {
-                    (62, 54, 112, 255)
+                    self.th().user.rgba()
                 } else if kind == "error" || kind == "failed" {
                     (92, 40, 52, 255)
                 } else {
@@ -1045,6 +1147,18 @@ impl App {
             self.draw();
             return;
         }
+        if self.settings_open {
+            let n = self.settings_rows();
+            match e.keysym {
+                Keysym::Escape => self.settings_open = false,
+                Keysym::Up => self.settings_sel = (self.settings_sel + n - 1) % n,
+                Keysym::Down | Keysym::Tab => self.settings_sel = (self.settings_sel + 1) % n,
+                Keysym::Return | Keysym::KP_Enter => self.apply_setting(self.settings_sel),
+                _ => {}
+            }
+            self.draw();
+            return;
+        }
         match e.keysym {
             Keysym::r | Keysym::R if self.ctrl && !self.busy => {
                 if let Some(t) = self.msgs.last().map(|m| m.text.clone()) {
@@ -1237,6 +1351,25 @@ impl App {
         }
         if inside(self.r_collapse, self.ptr_pos) {
             self.set_expanded(false);
+            return;
+        }
+        if self.confirm.is_none() && inside(self.r_gear, self.ptr_pos) {
+            self.settings_open = !self.settings_open;
+            self.draw();
+            return;
+        }
+        if self.settings_open && self.confirm.is_none() {
+            let (top, rh) = self.settings_geom();
+            let (px, py) = self.ptr_pos;
+            let w = self.w as f32;
+            for k in 0..self.settings_rows() {
+                let y = top + k as f32 * (rh + 6.0);
+                if inside((PAD - 2.0, y, w - 2.0 * PAD + 4.0, rh), (px, py)) {
+                    self.settings_sel = k;
+                    self.apply_setting(k);
+                }
+            }
+            self.draw();
             return;
         }
         if self.confirm.is_none() {
@@ -1901,6 +2034,11 @@ fn main() {
         zi_rows: vec![],
         zi_sel: 0,
         shaper: shape::Shaper::new(),
+        settings: settings_path().map(|p| theme::load(&p)).unwrap_or_default(),
+        settings_open: false,
+        settings_sel: 0,
+        t0: std::time::Instant::now(),
+        r_gear: (0.0, 0.0, 0.0, 0.0),
         input_w: 300.0,
         tx: req_tx,
         exit: false,
@@ -1967,6 +2105,18 @@ fn main() {
                 app.on_ctl(c);
             }
         })
+        .unwrap();
+    // the background colours drift slowly: redraw about once a second, only while the card is open and drift is on
+    handle
+        .insert_source(
+            smithay_client_toolkit::reexports::calloop::timer::Timer::from_duration(std::time::Duration::from_millis(1000)),
+            |_, _, app: &mut App| {
+                if app.settings.drift && app.expanded && !app.hidden && app.confirm.is_none() {
+                    app.draw();
+                }
+                smithay_client_toolkit::reexports::calloop::timer::TimeoutAction::ToDuration(std::time::Duration::from_millis(1000))
+            },
+        )
         .unwrap();
     // debug builds only: show a Markdown sample file as a reply (for screenshots)
     #[cfg(debug_assertions)]
