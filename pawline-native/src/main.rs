@@ -2,6 +2,7 @@
 //! buffers on a Wayland layer-shell surface (xdg-toplevel fallback). No
 //! OpenGL, EGL, GTK or WebKit is loaded.
 mod bridge;
+mod x11;
 mod voice_cfg;
 
 use bridge::UiReply;
@@ -1214,6 +1215,19 @@ fn main() {
         return;
     }
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        let sock = |p: &str| std::path::Path::new(p).exists();
+        let disp = std::env::var("DISPLAY").ok();
+        if std::env::var_os("PAWLINE_NO_X11").is_none() && pawline_core::wallpaper::x11_session(disp.as_deref(), None, &sock) {
+            let (req_tx, req_rx) = mpsc::channel::<Req>();
+            let (back_tx, back_rx) = channel::channel::<UiReply>();
+            std::thread::spawn(move || worker(req_rx, back_tx));
+            match x11::run(req_tx, back_rx) {
+                Ok(()) => return,
+                Err(e) => eprintln!("X11 window could not start: {e}. Starting terminal mode."),
+            }
+            run_terminal();
+            return;
+        }
         eprintln!("No Wayland display found, so the window can't open. Starting terminal mode (same commands, same confirmations). Use --no-ui to choose this directly.");
         run_terminal();
         return;
