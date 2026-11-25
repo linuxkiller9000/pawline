@@ -98,7 +98,9 @@ fn using_clause_selects_adapter_and_unknown_names_are_refused() {
     let (_root, e, _be, _log) = setup();
     let p = e.plan("set wallpaper to ~/Pictures/sunset.png using awww anyway").unwrap();
     assert!(p.summary().contains("using awww"), "{}", p.summary());
-    assert!(e.plan("set wallpaper to ~/Pictures/sunset.png using feh").is_err());
+    let f = e.plan("set wallpaper to ~/Pictures/sunset.png using feh anyway").unwrap();
+    assert!(f.summary().contains("using feh"), "{}", f.summary());
+    assert!(e.plan("set wallpaper to ~/Pictures/sunset.png using fig anyway").is_err());
 }
 
 #[test]

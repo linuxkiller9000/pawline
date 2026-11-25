@@ -330,7 +330,7 @@ impl Validator {
                     let via = match via {
                         Some(n) => Some(crate::wallpaper::Adapter::from_name(n).ok_or_else(|| {
                             PawError::Validation(format!(
-                                "I don't know a wallpaper tool called \"{n}\" (try awww, swaybg or plasma)"
+                                "I don't know a wallpaper tool called \"{n}\" (try awww, swaybg, feh or plasma)"
                             ))
                         })?),
                         None => None,

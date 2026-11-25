@@ -4,6 +4,8 @@
 //! - KDE Plasma: `plasma-apply-wallpaperimage <image>`
 //! - awww (the renamed swww): `awww img <image>` (needs `awww-daemon` running)
 //! - swaybg: `swaybg -i <image> -m fill` (stays running; we track our own pid)
+//! - feh (X11): `feh --no-fehbg --bg-fill -- <image>` (sets the root window and exits; `--no-fehbg` so the
+//!   user's ~/.fehbg is not rewritten; checked against the man page; feh 3.6.3 run under Xvfb exits 0 and writes no file with --no-fehbg, but the root colour did not visibly change there, so the effect is unproven)
 //!
 //! The image path arrives already validated (inside the home area, regular
 //! file, image extension, confirmed by the user). The adapter choice is a pure
@@ -21,6 +23,7 @@ pub enum Adapter {
     Plasma,
     Awww,
     Swaybg,
+    Feh,
 }
 
 impl Adapter {
@@ -29,6 +32,7 @@ impl Adapter {
             Adapter::Plasma => "plasma-apply-wallpaperimage",
             Adapter::Awww => "awww",
             Adapter::Swaybg => "swaybg",
+            Adapter::Feh => "feh",
         }
     }
 
@@ -39,6 +43,7 @@ impl Adapter {
             Adapter::Plasma => vec![img],
             Adapter::Awww => vec!["img".into(), img],
             Adapter::Swaybg => vec!["-i".into(), img, "-m".into(), "fill".into()],
+            Adapter::Feh => vec!["--no-fehbg".into(), "--bg-fill".into(), "--".into(), img],
         }
     }
 }
@@ -48,6 +53,7 @@ impl Adapter {
         match n.trim().to_lowercase().as_str() {
             "awww" | "swww" => Some(Adapter::Awww),
             "swaybg" => Some(Adapter::Swaybg),
+            "feh" => Some(Adapter::Feh),
             "plasma" | "kde" | "plasma-apply-wallpaperimage" => Some(Adapter::Plasma),
             _ => None,
         }
@@ -59,6 +65,8 @@ impl Adapter {
             Adapter::Plasma => "plasmashell",
             Adapter::Awww => "awww-daemon",
             Adapter::Swaybg => "swaybg",
+            // feh has no daemon: an X server (not XWayland) running means an X11 session
+            Adapter::Feh => "Xorg",
         }
     }
 }
@@ -75,7 +83,7 @@ pub fn choose_active(
     running: &dyn Fn(&str) -> bool,
     explicit: Option<Adapter>,
 ) -> Result<Adapter, String> {
-    let all = [Adapter::Plasma, Adapter::Awww, Adapter::Swaybg];
+    let all = [Adapter::Plasma, Adapter::Awww, Adapter::Swaybg, Adapter::Feh];
     if let Some(a) = explicit {
         return if have(a.program()) {
             Ok(a)
@@ -87,7 +95,7 @@ pub fn choose_active(
     let active: Vec<Adapter> = installed.iter().copied().filter(|a| running(a.daemon())).collect();
     match (active.len(), installed.len()) {
         (1, _) => Ok(active[0]),
-        (0, 0) => Err("no wallpaper tool found (looked for awww, swaybg and plasma-apply-wallpaperimage)".into()),
+        (0, 0) => Err("no wallpaper tool found (looked for awww, swaybg, feh and plasma-apply-wallpaperimage)".into()),
         (0, 1) if installed[0] == Adapter::Swaybg => Ok(Adapter::Swaybg),
         (0, 1) => Err(format!(
             "{} is installed but its manager ({}) is not running",
@@ -100,7 +108,7 @@ pub fn choose_active(
                 .map(|a| a.program())
                 .collect();
             Err(format!(
-                "I can't tell which wallpaper manager you use ({}). Say \"using awww\", \"using swaybg\" or \"using plasma\".",
+                "I can't tell which wallpaper manager you use ({}). Say \"using awww\", \"using swaybg\", \"using feh\" or \"using plasma\".",
                 names.join(", ")
             ))
         }
@@ -209,6 +217,8 @@ fn run(adapter: Adapter, image: &Path) -> Result<(), PawError> {
         let err = String::from_utf8_lossy(&out.stderr);
         let hint = if adapter == Adapter::Awww {
             " (is awww-daemon running?)"
+        } else if adapter == Adapter::Feh {
+            " (feh needs an X11 session: is DISPLAY set?)"
         } else {
             ""
         };
@@ -336,7 +346,8 @@ mod tests {
     fn names() {
         assert_eq!(Adapter::from_name("SWWW"), Some(Adapter::Awww));
         assert_eq!(Adapter::from_name("kde"), Some(Adapter::Plasma));
-        assert_eq!(Adapter::from_name("feh"), None);
+        assert_eq!(Adapter::from_name("feh"), Some(Adapter::Feh));
+        assert_eq!(Adapter::from_name("fig"), None);
     }
 
     #[test]
@@ -345,5 +356,23 @@ mod tests {
         assert!(extension_ok(Path::new("/x/y.jpeg")));
         assert!(!extension_ok(Path::new("/x/y.sh")));
         assert!(!extension_ok(Path::new("/x/y")));
+    }
+
+    #[test]
+    fn feh_args_and_selection() {
+        assert_eq!(
+            Adapter::Feh.args(Path::new("/h/.local/share/pawline/w/a.png")),
+            vec!["--no-fehbg", "--bg-fill", "--", "/h/.local/share/pawline/w/a.png"]
+        );
+        // a path that starts with a dash cannot be read as an option
+        assert_eq!(Adapter::Feh.args(Path::new("-x.png")).last().unwrap(), "-x.png");
+        let have = |l: &'static [&'static str]| move |n: &str| l.contains(&n);
+        // X server running and only feh installed: feh
+        assert_eq!(choose_active(&have(&["feh"]), &have(&["Xorg"]), None), Ok(Adapter::Feh));
+        // feh installed but no X server and no explicit choice: refuse with the reason
+        assert!(choose_active(&have(&["feh"]), &have(&[]), None).is_err());
+        // feh and swaybg both installed, nothing decisive: ask
+        assert!(choose_active(&have(&["feh", "swaybg"]), &have(&["Xorg", "swaybg"]), None).is_err());
+        assert_eq!(choose_active(&have(&["feh", "swaybg"]), &have(&[]), Some(Adapter::Feh)), Ok(Adapter::Feh));
     }
 }
