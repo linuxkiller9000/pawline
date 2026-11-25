@@ -264,6 +264,10 @@ struct App {
     /// Rows (full paths) of the open /in folder chooser.
     pill_rows: Vec<std::path::PathBuf>,
     pill_sel: usize,
+    pill_q: Option<String>,
+    /// Show the chip's full path (inspect without sending anything).
+    pill_show: bool,
+    r_pill_name: (f32, f32, f32, f32),
     r_pill_x: (f32, f32, f32, f32),
     settings: theme::Settings,
     settings_open: bool,
@@ -632,7 +636,7 @@ impl App {
                 self.input_top = cl + 1 - nl;
             }
             self.input_top = self.input_top.min(lines.len().saturating_sub(nl));
-            self.input_extra = (nl as f32 - 1.0) * LH;
+            self.input_extra = (nl as f32 - 1.0) * LH + self.chip_h();
             let bh = 40.0 + self.input_extra;
             let top = h - 12.0 - bh;
             self.input_box_top = top;
@@ -649,7 +653,7 @@ impl App {
             for k in 0..nl {
                 let li = self.input_top + k;
                 let (ls, le) = lines[li];
-                let ly = top + 6.0 + k as f32 * LH;
+                let ly = top + 6.0 + self.chip_h() + k as f32 * LH;
                 let text: String = chars[ls..le].iter().collect();
                 let laid = self.shaper.layout(&text, PX, shape::Mode::Auto);
                 let x0 = PAD + 8.0 + if laid.rtl { (wmax - laid.width).max(0.0) } else { 0.0 };
@@ -993,69 +997,69 @@ impl App {
         true
     }
 
-    /// True when the word at the end of the draft is exactly "/in" (at a word boundary).
-    fn in_token(&self) -> bool {
+    fn chip_h(&self) -> f32 {
+        if self.pill.is_some() {
+            28.0
+        } else {
+            0.0
+        }
+    }
+
+    /// "/in" as its own word: (draft before it, search words after it).
+    fn in_query(&self) -> Option<(String, String)> {
         let t = self.input.text();
-        t == "/in" || t.ends_with(" /in")
+        let (idx, _) = t.rmatch_indices("/in").find(|(i, _)| {
+            let before_ok = *i == 0 || t[..*i].ends_with(' ');
+            let after = &t[*i + 3..];
+            before_ok && (after.is_empty() || after.starts_with(' '))
+        })?;
+        Some((t[..idx].to_string(), t[idx + 3..].trim_start().to_string()))
     }
 
     fn pill_active(&self) -> bool {
-        !self.pill_rows.is_empty() && self.in_token() && !self.busy && self.confirm.is_none() && self.expanded
+        self.in_query().is_some() && !self.pill_off && !self.busy && self.confirm.is_none() && self.expanded
     }
 
-    /// Folders to choose from: the working folder's sub-folders, two levels deep, hidden ones left out.
-    fn pill_scan(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-        let mut out = vec![];
-        let mut first: Vec<_> = std::fs::read_dir(root).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
-        first.sort();
-        for p in first {
-            let hidden = p.file_name().map(|n| n.to_string_lossy().starts_with('.')).unwrap_or(true);
-            if hidden || p.is_symlink() || !p.is_dir() {
-                continue;
+    /// Typing "/in" (and words after it) opens and filters the chooser; called after every edit.
+    fn pill_refresh(&mut self) {
+        match self.in_query() {
+            None => {
+                self.pill_off = false;
+                self.pill_rows.clear();
+                self.pill_q = None;
             }
-            out.push(p.clone());
-            let mut sub: Vec<_> = std::fs::read_dir(&p).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
-            sub.sort();
-            for q in sub {
-                let h = q.file_name().map(|n| n.to_string_lossy().starts_with('.')).unwrap_or(true);
-                if !h && !q.is_symlink() && q.is_dir() {
-                    out.push(q);
+            Some((_, q)) => {
+                if self.pill_active() && self.pill_q.as_deref() != Some(q.as_str()) {
+                    self.pill_rows = bridge::folder_candidates(&self.root, &q);
+                    self.pill_q = Some(q);
+                    self.pill_sel = 0;
                 }
             }
         }
-        out.truncate(8);
-        out
     }
 
-    /// Typing "/in" opens the chooser; called after every edit.
-    fn pill_refresh(&mut self) {
-        if !self.in_token() {
-            self.pill_off = false;
-        }
-        if self.in_token() && !self.pill_off && !self.busy && self.confirm.is_none() {
-            if self.pill_rows.is_empty() {
-                self.pill_rows = Self::pill_scan(&self.root);
-                self.pill_sel = 0;
-            }
-        } else {
-            self.pill_rows.clear();
-        }
-    }
-
-    /// Pick the highlighted folder: the "/in" word leaves the draft, the rest of the draft stays, a chip appears.
+    /// Pick the highlighted folder: the "/in ..." words leave the draft, the rest of the draft stays, a chip appears.
     fn pill_pick(&mut self) {
-        if let Some(p) = self.pill_rows.get(self.pill_sel.min(self.pill_rows.len().saturating_sub(1))).cloned() {
-            let t = self.input.text();
-            let rest = t.strip_suffix("/in").unwrap_or(&t).to_string();
+        if let (Some(p), Some((before, _))) = (self.pill_rows.get(self.pill_sel.min(self.pill_rows.len().saturating_sub(1))).cloned(), self.in_query()) {
             self.input.clear();
-            self.input.insert(&rest);
+            self.input.insert(&before);
             self.pill = Some(p);
+            self.pill_show = false;
         }
         self.pill_rows.clear();
+        self.pill_q = None;
+    }
+
+    const PILL_VIS: usize = 8;
+
+    fn pill_window(&self) -> usize {
+        let n = self.pill_rows.len();
+        let sel = self.pill_sel.min(n.saturating_sub(1));
+        sel.saturating_sub(Self::PILL_VIS - 1).min(n.saturating_sub(Self::PILL_VIS))
     }
 
     fn pill_geom(&self) -> (f32, f32) {
-        let rows_h = self.pill_rows.len() as f32 * 26.0;
+        let rows_h = self.pill_rows.len().clamp(1, Self::PILL_VIS) as f32 * 26.0;
         (self.input_box_top - 6.0 - rows_h - 30.0, rows_h)
     }
 
@@ -1065,35 +1069,59 @@ impl App {
         }
         let (top, rows_h) = self.pill_geom();
         fill(pm, &rrect(PAD - 2.0, top, w - 2.0 * PAD + 4.0, rows_h + 26.0, 10.0), (36, 33, 58, 255));
-        let sel = self.pill_sel.min(self.pill_rows.len() - 1);
-        let rows = self.pill_rows.clone();
+        if self.pill_rows.is_empty() {
+            self.text(pm, "No folder matches. Keep typing, or Esc.", PAD + 10.0, top + 20.0, 13.0, (230, 200, 200), (0.0, h));
+        }
+        let n = self.pill_rows.len();
+        let start = self.pill_window();
+        let sel = self.pill_sel.min(n.saturating_sub(1));
+        let rows: Vec<std::path::PathBuf> = self.pill_rows.iter().skip(start).take(Self::PILL_VIS).cloned().collect();
         for (k, p) in rows.iter().enumerate() {
             let y = top + 4.0 + k as f32 * 26.0;
-            if k == sel {
+            if start + k == sel {
                 fill(pm, &rrect(PAD + 2.0, y, w - 2.0 * PAD - 4.0, 24.0, 6.0), self.th().accent.rgba());
             }
             let full = p.to_string_lossy().to_string();
             let shown = if full.chars().count() > 44 { format!("...{}", full.chars().rev().take(41).collect::<Vec<_>>().into_iter().rev().collect::<String>()) } else { full };
             self.text_m(pm, &shown, PAD + 10.0, y + 18.0, 13.0, (255, 255, 255), (0.0, h), shape::Mode::Strict);
         }
-        self.text(pm, "Up/Down choose, Enter or click picks, Esc closes", PAD + 10.0, top + 4.0 + rows_h + 15.0, 11.0, (190, 185, 215), (0.0, h));
+        let hint = format!("{} of {}  Up/Down, Enter or click picks, type to search, Esc", if n == 0 { 0 } else { sel + 1 }, n);
+        self.text(pm, &hint, PAD + 10.0, top + 4.0 + rows_h + 15.0, 11.0, (190, 185, 215), (0.0, h));
     }
 
-    /// The chip above the input: last folder name only, a small x removes it. The full path is on the confirm card.
+    /// The chip lives inside the composer (top row of the input box): "/in" skill label, last folder name, x to remove.
+    /// A click on the name shows or hides the full path above the box. Nothing is sent.
     fn draw_pill(&mut self, pm: &mut Pixmap, h: f32) {
         let Some(p) = self.pill.clone() else {
             self.r_pill_x = (0.0, 0.0, 0.0, 0.0);
+            self.r_pill_name = (0.0, 0.0, 0.0, 0.0);
             return;
         };
         let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "/".into());
         let shown = if name.chars().count() > 24 { format!("{}...", name.chars().take(21).collect::<String>()) } else { name };
+        let label = "/in";
+        let lw = self.measure(label, 12.0, shape::Mode::Strict);
         let tw = self.measure(&shown, 13.0, shape::Mode::Strict);
-        let (x, y, ph) = (PAD - 2.0, self.input_box_top - 30.0, 24.0);
-        let pw = tw + 14.0 + 26.0;
-        fill(pm, &rrect(x, y, pw, ph, 12.0), self.th().accent.rgba());
-        self.text_m(pm, &shown, x + 12.0, y + 17.0, 13.0, (255, 255, 255), (0.0, h), shape::Mode::Strict);
-        self.text(pm, "x", x + pw - 18.0, y + 17.0, 13.0, (235, 230, 250), (0.0, h));
+        let (x, y, ph) = (PAD + 4.0, self.input_box_top + 5.0, 22.0);
+        let pw = lw + tw + 12.0 + 8.0 + 26.0;
+        fill(pm, &rrect(x, y, pw, ph, 11.0), self.th().accent.rgba());
+        self.text(pm, label, x + 8.0, y + 16.0, 12.0, (220, 215, 245), (0.0, h));
+        self.text_m(pm, &shown, x + 8.0 + lw + 6.0, y + 16.0, 13.0, (255, 255, 255), (0.0, h), shape::Mode::Strict);
+        self.text(pm, "x", x + pw - 18.0, y + 16.0, 13.0, (235, 230, 250), (0.0, h));
         self.r_pill_x = (x + pw - 26.0, y, 26.0, ph);
+        self.r_pill_name = (x, y, pw - 26.0, ph);
+        if self.pill_show {
+            let full = p.to_string_lossy().to_string();
+            let ty = self.input_box_top - 28.0;
+            let wd = self.w as f32 - 2.0 * PAD + 4.0;
+            fill(pm, &rrect(PAD - 2.0, ty, wd, 22.0, 8.0), (20, 18, 32, 255));
+            let shown = if self.measure(&full, 12.0, shape::Mode::Strict) > wd - 16.0 {
+                format!("...{}", full.chars().rev().take(46).collect::<Vec<_>>().into_iter().rev().collect::<String>())
+            } else {
+                full
+            };
+            self.text_m(pm, &shown, PAD + 6.0, ty + 16.0, 12.0, (200, 240, 220), (0.0, h), shape::Mode::Strict);
+        }
     }
 
     /// The "zi" chooser is on screen: rows from the last zi reply, nothing typed, nothing else open.
@@ -1285,16 +1313,20 @@ impl App {
                 self.draw();
             }
             Keysym::Return | Keysym::KP_Enter | Keysym::Tab if self.pill_active() => {
+                if self.pill_rows.is_empty() {
+                    return;
+                }
                 self.pill_pick();
                 self.draw();
             }
             Keysym::Up | Keysym::Down if self.pill_active() => {
-                let n = self.pill_rows.len();
+                let n = self.pill_rows.len().max(1);
                 self.pill_sel = if e.keysym == Keysym::Up { (self.pill_sel + n - 1) % n } else { (self.pill_sel + 1) % n };
                 self.draw();
             }
             Keysym::BackSpace if self.pill.is_some() && self.input.caret() == 0 && self.input.sel().is_none() && !self.busy => {
                 self.pill = None;
+                self.pill_show = false;
                 self.draw();
             }
             Keysym::Escape if self.zi_active() => {
@@ -1434,7 +1466,7 @@ impl App {
         let chars: Vec<char> = self.input.text().chars().collect();
         let n = self.input_lines.len().max(1);
         let vis = n.min(MAX_IN_LINES);
-        let k = (((y - self.input_box_top - 6.0) / LH).floor().max(0.0) as usize).min(vis - 1);
+        let k = (((y - self.input_box_top - 6.0 - self.chip_h()) / LH).floor().max(0.0) as usize).min(vis - 1);
         let (ls, le) = self.input_lines.get(self.input_top + k).copied().unwrap_or((0, chars.len()));
         let (ls, le) = (ls.min(chars.len()), le.min(chars.len()));
         let text: String = chars[ls..le].iter().collect();
@@ -1507,7 +1539,13 @@ impl App {
         if self.confirm.is_none() {
             let (px, py) = self.ptr_pos;
             let w = self.w as f32;
+            if self.pill.is_some() && inside(self.r_pill_name, self.ptr_pos) {
+                self.pill_show = !self.pill_show;
+                self.draw();
+                return;
+            }
             if self.pill.is_some() && !self.busy && inside(self.r_pill_x, self.ptr_pos) {
+                self.pill_show = false;
                 self.pill = None;
                 self.draw();
                 return;
@@ -1515,7 +1553,7 @@ impl App {
             if self.pill_active() {
                 let (top, rows_h) = self.pill_geom();
                 if inside((PAD - 2.0, top, w - 2.0 * PAD + 4.0, rows_h + 8.0), self.ptr_pos) {
-                    self.pill_sel = (((py as f32 - top - 4.0) / 26.0).floor().max(0.0) as usize).min(self.pill_rows.len() - 1);
+                    self.pill_sel = (self.pill_window() + (((py as f32 - top - 4.0) / 26.0).floor().max(0.0) as usize)).min(self.pill_rows.len().saturating_sub(1));
                     self.pill_pick();
                     self.draw();
                     return;
@@ -2185,6 +2223,9 @@ fn main() {
         pill_off: false,
         pill_rows: vec![],
         pill_sel: 0,
+        pill_q: None,
+        pill_show: false,
+        r_pill_name: (0.0, 0.0, 0.0, 0.0),
         r_pill_x: (0.0, 0.0, 0.0, 0.0),
         settings: settings_path().map(|p| theme::load(&p)).unwrap_or_default(),
         settings_open: false,

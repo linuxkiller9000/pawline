@@ -288,8 +288,17 @@ pub fn layout(blocks: &[Block], maxw: f32, adv: &mut dyn FnMut(char, f32) -> f32
             }
             Block::Code(lines) => {
                 for src in lines.iter().take(40) {
-                    for l in wrap_runs(&[run(&src.replace('\t', "  "), Style::Code)], 13.0, maxw - 12.0, adv) {
-                        out.push(VLine { kind: Kind::Code, indent: 6.0, px: 13.0, h: 17.0, marker: None, runs: l });
+                    // leading spaces are kept as extra indent (code needs them); blank lines stay as blank lines
+                    let src = src.replace('\t', "  ");
+                    let lead = src.chars().take_while(|c| *c == ' ').count().min(40);
+                    let pad = lead as f32 * adv(' ', 13.0);
+                    let body = src.trim_start_matches(' ');
+                    if body.is_empty() {
+                        out.push(VLine { kind: Kind::Code, indent: 6.0, px: 13.0, h: 17.0, marker: None, runs: vec![] });
+                        continue;
+                    }
+                    for l in wrap_runs(&[run(body, Style::Code)], 13.0, (maxw - 12.0 - pad).max(40.0), adv) {
+                        out.push(VLine { kind: Kind::Code, indent: 6.0 + pad, px: 13.0, h: 17.0, marker: None, runs: l });
                     }
                 }
                 if lines.len() > 40 {
@@ -320,6 +329,15 @@ mod tests {
     }
     fn plain(r: &[Run]) -> String {
         r.iter().map(|r| r.text.as_str()).collect()
+    }
+
+    #[test]
+    fn fenced_code_keeps_leading_indent_and_blank_lines() {
+        let l = layout(&parse("```\nfn a() {\n    deep();\n\n}\n```"), 300.0, &mut adv);
+        let code: Vec<&VLine> = l.iter().filter(|x| matches!(x.kind, Kind::Code)).collect();
+        assert_eq!(code.len(), 4);
+        assert!(code[1].indent > code[0].indent + 20.0, "4 spaces of indent kept");
+        assert!(code[2].runs.is_empty(), "blank line kept");
     }
 
     #[test]

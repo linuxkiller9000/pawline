@@ -750,13 +750,101 @@ pub fn handle_text(state: &mut UiState, input: &str) -> UiReply {
     finish(state, r, t.elapsed())
 }
 
-/// A request typed with (or without) a folder pill. The pill folder is applied to the engine first; a folder that is
-/// outside the home area or gone is refused and the request is NOT run (so it can never act on some other folder).
+/// Why a request cannot run while a folder chip is set, or None when it is fine. With a chip, only requests whose
+/// meaning does not depend on the chip folder being guessed are allowed: creating inside the chip, "here", listing
+/// the chip, explicit paths (absolute or ~), and the fixed places. A bare name ("delete kp") is looked up from the
+/// home root, not inside the chip, so it is refused before any planning instead of silently using another folder.
+pub fn chip_conflict(input: &str, dir: &std::path::Path) -> Option<String> {
+    use pawline_core::plan::{Directive as D, LocationRef as L};
+    let Ok(ds) = pawline_core::intent::parse(input) else { return None };
+    let bare = |l: &L| matches!(l, L::Named(_));
+    let hit = ds.iter().any(|d| match d {
+        D::Create { parent, .. } => bare(parent),
+        D::Delete { target } | D::List { target } => bare(target),
+        D::Rename { target, .. } => bare(target),
+        D::Move { target, dest } | D::Copy { target, dest } => bare(target) || bare(dest),
+        D::SetWallpaper { image, .. } => bare(image),
+        _ => false,
+    });
+    hit.then(|| {
+        format!(
+            "A folder chip is set ({}). Names without a path are looked up from the home folder, not inside the chip, so nothing was run. Remove the chip (Backspace in an empty-start draft, or click its x), or write the full path.",
+            dir.display()
+        )
+    })
+}
+
+/// A request typed with (or without) a folder chip. The chip folder goes to the engine first; a folder outside the
+/// home area or gone is refused. Requests that would resolve names from a different folder are refused before planning.
 pub fn handle_text_in(state: &mut UiState, input: &str, dir: Option<&std::path::Path>) -> UiReply {
     if let Err(e) = state.engine.set_working_dir(dir) {
         return reply("error", format!("The folder chip was not used, so nothing was run: {e}"));
     }
+    if let Some(d) = dir {
+        if let Some(m) = chip_conflict(input, d) {
+            return reply("error", m);
+        }
+    }
     handle_text(state, input)
+}
+
+/// Folders for the /in chooser: remembered folders first (zoxide, else Pawline's own list) matching every keyword,
+/// then a bounded name search under the home folder. Inside home only, no hidden folders, no symlinks, no repeats.
+pub fn folder_candidates_with(
+    home: &std::path::Path,
+    own: Option<&std::path::Path>,
+    now: u64,
+    zox: Option<Vec<pawline_core::dirs::Ranked>>,
+    query: &str,
+    cap: usize,
+) -> Vec<std::path::PathBuf> {
+    let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
+    let mut out: Vec<std::path::PathBuf> = vec![];
+    if let Some(own) = own {
+        for r in pawline_core::dirs::ranked(zox, own, now, query).1 {
+            if r.path.starts_with(home) && r.path != home && !out.contains(&r.path) {
+                out.push(r.path);
+            }
+        }
+    }
+    // fallback: walk the home folder (bounded), match on the full path below home
+    let mut stack = vec![(home.to_path_buf(), 0usize)];
+    let mut seen = 0usize;
+    let mut found: Vec<std::path::PathBuf> = vec![];
+    while let Some((d, depth)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        let mut kids: Vec<std::path::PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        kids.sort();
+        for p in kids.into_iter().rev() {
+            seen += 1;
+            if seen > 5000 {
+                break;
+            }
+            let hidden = p.file_name().map(|n| n.to_string_lossy().starts_with('.')).unwrap_or(true);
+            if hidden || p.is_symlink() || !p.is_dir() {
+                continue;
+            }
+            let rel = p.strip_prefix(home).unwrap_or(&p).to_string_lossy().to_lowercase();
+            if words.iter().all(|w| rel.contains(w)) {
+                found.push(p.clone());
+            }
+            if depth < 5 {
+                stack.push((p, depth + 1));
+            }
+        }
+    }
+    found.sort();
+    for p in found {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out.truncate(cap);
+    out
+}
+
+pub fn folder_candidates(home: &std::path::Path, query: &str) -> Vec<std::path::PathBuf> {
+    folder_candidates_with(home, pawline_core::dirs::own_path().as_deref(), pawline_core::searchmem::now_secs(), pawline_core::dirs::zoxide_ranked(), query, 200)
 }
 
 /// Confirmation received -> result ready: carried planning time plus execution.
@@ -1197,6 +1285,45 @@ mod memory_tests {
         assert_eq!(r.kind, "error");
         assert!(!std::path::Path::new("/tmp/nope").exists() && !root.join("nope").exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn chip_refuses_bare_names_before_planning_and_keeps_explicit_paths() {
+        let d = std::path::Path::new("/h/proj");
+        for bad in ["delete kp", "move kp to Documents", "copy a.txt to b", "rename kp to z", "make a folder called x inside pics"] {
+            assert!(chip_conflict(bad, d).is_some(), "{bad}");
+        }
+        for ok in ["make a folder called x", "list", "delete /h/proj/kp", "move ~/a.txt to ~/b", "move /h/a.txt to Documents"] {
+            let c = chip_conflict(ok, d);
+            assert!(c.is_none(), "{ok}: {c:?}");
+        }
+    }
+
+    #[test]
+    fn folder_search_finds_beyond_first_8_duplicates_and_deep_folders() {
+        let home = std::env::temp_dir().join(format!("pawline-fc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        for i in 0..12 {
+            std::fs::create_dir_all(home.join(format!("area{i:02}/shared"))).unwrap();
+        }
+        std::fs::create_dir_all(home.join("a/b/c/d/deepgem")).unwrap();
+        std::fs::create_dir_all(home.join(".hidden/shared")).unwrap();
+        let own = home.join("ff.json");
+        let all = folder_candidates_with(&home, Some(&own), 1, None, "", 200);
+        assert!(all.len() > 8, "not limited to 8: {}", all.len());
+        let shared = folder_candidates_with(&home, Some(&own), 1, None, "shared", 200);
+        assert_eq!(shared.len(), 12, "duplicate basenames all listed with distinct full paths");
+        assert!(shared.iter().all(|p| !p.to_string_lossy().contains(".hidden")));
+        let deep = folder_candidates_with(&home, Some(&own), 1, None, "deepgem", 200);
+        assert_eq!(deep, vec![home.join("a/b/c/d/deepgem")]);
+        let two = folder_candidates_with(&home, Some(&own), 1, None, "area03 shared", 200);
+        assert_eq!(two, vec![home.join("area03/shared")]);
+        // remembered folders come first
+        let z = vec![pawline_core::dirs::Ranked { score: 9.0, path: home.join("area07/shared") }];
+        let first = folder_candidates_with(&home, Some(&own), 1, Some(z), "shared", 200);
+        assert_eq!(first[0], home.join("area07/shared"));
+        assert_eq!(first.len(), 12);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
