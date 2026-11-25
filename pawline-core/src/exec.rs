@@ -463,6 +463,9 @@ impl ExecutionBackend for DirectFsBackend {
             Operation::OpenApp { name, .. } => Err(PawError::Exec(format!(
                 "launching apps ({name}) is a UI-layer job; not done by the fs backend"
             ))),
+            Operation::GenerateImage { .. } => Err(PawError::Exec(
+                "making pictures is a UI-layer job; not done by the fs backend".into(),
+            )),
             Operation::Answer { text } => Ok(OpOutcome {
                 op: op.clone(),
                 detail: text.clone(),

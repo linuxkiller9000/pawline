@@ -38,6 +38,8 @@ pub enum Directive {
     /// An explicit online search the user asked for by name. Sends the
     /// query to the named source and shows the result; no local effects.
     Search { engine: SearchEngine, query: String },
+    /// A free online picture from a provider the user named. Sends only the prompt.
+    GenerateImage { provider: crate::imagegen::ImageProvider, prompt: String },
 }
 
 /// A place the user pointed at, before resolution against the session context.
@@ -74,6 +76,7 @@ pub enum Operation {
     Undo { entry: u64, summary: String },
     Answer { text: String },
     Search { engine: SearchEngine, query: String },
+    GenerateImage { provider: crate::imagegen::ImageProvider, prompt: String },
 }
 
 impl Operation {
@@ -95,6 +98,11 @@ impl Operation {
                 None => format!("Set wallpaper to {}", image.display()),
             },
             Operation::Answer { text } => text.clone(),
+            Operation::GenerateImage { provider, prompt } => format!(
+                "Make a picture of \"{prompt}\" with {}: this {}. Nothing else is sent. It is saved in ~/Pictures/Pawline.",
+                provider.label(),
+                provider.disclosure()
+            ),
             Operation::Search { engine, query } => match engine {
                 SearchEngine::Web => format!("Search the web for \"{query}\""),
                 SearchEngine::Wiki => format!("Search Wikipedia for \"{query}\""),
@@ -107,7 +115,7 @@ impl Operation {
         matches!(
             self,
             Operation::Delete { .. } | Operation::Move { .. } | Operation::SetWallpaper { .. }
-                | Operation::Undo { .. } | Operation::OpenApp { .. }
+                | Operation::Undo { .. } | Operation::OpenApp { .. } | Operation::GenerateImage { .. }
         )
     }
 }

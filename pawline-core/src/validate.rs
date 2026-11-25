@@ -353,6 +353,10 @@ impl Validator {
                     };
                     ops.push(Operation::OpenApp { name: c.name.clone(), argv: c.argv });
                 }
+                Directive::GenerateImage { provider, prompt } => ops.push(Operation::GenerateImage {
+                    provider: *provider,
+                    prompt: crate::imagegen::clean_prompt(prompt)?,
+                }),
                 Directive::Answer { text } => ops.push(Operation::Answer { text: text.clone() }),
                 Directive::Search { engine, query } => ops.push(Operation::Search {
                     engine: *engine,

@@ -11,6 +11,7 @@ pub mod assist;
 pub mod context;
 pub mod error;
 pub mod exec;
+pub mod imagegen;
 pub mod intent;
 pub mod journal;
 pub mod math;

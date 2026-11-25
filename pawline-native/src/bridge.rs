@@ -21,6 +21,24 @@ impl ExecutionBackend for UiBackend {
                 detail: text,
             });
         }
+        if let Operation::GenerateImage { provider, prompt } = op {
+            // Only reached after the card naming this provider was confirmed.
+            let dir = std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| PawError::Exec("HOME is not set; can't pick the Pictures folder".into()))?
+                .join("Pictures")
+                .join("Pawline");
+            let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(120));
+            let path = pawline_core::imagegen::generate(
+                &http,
+                *provider,
+                prompt,
+                &dir,
+                std::time::Duration::from_secs(4),
+                std::time::Duration::from_secs(240),
+            )?;
+            return Ok(OpOutcome { op: op.clone(), detail: format!("Saved {}", path.display()) });
+        }
         if let Operation::OpenApp { argv, .. } = op {
             // Only reached after the plan (with the exact command) was confirmed.
             let detail = pawline_core::apps::launch(argv)?;
@@ -94,6 +112,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                     .iter()
                     .map(|o| match &o.op {
                         pawline_core::plan::Operation::Search { .. }
+                        | pawline_core::plan::Operation::GenerateImage { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)
                         }
@@ -162,6 +181,7 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
                     .iter()
                     .map(|o| match &o.op {
                         pawline_core::plan::Operation::Search { .. }
+                        | pawline_core::plan::Operation::GenerateImage { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)
                         }

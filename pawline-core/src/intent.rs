@@ -299,9 +299,59 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
     if matches!(first, "generate" | "draw" | "paint" | "imagine" | "render")
         || ((lower.contains("image of") || lower.contains("picture of")) && !lower.contains("wallpaper"))
     {
-        return Ok(Directive::Answer { text: "I can't generate images yet.".into() });
+        return Ok(image_request(cmd, &lower, first));
     }
     Err(PawError::Parse(format!("I don't know how to \"{first}\" yet. Say \"help\" to see what I can do.")))
+}
+
+/// A picture request. The provider must be named; nothing is sent until the
+/// user confirms the card. Without a provider the user gets a plain choice.
+fn image_request(cmd: &str, lower: &str, first: &str) -> Directive {
+    use crate::imagegen::ImageProvider;
+    let mut end = lower.len();
+    let mut provider = None;
+    for (pat, p) in [
+        (" with ai horde", ImageProvider::Horde),
+        (" using ai horde", ImageProvider::Horde),
+        (" via ai horde", ImageProvider::Horde),
+        (" with horde", ImageProvider::Horde),
+        (" using horde", ImageProvider::Horde),
+        (" via horde", ImageProvider::Horde),
+        (" with pollinations", ImageProvider::Pollinations),
+        (" using pollinations", ImageProvider::Pollinations),
+        (" via pollinations", ImageProvider::Pollinations),
+    ] {
+        let t = lower.trim_end_matches(|c: char| c == '.' || c == '!' || c.is_whitespace());
+        if t.ends_with(pat) {
+            end = t.len() - pat.len();
+            provider = Some(p);
+            break;
+        }
+    }
+    let mut start = 0;
+    if matches!(first, "generate" | "draw" | "paint" | "imagine" | "render") {
+        start = first.len();
+    }
+    let mut body = lower[start..end].trim_start();
+    let mut off = lower[start..end].len() - body.len() + start;
+    for pre in ["me ", "an image of ", "a picture of ", "image of ", "picture of ", "an image ", "a picture ", "a image "] {
+        if let Some(rest) = body.strip_prefix(pre) {
+            off += pre.len();
+            body = rest;
+        }
+    }
+    let prompt = cmd.get(off..end).unwrap_or("").trim().trim_end_matches(['.', '!']).trim();
+    if prompt.is_empty() || prompt == "an image" || prompt == "a picture" || prompt == "image" || prompt == "picture" {
+        return Directive::Answer { text: "What should the picture show? For example: generate a picture of a lighthouse with pollinations".into() };
+    }
+    match provider {
+        Some(p) => Directive::GenerateImage { provider: p, prompt: prompt.to_string() },
+        None => Directive::Answer {
+            text: format!(
+                "Pictures come from a free online service, so I need you to pick one. Nothing was sent.\n- Pollinations: quick, no account, sends your description and IP address.\n- AI Horde: volunteer-run, can take minutes, sends your description and IP address.\nSay: {first} {prompt} with pollinations   (or: with horde)"
+            ),
+        },
+    }
 }
 
 /// Plain replies for greetings, thanks and help. Pure text; touches nothing.
@@ -701,5 +751,33 @@ mod file_request_tests {
         assert!(m.starts_with("What should the file be called?") && m.contains("inside pawline"), "{m}");
         let m = q("inside of pawline folder i want to have 3 files.py");
         assert!(m.contains("exact file names") && m.contains("what 3 means") && m.contains("inside pawline"), "{m}");
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    fn one(s: &str) -> Directive { parse(s).unwrap().remove(0) }
+    #[test]
+    fn provider_named_gives_a_directive_with_exact_prompt() {
+        use crate::imagegen::ImageProvider::*;
+        assert_eq!(one("generate a picture of a Red Lighthouse with pollinations"), Directive::GenerateImage { provider: Pollinations, prompt: "a Red Lighthouse".into() });
+        assert_eq!(one("draw a cat using horde."), Directive::GenerateImage { provider: Horde, prompt: "a cat".into() });
+        assert_eq!(one("generate an image of a fox via AI Horde"), Directive::GenerateImage { provider: Horde, prompt: "a fox".into() });
+    }
+    #[test]
+    fn no_provider_asks_and_sends_nothing() {
+        match one("generate an image of a dog") {
+            Directive::Answer { text } => assert!(text.contains("pick one") && text.contains("Nothing was sent")),
+            o => panic!("{o:?}"),
+        }
+        match one("generate a picture with horde") {
+            Directive::Answer { text } => assert!(text.contains("What should the picture show")),
+            o => panic!("{o:?}"),
+        }
+    }
+    #[test]
+    fn wallpaper_and_other_words_are_untouched() {
+        assert!(!matches!(one("set wallpaper to ~/Pictures/a.png"), Directive::GenerateImage { .. }));
     }
 }
