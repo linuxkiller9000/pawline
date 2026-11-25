@@ -460,7 +460,7 @@ impl ExecutionBackend for DirectFsBackend {
                 })?;
                 Ok(done(op, &detail))
             }
-            Operation::OpenApp { name } => Err(PawError::Exec(format!(
+            Operation::OpenApp { name, .. } => Err(PawError::Exec(format!(
                 "launching apps ({name}) is a UI-layer job; not done by the fs backend"
             ))),
             Operation::Answer { text } => Ok(OpOutcome {

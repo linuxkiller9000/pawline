@@ -67,7 +67,8 @@ pub enum Operation {
     Move { from: PathBuf, to: PathBuf },
     Copy { from: PathBuf, to: PathBuf },
     List { path: PathBuf },
-    OpenApp { name: String },
+    /// `argv` is the exact reviewed command (resolved at planning time); never run through a shell.
+    OpenApp { name: String, argv: Vec<String> },
     SetWallpaper { image: PathBuf, via: Option<crate::wallpaper::Adapter>, no_backup_ok: bool },
     /// Undo journal entry `entry`; `summary` is what it will do.
     Undo { entry: u64, summary: String },
@@ -87,7 +88,7 @@ impl Operation {
             Operation::Move { from, to } => format!("Move {} to {}", from.display(), to.display()),
             Operation::Copy { from, to } => format!("Copy {} to {}", from.display(), to.display()),
             Operation::List { path } => format!("List {}", path.display()),
-            Operation::OpenApp { name } => format!("Open {name}"),
+            Operation::OpenApp { name, argv } => format!("Open {name}: run {}", argv.iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() }).collect::<Vec<_>>().join(" ")),
             Operation::Undo { summary, .. } => summary.clone(),
             Operation::SetWallpaper { image, via, .. } => match via {
                 Some(a) => format!("Set wallpaper to {} (using {})", image.display(), a.program()),
@@ -106,7 +107,7 @@ impl Operation {
         matches!(
             self,
             Operation::Delete { .. } | Operation::Move { .. } | Operation::SetWallpaper { .. }
-                | Operation::Undo { .. }
+                | Operation::Undo { .. } | Operation::OpenApp { .. }
         )
     }
 }

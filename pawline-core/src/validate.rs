@@ -11,13 +11,15 @@ use crate::plan::{CreateKind, Directive, LocationRef, Operation, Plan};
 
 pub struct Validator {
     root: PathBuf,
+    /// Test hook: (desktop entry dirs, PATH) to use instead of the real environment.
+    pub app_env: Option<(Vec<PathBuf>, String)>,
 }
 
 impl Validator {
     pub fn new(root: PathBuf) -> Self {
         // The root itself may live behind a symlink; compare in canonical form.
         let root = std::fs::canonicalize(&root).unwrap_or(root);
-        Validator { root }
+        Validator { root, app_env: None }
     }
 
     pub fn root(&self) -> &Path {
@@ -344,7 +346,13 @@ impl Validator {
                     }
                     ops.push(Operation::SetWallpaper { image: path, via, no_backup_ok: *no_backup_ok && !known });
                 }
-                Directive::OpenApp { name } => ops.push(Operation::OpenApp { name: name.clone() }),
+                Directive::OpenApp { name } => {
+                    let c = match &self.app_env {
+                        Some((dirs, path)) => crate::apps::resolve_in(name, dirs, path)?,
+                        None => crate::apps::resolve(name)?,
+                    };
+                    ops.push(Operation::OpenApp { name: c.name.clone(), argv: c.argv });
+                }
                 Directive::Answer { text } => ops.push(Operation::Answer { text: text.clone() }),
                 Directive::Search { engine, query } => ops.push(Operation::Search {
                     engine: *engine,

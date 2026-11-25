@@ -21,6 +21,11 @@ impl ExecutionBackend for UiBackend {
                 detail: text,
             });
         }
+        if let Operation::OpenApp { argv, .. } = op {
+            // Only reached after the plan (with the exact command) was confirmed.
+            let detail = pawline_core::apps::launch(argv)?;
+            return Ok(OpOutcome { op: op.clone(), detail });
+        }
         self.inner.execute(op)
     }
     fn name(&self) -> &'static str {
