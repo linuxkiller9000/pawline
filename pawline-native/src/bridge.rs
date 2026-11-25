@@ -281,6 +281,9 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
         }
         return r;
     }
+    if let Some(r) = deck_command(state, input) {
+        return r;
+    }
     if let Some(r) = shrink_command(state, input) {
         return r;
     }
@@ -421,7 +424,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                         pawline_core::plan::Operation::GenerateImage { provider, .. } => {
                             format!("Picture ready ({})\n{}", provider.label(), o.detail)
                         }
-                        pawline_core::plan::Operation::Shrink { .. } => o.detail.clone(),
+                        pawline_core::plan::Operation::Shrink { .. } | pawline_core::plan::Operation::Deck { .. } => o.detail.clone(),
                         pawline_core::plan::Operation::Search { .. }
                         | pawline_core::plan::Operation::AskOnline { .. }
                         | pawline_core::plan::Operation::List { .. } => {
@@ -556,6 +559,50 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
 }
 
 /// "organize <place>": plan moves of the loose files into type folders and ask. "undo organize" reverses the last one that ran.
+/// "make a presentation from <outline file>": local, deterministic, never changes the outline.
+fn deck_command(state: &mut UiState, input: &str) -> Option<UiReply> {
+    let words = pawline_core::deck::parse_command(input)?;
+    let home = std::fs::canonicalize(&state.root).unwrap_or_else(|_| state.root.clone());
+    let mut found = pawline_core::deck::find(&home, &words);
+    found.truncate(12);
+    match found.len() {
+        0 => Some(reply("message", format!("I found no outline file for \"{words}\" (.md or .txt in Documents, Desktop, Downloads or home). Say the full path, for example \"make a presentation from ~/Documents/talk.md\". The outline uses \"# Title\", \"## Slide title\" and \"- bullet\" lines. Nothing was changed."))),
+        1 => {
+            let from = found.remove(0);
+            let text = match std::fs::metadata(&from) {
+                Ok(m) if m.len() <= pawline_core::deck::MAX_SOURCE => std::fs::read_to_string(&from).unwrap_or_default(),
+                _ => return Some(reply("failed", format!("{} is too big or unreadable (limit 256 KB of text).", from.display()))),
+            };
+            let slides = match pawline_core::deck::parse_outline(&text) {
+                Ok(s) => s,
+                Err(e) => return Some(reply("failed", format!("I can't make slides from {}: {e}. Nothing was changed.", from.display()))),
+            };
+            let to = pawline_core::deck::output_for(&from);
+            let op = Operation::Deck { from, to };
+            let titles = slides.iter().enumerate().map(|(i, s)| format!("  {}. {} ({} line(s))", i + 1, s.title, s.bullets.len())).collect::<Vec<_>>().join("\n");
+            let summary = format!("1. {}\n{} slide(s):\n{titles}", op.describe(), slides.len());
+            state.pending = Some(Plan {
+                ops: vec![op],
+                needs_confirmation: true,
+                confirmation_reasons: vec!["This saves one new .pptx file next to the outline.".into()],
+                assist_derived: false,
+                notes: vec![],
+            });
+            state.pending_request = None;
+            state.organize_pending = None;
+            Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) })
+        }
+        _ => {
+            let rows: Vec<String> = found.iter().map(|c| format!("{}\tmake a presentation from {}", c.display(), c.display())).collect();
+            let list = found.iter().enumerate().map(|(k, c)| format!("{}. {}", k + 1, c.display())).collect::<Vec<_>>().join("\n");
+            state.picks = rows.iter().filter_map(|r| r.split_once('\t').map(|x| x.1.to_string())).collect();
+            let mut out = reply("message", format!("Which outline do you mean by \"{words}\"?\n{list}\nPick one (click, or Up/Down then Tab), then press Enter. You will see the plan first. Nothing is changed yet."));
+            out.plan = Some(rows.join("\n"));
+            Some(out)
+        }
+    }
+}
+
 /// "shrink/compress <video>": one reviewed plan, never touches the original, new copy next to it.
 fn shrink_command(state: &mut UiState, input: &str) -> Option<UiReply> {
     let words = pawline_core::shrink::parse(input)?;
@@ -1092,6 +1139,42 @@ mod memory_tests {
         assert_eq!(t.lines().filter(|l| l.trim() == "audio").count(), 2, "{t}");
         assert_eq!(t.lines().filter(|l| l.trim() == "video").count(), 1, "{t}");
         assert!(r.text.contains("decodes end to end"), "{}", r.text);
+    }
+
+    #[test]
+    fn presentation_from_outline_previews_publishes_without_overwrite_and_undoes() {
+        let root = org_root("deck");
+        let dl = root.join("Downloads");
+        let md = dl.join("talk.md");
+        std::fs::write(&md, "# My talk\nsubtitle\n\n## One\n- a\n- b\n## Two\n- c\n").unwrap();
+        let before = std::fs::read(&md).unwrap();
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "make a presentation from talk");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(r.text.contains("talk.pptx") && r.text.contains("3 slide(s)") && r.text.contains("1. My talk") && r.text.contains("Nothing is sent anywhere"), "{}", r.text);
+        assert!(!dl.join("talk.pptx").exists());
+        // a name taken after the preview is not replaced
+        std::fs::write(dl.join("talk.pptx"), "MINE").unwrap();
+        let d = confirm_exec(&mut st);
+        assert_ne!(d.kind, "executed");
+        assert_eq!(std::fs::read_to_string(dl.join("talk.pptx")).unwrap(), "MINE");
+        std::fs::remove_file(dl.join("talk.pptx")).unwrap();
+        assert_eq!(handle_text(&mut st, "make a presentation from talk").kind, "confirm");
+        let d = confirm_exec(&mut st);
+        assert_eq!(d.kind, "executed", "{}", d.text);
+        let bytes = std::fs::read(dl.join("talk.pptx")).unwrap();
+        assert_eq!(&bytes[0..2], b"PK");
+        assert_eq!(std::fs::read(&md).unwrap(), before);
+        assert!(std::fs::read_dir(&dl).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().contains(".part")));
+        let u = handle_text(&mut st, "undo");
+        assert_eq!(u.kind, "confirm");
+        let _ = confirm_exec(&mut st);
+        assert!(!dl.join("talk.pptx").exists() && md.is_file());
+        // a bad outline and a non-outline file never plan anything
+        std::fs::write(dl.join("bad.txt"), "just words").unwrap();
+        let r = handle_text(&mut st, "make a presentation from bad.txt");
+        assert!(r.kind == "failed" && r.text.contains("heading") && st.pending.is_none(), "{}", r.text);
+        assert!(handle_text(&mut st, "make a presentation from a.png").kind == "message");
     }
 
     #[test]

@@ -131,6 +131,45 @@ impl DirectFsBackend {
         }
     }
 
+    /// Presentation from an outline file: built in memory, written to a unique temp file, published with no-replace.
+    pub fn deck(&self, from: &Path, to: &Path) -> Result<String, PawError> {
+        use std::io::{Read, Write};
+        let (rf, rt) = (self.rel(from)?, self.rel(to)?);
+        let mut src = self.root.open(&rf)?.into_std();
+        let sm = src.metadata()?;
+        if !sm.is_file() || sm.len() > crate::deck::MAX_SOURCE {
+            return Err(PawError::Validation(format!("{} is not a plain text outline of at most 256 KB", from.display())));
+        }
+        let mut text = String::new();
+        Read::take(&mut src, crate::deck::MAX_SOURCE + 1).read_to_string(&mut text).map_err(|_| PawError::Validation("the outline is not readable UTF-8 text".into()))?;
+        let slides = crate::deck::parse_outline(&text).map_err(PawError::Validation)?;
+        let bytes = crate::deck::build_pptx(&slides);
+        refuse_clobber(&self.root, &rt)?;
+        self.tracked("copy", self.rel_str(to)?, None, |id| {
+            let dir = rt.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+            let tmp_rel = dir.join(format!(".pawline-deck-{id}-{}.part", std::process::id()));
+            let mut out = self.root.open_with(&tmp_rel, cap_std::fs::OpenOptions::new().write(true).create_new(true))?;
+            let mine = out.metadata().ok().and_then(|m| crate::platform::id_cap(&m));
+            let is_mine = |root: &Dir| mine.is_some() && root.symlink_metadata(&tmp_rel).ok().and_then(|m| crate::platform::id_cap(&m)) == mine;
+            if let Err(e) = out.write_all(&bytes).and_then(|_| out.sync_all()) {
+                if is_mine(&self.root) {
+                    let _ = self.root.remove_file(&tmp_rel);
+                }
+                return Err(e.into());
+            }
+            if !is_mine(&self.root) {
+                return Err(PawError::Exec("the temporary file was replaced while I worked, so I did not publish anything".into()));
+            }
+            if let Err(e) = rename_noreplace(&self.root, &tmp_rel, &rt) {
+                if is_mine(&self.root) {
+                    let _ = self.root.remove_file(&tmp_rel);
+                }
+                return Err(e);
+            }
+            Ok((format!("Saved {} ({} slides). Open it with LibreOffice Impress, PowerPoint or Google Slides. The outline is untouched. Undo moves the new file to the Pawline trash.", to.display(), slides.len()), None))
+        })
+    }
+
     /// Smaller copy of one video, published only after it was checked. See `shrink.rs`.
     /// ffmpeg and ffprobe work on file handles this function opened through the confined root (the source as stdin,
     /// the temporary file as stdout), never on paths, so nothing can be swapped in between the checks and the work.
@@ -568,6 +607,10 @@ impl ExecutionBackend for DirectFsBackend {
                     let d = self.wallpaper.set(&stored, *via)?;
                     Ok((d, None))
                 })?;
+                Ok(done(op, &detail))
+            }
+            Operation::Deck { from, to } => {
+                let detail = self.deck(from, to)?;
                 Ok(done(op, &detail))
             }
             Operation::Shrink { from, to } => {
