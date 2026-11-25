@@ -17,9 +17,15 @@ Put `pawline` on your PATH first (for example `~/.local/bin/pawline`), or use th
 
 | Panel | Folder | Status |
 |---|---|---|
-| Waybar | `waybar/` | the `pawline` commands it calls were tested in a sandbox; **never run inside Waybar** |
-| Polybar | `polybar/` | same, **never run inside Polybar** |
+| Waybar | `waybar/` | tested with real Waybar 0.9.9 (Ubuntu package) under headless sway: text, colour class, tooltip, click opens and closes the card |
+| Polybar | `polybar/` | tested with real Polybar 3.5.7 (Ubuntu package) under Xvfb: text changes and a click toggles Pawline. Note: Pawline itself ran on Wayland |
 | xfce4-panel (Generic Monitor) | `xfce/` | same, **never run inside xfce4-panel** |
 | KDE Plasma 6 | `kde/` | **untested**: needs a Plasma session; written from the Plasma 6 plasmoid pattern |
 
 Confirmations still happen in Pawline's own card (Cancel focused). The widget only opens or closes it. Typing into the panel itself is not supported.
+
+## Important limit: Wayland only
+
+Pawline's window is a Wayland window. On a pure X11 session (no Wayland display) it falls back to the terminal, so a Polybar/xfce/KDE-X11 widget there could only show `off`. An X11 window backend is not built yet.
+
+Socket safety: Pawline only uses `$XDG_RUNTIME_DIR/pawline.sock` if the folder is yours and not writable by others and the path is a socket owned by you. It replaces only your own stale socket. Anything else at that path is left alone and the widget shows `off`.
