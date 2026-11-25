@@ -330,8 +330,13 @@ impl App {
     }
 
     fn draw_chat(&mut self, pm: &mut Pixmap, w: f32, h: f32, inner_w: f32) {
-        let top = CHAT_TOP;
-        let bot = h - BOTTOM + 4.0;
+        // Scroll hints get their own reserved rows (only while scrolled), so they never cover text.
+        let hint_top = self.chat_max > 0.0 && self.scroll < self.chat_max - 1.0;
+        let hint_bot = self.scroll > 1.0;
+        let top0 = CHAT_TOP;
+        let bot0 = h - BOTTOM + 4.0;
+        let top = top0 + if hint_top { 20.0 } else { 0.0 };
+        let bot = bot0 - if hint_bot { 20.0 } else { 0.0 };
         // layout all messages
         let bub_w = inner_w - 40.0;
         let mut items: Vec<(bool, String, Vec<String>, f32)> = Vec::new();
@@ -370,13 +375,11 @@ impl App {
             y += bh + 8.0;
         }
         pm.draw_pixmap(0, top as i32, cp.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
-        if self.chat_max > 0.0 && self.scroll < self.chat_max - 1.0 {
-            fill(pm, &rrect(PAD, top + 2.0, 190.0, 18.0, 8.0), (30, 28, 40, 230));
-            self.text(pm, "^ older (PageUp / wheel)", PAD + 6.0, top + 15.0, 12.0, (170, 165, 195), (0.0, h));
+        if hint_top {
+            self.text(pm, "^ older (PageUp / wheel)", PAD + 6.0, top0 + 14.0, 12.0, (170, 165, 195), (0.0, h));
         }
-        if self.scroll > 1.0 {
-            fill(pm, &rrect(w - 160.0, bot - 18.0, 146.0, 18.0, 8.0), (30, 28, 40, 230));
-            self.text(pm, "v newer (PageDown)", w - 154.0, bot - 5.0, 12.0, (170, 165, 195), (0.0, h));
+        if hint_bot {
+            self.text(pm, "v newer (PageDown)", PAD + 6.0, bot0 - 5.0, 12.0, (170, 165, 195), (0.0, h));
         }
     }
 
