@@ -5,6 +5,7 @@ mod bridge;
 mod edit;
 mod shape;
 mod theme;
+mod fsearch;
 mod md;
 mod thumb;
 
@@ -289,8 +290,8 @@ struct App {
     skill: Option<usize>,
     r_skill_x: (f32, f32, f32, f32),
     r_skill_name: (f32, f32, f32, f32),
-    search_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    search_tx: Option<channel::Sender<(u64, String, Vec<std::path::PathBuf>)>>,
+    searcher: Option<fsearch::Searcher>,
+    pill_gen: u64,
     pill_wait: bool,
     /// Show the chip's full path (inspect without sending anything).
     pill_show: bool,
@@ -1057,7 +1058,9 @@ impl App {
                 self.pill_q = None;
                 if self.pill_wait {
                     self.pill_wait = false;
-                    self.search_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if let Some(s) = &self.searcher {
+                        s.cancel();
+                    }
                 }
             }
             Some((_, q)) => {
@@ -1072,32 +1075,19 @@ impl App {
     /// Search off the UI thread: a new generation cancels the old walk; the worker waits 120 ms first (debounce)
     /// and sends nothing back if it was superseded. Results come back through the event loop.
     fn start_search(&mut self, q: String) {
-        use std::sync::atomic::Ordering;
-        let gen = self.search_gen.fetch_add(1, Ordering::SeqCst) + 1;
-        let Some(tx) = self.search_tx.clone() else {
-            self.pill_rows = bridge::folder_candidates(&self.root, &q, &|| false);
-            self.pill_sel = 0;
-            return;
-        };
-        self.pill_wait = true;
         self.pill_rows.clear();
-        let g = self.search_gen.clone();
-        let root = self.root.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(120));
-            if g.load(Ordering::SeqCst) != gen {
-                return;
+        self.pill_sel = 0;
+        match &self.searcher {
+            Some(s) => {
+                self.pill_wait = true;
+                self.pill_gen = s.request(&q);
             }
-            let rows = bridge::folder_candidates(&root, &q, &|| g.load(Ordering::SeqCst) != gen);
-            if g.load(Ordering::SeqCst) == gen {
-                let _ = tx.send((gen, q, rows));
-            }
-        });
+            None => self.pill_rows = bridge::folder_candidates(&self.root, &q, &|| false),
+        }
     }
 
     fn on_search(&mut self, gen: u64, q: String, rows: Vec<std::path::PathBuf>) {
-        use std::sync::atomic::Ordering;
-        if gen != self.search_gen.load(Ordering::SeqCst) || self.pill_q.as_deref() != Some(q.as_str()) {
+        if !fsearch::accept_result(self.pill_gen, self.pill_q.as_deref(), gen, &q) {
             return; // stale result
         }
         self.pill_wait = false;
@@ -1108,6 +1098,9 @@ impl App {
 
     /// Pick the highlighted folder: the "/in ..." words leave the draft, the rest of the draft stays, a chip appears.
     fn pill_pick(&mut self) {
+        if !fsearch::can_pick(self.pill_wait, self.pill_rows.len()) {
+            return;
+        }
         if let (Some(p), Some((before, _))) = (self.pill_rows.get(self.pill_sel.min(self.pill_rows.len().saturating_sub(1))).cloned(), self.in_query()) {
             self.input.clear();
             self.input.insert(&before);
@@ -1407,7 +1400,7 @@ impl App {
                 self.draw();
             }
             Keysym::Return | Keysym::KP_Enter | Keysym::Tab if self.pill_active() => {
-                if self.pill_rows.is_empty() {
+                if !fsearch::can_pick(self.pill_wait, self.pill_rows.len()) {
                     return;
                 }
                 self.pill_pick();
@@ -2330,7 +2323,7 @@ fn main() {
         skill: None,
         r_skill_x: (0.0, 0.0, 0.0, 0.0),
         r_skill_name: (0.0, 0.0, 0.0, 0.0),
-        search_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        pill_gen: 0,
         pill_wait: false,
         pill_show: false,
         r_pill_name: (0.0, 0.0, 0.0, 0.0),
@@ -2342,7 +2335,15 @@ fn main() {
         r_gear: (0.0, 0.0, 0.0, 0.0),
         input_w: 300.0,
         tx: req_tx,
-        search_tx: Some(search_tx),
+        searcher: {
+            let root = work_root();
+            let tx = search_tx.clone();
+            let finder: fsearch::Finder = std::sync::Arc::new(move |q, cancel| bridge::folder_candidates(&root, q, cancel));
+            let deliver: fsearch::Deliver = std::sync::Arc::new(move |g, q, rows| {
+                let _ = tx.send((g, q, rows));
+            });
+            Some(fsearch::Searcher::new(finder, deliver, std::time::Duration::from_millis(120)))
+        },
         exit: false,
         panel_only,
         hidden: panel_only,
