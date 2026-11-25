@@ -1,0 +1,10 @@
+[package]
+name = "pawline-needle-native"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Pawline's native-Rust Needle assist (no Cactus runtime)"
+
+[dependencies]
+needle-infer = { path = "../vendor/needle-rs/needle-infer", features = ["parallel"] }
+serde_json = "1"

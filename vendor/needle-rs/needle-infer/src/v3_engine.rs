@@ -1,0 +1,561 @@
+//! Needle 3 generation.
+//!
+//! Prompt assembly is shared with v2 ([`crate::prompt`]) because upstream
+//! assembles it identically. What differs is the completion: v3 emits
+//! `<think>` chain-of-thought before the call, which v2 did not, so the
+//! default token budget is larger and the extractor has to look past it.
+
+pub use needle_core::v3::KvPrecision;
+use needle_core::v3::{V3Cache, V3Model};
+
+use crate::cact::CactV3;
+use crate::constrained::{byte_table, ConstrainedDecoder, ToolDef};
+use crate::prompt::{build_prompt, IM_END, THINK_END, THINK_START, TOOL_CALL_END, TOOL_CALL_START};
+use crate::sp_tokenizer::SpTokenizer;
+use crate::v3::{
+    confidence_head, confidence_head_at_depth, config_from_geometry, model_from_cact,
+    model_from_cact_at_depth, V3LoadError,
+};
+use needle_core::v3::heads::ProbeHead;
+
+/// Default generation cap.
+///
+/// Larger than v2's 128 because v3 reasons before answering: on the shipped
+/// checkpoint a simple weather query spends ~20 tokens inside `<think>` before
+/// opening `<tool_call>`.
+pub const DEFAULT_MAX_NEW_TOKENS: usize = 256;
+
+/// Why generation stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    /// The end-of-sequence token.
+    Eos,
+    /// The assistant turn closed with `<|im_end|>`.
+    ImEnd,
+    /// The token budget ran out.
+    MaxTokens,
+    /// The context window ran out.
+    MaxSeqLen,
+}
+
+/// Generation settings.
+#[derive(Debug, Clone)]
+pub struct V3Options {
+    pub max_new_tokens: usize,
+    /// `0.0` is greedy.
+    pub temperature: f32,
+    pub seed: u64,
+    pub system: Option<String>,
+    /// Restrict the tool-call payload to the declared schema.
+    ///
+    /// Engaged only between the `<tool_call>` markers. Running a JSON grammar
+    /// across the whole turn would be actively wrong for v3, which reasons in
+    /// prose first: a `"name":` inside `<think>` would drive the state machine
+    /// into a constrained state where it does not belong.
+    pub constrain: bool,
+    /// How the key/value cache stores its entries.
+    ///
+    /// [`KvPrecision::Int8`] is the width the container declares in `kv_bits`
+    /// and what upstream's native engine runs, and holds roughly a quarter the
+    /// memory. It is not bit-identical to the f32 path, so it stays opt-in: a
+    /// long session on a constrained target is the case that wants it.
+    pub kv_precision: KvPrecision,
+}
+
+impl Default for V3Options {
+    fn default() -> Self {
+        Self {
+            max_new_tokens: DEFAULT_MAX_NEW_TOKENS,
+            temperature: 0.0,
+            seed: 0,
+            system: None,
+            constrain: false,
+            kv_precision: KvPrecision::F32,
+        }
+    }
+}
+
+/// What a generation produced.
+#[derive(Debug, Clone)]
+pub struct V3Result {
+    /// The decoded completion, without the prompt.
+    pub text: String,
+    pub tokens: Vec<u32>,
+    pub stop: StopReason,
+    /// Positions consumed, prompt included.
+    pub positions: usize,
+    /// The prompt did not fit in the context and was cut. The answer is built
+    /// on a partial prompt and should be treated with suspicion.
+    pub prompt_truncated: bool,
+}
+
+/// A loaded Needle 3 model with its tokenizer.
+pub struct V3Engine {
+    pub model: V3Model,
+    pub tokenizer: SpTokenizer,
+    /// Present when the container exports one. v3 exports confidence only —
+    /// there is no contrastive head, so no retrieval.
+    pub confidence: Option<ProbeHead>,
+    eos_id: u32,
+    bos_id: u32,
+    im_end_id: Option<u32>,
+}
+
+impl V3Engine {
+    /// Load from a `.cact` v3 container.
+    pub fn load<P: AsRef<std::path::Path>>(path: P) -> Result<Self, V3EngineError> {
+        let cact = CactV3::load(path).map_err(V3EngineError::Io)?;
+        Self::from_cact(&cact)
+    }
+
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, V3EngineError> {
+        let cact = CactV3::from_bytes(bytes).map_err(|e| V3EngineError::Load(e.into()))?;
+        Self::from_cact(&cact)
+    }
+
+    /// Load a ladder rung: the `layers`-block subnetwork of a full container.
+    ///
+    /// Needle 3 is trained so that every depth from 2 to `num_layers` is a
+    /// deployable model. Upstream ships a rung by rewriting the container;
+    /// this takes the same slice at load time, so one file serves every depth
+    /// without a second download — a shallow pass for a simple command, the
+    /// full stack for a hard one.
+    ///
+    /// The blocks kept are not a prefix. They are chosen by bisecting from both
+    /// endpoints, so the rungs nest and stay spread across the stack; block 0
+    /// and the last block are in every rung. Quality falls with depth, steeply
+    /// at the bottom: on the shipped checkpoint 2 and 4 blocks are not usable
+    /// for tool calling, while 6 upward answer correctly.
+    ///
+    /// `layers` equal to the container's own depth loads it unchanged. A depth
+    /// outside `2..=num_layers` is rejected.
+    pub fn load_with_depth<P: AsRef<std::path::Path>>(
+        path: P,
+        layers: usize,
+    ) -> Result<Self, V3EngineError> {
+        let cact = CactV3::load(path).map_err(V3EngineError::Io)?;
+        Self::from_cact_at_depth(&cact, layers)
+    }
+
+    /// As [`Self::load_with_depth`], from bytes already in memory.
+    pub fn from_bytes_with_depth(bytes: Vec<u8>, layers: usize) -> Result<Self, V3EngineError> {
+        let cact = CactV3::from_bytes(bytes).map_err(|e| V3EngineError::Load(e.into()))?;
+        Self::from_cact_at_depth(&cact, layers)
+    }
+
+    pub fn from_cact(cact: &CactV3) -> Result<Self, V3EngineError> {
+        let model = model_from_cact(cact).map_err(V3EngineError::Load)?;
+        Self::finish(cact, model, None)
+    }
+
+    /// Build the engine from a rung of `cact`.
+    pub fn from_cact_at_depth(cact: &CactV3, layers: usize) -> Result<Self, V3EngineError> {
+        let model = model_from_cact_at_depth(cact, layers).map_err(V3EngineError::Load)?;
+        Self::finish(cact, model, Some(layers))
+    }
+
+    fn finish(cact: &CactV3, model: V3Model, depth: Option<usize>) -> Result<Self, V3EngineError> {
+        let blob = cact.tokenizer_blob().ok_or(V3EngineError::NoTokenizer)?;
+        let tokenizer = SpTokenizer::from_blob(blob).map_err(|_| V3EngineError::BadTokenizer)?;
+        let im_end_id = tokenizer.id_of(IM_END);
+        // The head is sliced against the *container's* depth, so it is derived
+        // from the parent config rather than the model's own.
+        let confidence = match depth {
+            Some(d) => {
+                let parent = config_from_geometry(&cact.geom)
+                    .map_err(|e| V3EngineError::Load(V3LoadError::Geometry(e)))?;
+                confidence_head_at_depth(cact, &parent, d).map_err(V3EngineError::Load)?
+            }
+            None => confidence_head(cact, &model.cfg).map_err(V3EngineError::Load)?,
+        };
+        Ok(Self {
+            model,
+            tokenizer,
+            confidence,
+            // Upstream fixes these in `needle/model/tokenizer.py`.
+            eos_id: 1,
+            bos_id: 2,
+            im_end_id,
+        })
+    }
+
+    /// Assemble the chat prompt. Shared with v2.
+    pub fn build_prompt(query: &str, tools_json: &str, system: Option<&str>) -> String {
+        build_prompt(query, tools_json, system)
+    }
+
+    /// Generate a completion, calling `on_token` with each decoded delta.
+    ///
+    /// The callback receives *decoded text*, not the raw SentencePiece piece.
+    /// That distinction matters: a newline arrives as the byte-fallback token
+    /// `<0x0A>`, and a caller appending raw pieces would render that literally.
+    /// Concatenating every delta reproduces the returned text exactly.
+    pub fn generate_with<F>(
+        &self,
+        query: &str,
+        tools_json: &str,
+        opts: &V3Options,
+        mut on_token: F,
+    ) -> V3Result
+    where
+        F: FnMut(u32, &str),
+    {
+        let prompt = build_prompt(query, tools_json, opts.system.as_deref());
+        let mut ids = alloc_prompt_ids(self.bos_id, &self.tokenizer, &prompt);
+
+        // A prompt longer than the context cannot be served. Truncating and
+        // saying so beats running past the limit, where the global layers'
+        // ring would wrap and attention would read positions as their own
+        // past — bounded now, but still not what the model was trained on.
+        let max = self.model.cfg.max_seq_len;
+        let prompt_truncated = ids.len() > max;
+        if prompt_truncated {
+            ids.truncate(max);
+        }
+
+        let budget = max.saturating_sub(ids.len()).min(opts.max_new_tokens);
+        let mut cache =
+            V3Cache::with_precision(&self.model.cfg, ids.len() + budget, opts.kv_precision);
+
+        // Prefill the whole prompt in one batched pass, then continue from the
+        // cache it fills. Stepping the prompt through `decode_step` costs a
+        // full weight sweep per position; this pays it once per chunk, and the
+        // result is bit-identical — `batched_prefill_leaves_the_cache_where_
+        // stepping_would` asserts the continuation, not just the logits.
+        let mut logits = if ids.is_empty() {
+            Vec::new()
+        } else {
+            self.model.prefill(&ids, &mut cache)
+        };
+
+        let mut out_tokens = Vec::new();
+        let mut emitted = String::new();
+        let mut rng = SplitMix64::new(opts.seed);
+        let mut stop = StopReason::MaxTokens;
+
+        // Both markers are single user-defined tokens, so entering and leaving
+        // the payload is an id comparison rather than a text scan.
+        let tc_start = self.tokenizer.id_of(TOOL_CALL_START);
+        let tc_end = self.tokenizer.id_of(TOOL_CALL_END);
+        let mut grammar = if opts.constrain {
+            let defs = ToolDef::from_json(tools_json);
+            (!defs.is_empty()).then(|| {
+                ConstrainedDecoder::new(&defs, byte_table(&self.tokenizer)).with_unique_arg_keys()
+            })
+        } else {
+            None
+        };
+        let mut in_tool_call = false;
+
+        for _ in 0..budget {
+            if in_tool_call {
+                if let Some(g) = grammar.as_ref() {
+                    let mask = g.logit_mask(self.model.cfg.logit_rows());
+                    for (l, &m) in logits.iter_mut().zip(mask.iter()) {
+                        *l += m;
+                    }
+                }
+            }
+            let next = if opts.temperature <= 0.0 {
+                argmax(&logits)
+            } else {
+                sample(&logits, opts.temperature, &mut rng)
+            };
+
+            if next == self.eos_id {
+                stop = StopReason::Eos;
+                break;
+            }
+            if Some(next) == self.im_end_id {
+                stop = StopReason::ImEnd;
+                break;
+            }
+
+            out_tokens.push(next);
+            // Decode the whole run and emit only what is new. Byte-fallback
+            // tokens make up a character across several ids, so a per-piece
+            // decode would split multi-byte text; this cannot.
+            let full = self.tokenizer.decode(&out_tokens);
+            if full.len() > emitted.len() {
+                on_token(next, &full[emitted.len()..]);
+                emitted = full;
+            }
+            ids.push(next);
+
+            if grammar.is_some() {
+                if Some(next) == tc_start {
+                    in_tool_call = true;
+                } else if Some(next) == tc_end {
+                    in_tool_call = false;
+                } else if in_tool_call {
+                    if let Some(g) = grammar.as_mut() {
+                        g.update(next);
+                    }
+                }
+            }
+
+            if cache.pos() >= self.model.cfg.max_seq_len {
+                stop = StopReason::MaxSeqLen;
+                break;
+            }
+            logits = self.model.decode_step(&mut cache, next);
+        }
+
+        V3Result {
+            text: self.tokenizer.decode(&out_tokens),
+            tokens: out_tokens,
+            stop: if prompt_truncated {
+                StopReason::MaxSeqLen
+            } else {
+                stop
+            },
+            positions: cache.pos(),
+            prompt_truncated,
+        }
+    }
+
+    /// Generate a completion.
+    pub fn generate(&self, query: &str, tools_json: &str, opts: &V3Options) -> V3Result {
+        self.generate_with(query, tools_json, opts, |_, _| {})
+    }
+
+    /// Generate with defaults and return the completion text.
+    pub fn run(&self, query: &str, tools_json: &str) -> String {
+        self.generate(query, tools_json, &V3Options::default()).text
+    }
+
+    /// The tool-call payload, or `None` when the model emitted no call.
+    ///
+    /// `Some("[]")` is a deliberate abstention — the model decided no tool
+    /// applies — and is different from `None`, which means no `<tool_call>`
+    /// markers were produced at all. Callers that conflate the two will treat
+    /// a considered "no" as a failure.
+    pub fn run_json(&self, query: &str, tools_json: &str) -> Option<String> {
+        extract_tool_call(&self.run(query, tools_json))
+    }
+
+    /// How confident the model is in a completion it produced.
+    ///
+    /// **Pass the completion.** The head scores a finished judgement — the
+    /// formatted prompt *plus* the answer — not a question.
+    ///
+    /// v3 differs from v2 here, and the difference is a trap. On v2 a bare
+    /// query scored near zero, so the misuse announced itself; on the shipped
+    /// v3 checkpoint the same query scores 0.80 while the correct completion
+    /// scores 0.93 and a wrong one 0.26. A bare query therefore looks like a
+    /// confident answer and is not one. Measured, not assumed — see
+    /// `confidence_scores_the_answer_not_the_question`.
+    ///
+    /// Returns a probability in `(0, 1)`, or `None` when the container exports
+    /// no confidence head.
+    pub fn confidence_for(&self, query: &str, tools_json: &str, completion: &str) -> Option<f32> {
+        let head = self.confidence.as_ref()?;
+        let mut text = build_prompt(query, tools_json, None);
+        text.push_str(completion);
+
+        let mut ids = Vec::with_capacity(text.len() / 3 + 2);
+        ids.push(self.bos_id);
+        ids.extend(self.tokenizer.encode(&text));
+        // Same bound as generation: past the context the global layers' ring
+        // wraps, so a longer input would be scored on history it cannot see.
+        ids.truncate(self.model.cfg.max_seq_len);
+
+        // Streamed, not materialised: holding every cell would cost
+        // seq * (layers + 1) * d_model floats — 126 MB at 2048 positions, 504
+        // MB at full context — which a browser tab does not survive.
+        let logit = self.model.forward_head(&ids, head)[0];
+        Some(1.0 / (1.0 + (-logit).exp()))
+    }
+
+    /// Generate, then score what was generated.
+    ///
+    /// Cheaper to reason about than calling [`Self::generate`] and
+    /// [`Self::confidence_for`] separately, and impossible to get the argument
+    /// order wrong.
+    pub fn run_scored(&self, query: &str, tools_json: &str) -> (V3Result, Option<f32>) {
+        let res = self.generate(query, tools_json, &V3Options::default());
+        let p = self.confidence_for(query, tools_json, &res.text);
+        (res, p)
+    }
+
+    /// The model's reasoning, when it emitted any.
+    pub fn reasoning(text: &str) -> Option<&str> {
+        between(text, THINK_START, THINK_END).map(str::trim)
+    }
+}
+
+/// Pull the `<tool_call>…</tool_call>` payload out of a completion.
+pub fn extract_tool_call(text: &str) -> Option<String> {
+    between(text, TOOL_CALL_START, TOOL_CALL_END).map(|s| s.trim().to_string())
+}
+
+fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let start = text.find(open)? + open.len();
+    let rest = &text[start..];
+    match rest.find(close) {
+        Some(end) => Some(&rest[..end]),
+        // An unterminated marker still carries the payload the model got to
+        // before the budget ran out; returning it beats returning nothing.
+        None => Some(rest),
+    }
+}
+
+fn alloc_prompt_ids(bos: u32, tok: &SpTokenizer, prompt: &str) -> Vec<u32> {
+    let mut ids = Vec::with_capacity(prompt.len() / 3 + 2);
+    ids.push(bos);
+    ids.extend(tok.encode(prompt));
+    ids
+}
+
+fn argmax(logits: &[f32]) -> u32 {
+    let mut best = 0usize;
+    let mut top = f32::NEG_INFINITY;
+    for (i, &v) in logits.iter().enumerate() {
+        if v > top {
+            top = v;
+            best = i;
+        }
+    }
+    best as u32
+}
+
+fn sample(logits: &[f32], temperature: f32, rng: &mut SplitMix64) -> u32 {
+    let inv = 1.0 / temperature;
+    let mut max = f32::NEG_INFINITY;
+    for &v in logits {
+        if v > max {
+            max = v;
+        }
+    }
+    let mut sum = 0.0f64;
+    for &v in logits {
+        sum += ((v - max) * inv).exp() as f64;
+    }
+    let mut target = rng.next_f64() * sum;
+    for (i, &v) in logits.iter().enumerate() {
+        target -= ((v - max) * inv).exp() as f64;
+        if target <= 0.0 {
+            return i as u32;
+        }
+    }
+    (logits.len() - 1) as u32
+}
+
+/// SplitMix64 — small, seedable and reproducible, which is what sampling
+/// parity needs. Not cryptographic.
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn next_f64(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+/// Anything that can go wrong loading an engine.
+#[derive(Debug)]
+pub enum V3EngineError {
+    Io(std::io::Error),
+    Load(V3LoadError),
+    NoTokenizer,
+    BadTokenizer,
+}
+
+impl core::fmt::Display for V3EngineError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "{e}"),
+            Self::Load(e) => write!(f, "{e}"),
+            Self::NoTokenizer => write!(f, "container carries no tokenizer"),
+            Self::BadTokenizer => write!(f, "embedded tokenizer did not decode"),
+        }
+    }
+}
+
+impl std::error::Error for V3EngineError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_a_call_past_the_reasoning() {
+        let text = "<think>\nweather in Paris\n</think>\n\
+                    <tool_call>[{\"name\":\"get_weather\"}]</tool_call>";
+        assert_eq!(
+            extract_tool_call(text).as_deref(),
+            Some("[{\"name\":\"get_weather\"}]")
+        );
+        assert_eq!(V3Engine::reasoning(text), Some("weather in Paris"));
+    }
+
+    #[test]
+    fn an_empty_array_is_an_abstention_not_a_failure() {
+        // The distinction callers must not collapse.
+        assert_eq!(
+            extract_tool_call("<tool_call>[]</tool_call>").as_deref(),
+            Some("[]")
+        );
+        assert_eq!(extract_tool_call("I cannot help with that"), None);
+    }
+
+    #[test]
+    fn an_unterminated_call_still_yields_its_payload() {
+        // Budget exhausted mid-call: better to hand back what there is than
+        // to report nothing.
+        assert_eq!(
+            extract_tool_call("<tool_call>[{\"name\":\"get_w").as_deref(),
+            Some("[{\"name\":\"get_w")
+        );
+    }
+
+    #[test]
+    fn sampling_is_reproducible_for_a_seed() {
+        let logits = [0.1f32, 2.0, 0.3, 1.5];
+        let draw = |seed| {
+            let mut r = SplitMix64::new(seed);
+            (0..16)
+                .map(|_| sample(&logits, 1.0, &mut r))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(draw(42), draw(42), "same seed must replay");
+        assert_ne!(draw(42), draw(43), "different seeds should diverge");
+    }
+
+    #[test]
+    fn greedy_picks_the_maximum() {
+        assert_eq!(argmax(&[0.1, 2.0, 0.3]), 1);
+        assert_eq!(argmax(&[-5.0, -1.0, -9.0]), 1);
+    }
+}
+
+#[cfg(test)]
+mod thread_safety {
+    use super::*;
+
+    /// The C ABI hands out a `*mut NeedleV3Handle` and its methods take `&self`,
+    /// so a caller may reasonably drive one engine from several threads. That is
+    /// only sound if the engine is `Sync`; if a future field breaks it, this
+    /// fails to compile rather than producing a data race in someone's server.
+    #[allow(dead_code)]
+    fn engine_is_shareable_across_threads() {
+        fn require<T: Send + Sync>() {}
+        require::<V3Engine>();
+        require::<needle_core::v3::V3Model>();
+        // The cache is per-session mutable state and is deliberately NOT
+        // shared; it only needs to move between threads.
+        fn require_send<T: Send>() {}
+        require_send::<needle_core::v3::V3Cache>();
+    }
+}

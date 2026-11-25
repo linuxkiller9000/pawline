@@ -1,0 +1,18 @@
+[package]
+name = "needle-core"
+version = "0.3.1"
+edition = "2021"
+license = "MIT"
+description = "Vendored from Geekgineer/needle-rs (MIT): Needle compute kernels"
+rust-version = "1.87"
+
+[features]
+default = ["simd"]
+simd = []
+std = []
+bench-internals = []
+parallel = ["std", "dep:rayon"]
+
+[dependencies]
+libm = { version = "0.2", default-features = false }
+rayon = { version = "1", optional = true }

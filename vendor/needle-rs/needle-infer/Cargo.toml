@@ -1,0 +1,14 @@
+[package]
+name = "needle-infer"
+version = "0.3.1"
+edition = "2021"
+license = "MIT"
+description = "Vendored from Geekgineer/needle-rs (MIT): Needle inference engine"
+rust-version = "1.87"
+
+[features]
+default = []
+parallel = ["needle-core/parallel"]
+
+[dependencies]
+needle-core = { path = "../needle-core" }
