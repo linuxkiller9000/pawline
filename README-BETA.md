@@ -25,6 +25,14 @@ Pawline works inside your home folder (or the folder in PAWLINE_ROOT).
 - Delete moves items to ~/.local/share/pawline/trash. Undo asks first.
 - No shell commands are run. File actions are confined to your home folder.
 
+## Known limits
+
+- One target per file command. "delete a, b, c" is treated as ONE name that
+  contains the commas, so it fails safely and removes nothing. File names can
+  contain commas and the word "and", so Pawline does not guess where they split.
+  Quoted multi-target syntax is planned.
+- The assist is slow on old CPUs (see below).
+
 ## Not tested yet (read this)
 
 - Not tested on the Dell or on niri. Tests so far: headless sway in a sandbox.
