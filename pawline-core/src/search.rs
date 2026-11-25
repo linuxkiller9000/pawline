@@ -4,10 +4,35 @@
 use crate::error::PawError;
 use crate::plan::SearchEngine;
 
+const LIVE_NOTE: &str = "I can't look up live data like current prices, stock, availability or opening hours. Check the shop's or provider's own site for that.";
+
 pub fn run(engine: SearchEngine, query: &str) -> Result<String, PawError> {
+    run_with(engine, query, wikipedia_summary, duckduckgo_instant)
+}
+
+/// Time-sensitive asks (price, stock, hours, weather...) are never answered
+/// with an encyclopedia summary: the best match is often an unrelated article.
+/// A web instant answer is kept but labelled as possibly out of date.
+fn run_with(
+    engine: SearchEngine,
+    query: &str,
+    wiki: impl FnOnce(&str) -> Result<String, PawError>,
+    web: impl FnOnce(&str) -> Result<String, PawError>,
+) -> Result<String, PawError> {
+    let sensitive = crate::searchmem::time_sensitive(query);
     match engine {
-        SearchEngine::Wiki => wikipedia_summary(query),
-        SearchEngine::Web => duckduckgo_instant(query),
+        SearchEngine::Wiki if sensitive => Ok(format!(
+            "Wikipedia is a reference, not live data, so I did not show an article for \"{query}\". {LIVE_NOTE}"
+        )),
+        SearchEngine::Wiki => wiki(query),
+        SearchEngine::Web => {
+            let r = web(query)?;
+            if sensitive {
+                Ok(format!("{r}\nNote: this may not be current. {LIVE_NOTE}"))
+            } else {
+                Ok(r)
+            }
+        }
     }
 }
 
@@ -118,5 +143,23 @@ mod tests {
         assert_eq!(super::enc("linus torvalds"), "linus_torvalds");
         assert_eq!(super::enc_query("linus torvalds"), "linus+torvalds");
         assert_eq!(super::enc("a/b?c"), "a%2Fb%3Fc");
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+    fn boom(_: &str) -> Result<String, PawError> { panic!("must not fetch") }
+    #[test]
+    fn price_on_wiki_is_not_answered_with_an_article() {
+        let r = run_with(SearchEngine::Wiki, "price of milk", boom, boom).unwrap();
+        assert!(r.contains("live data") && !r.contains("Wikipedia -"));
+    }
+    #[test]
+    fn price_on_web_is_labelled_and_plain_wiki_unchanged() {
+        let r = run_with(SearchEngine::Web, "price of milk", boom, |_| Ok("X".into())).unwrap();
+        assert!(r.starts_with("X") && r.contains("may not be current"));
+        let w = run_with(SearchEngine::Wiki, "cats", |_| Ok("Wikipedia - Cat".into()), boom).unwrap();
+        assert_eq!(w, "Wikipedia - Cat");
     }
 }
