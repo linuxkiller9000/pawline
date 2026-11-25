@@ -49,10 +49,11 @@ pub fn plan(folder: &Path) -> Result<Organized, String> {
     for n in &names {
         let Some(cat) = category(n) else { left += 1; continue };
         let cdir = folder.join(cat);
-        if cdir.exists() && !cdir.is_dir() {
+        let is_link = std::fs::symlink_metadata(&cdir).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+        if is_link || (cdir.exists() && !cdir.is_dir()) {
             if !blocked.contains(&cat) {
                 blocked.push(cat);
-                notes.push(format!("{cat} exists but is not a folder, so those files stay where they are."));
+                notes.push(format!("{cat} exists but is not a plain folder (or is a link), so those files stay where they are."));
             }
             continue;
         }

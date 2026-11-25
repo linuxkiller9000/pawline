@@ -512,7 +512,15 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
             };
             reply("executed", body)
         }
-        Ok(Response::Failed { completed, failed, error, remaining }) => reply(if error.to_string().contains("Cancelled.") { "message" } else { "failed" }, fail_text(completed.len(), &failed.to_string(), &error.to_string(), remaining.to_string())),
+        Ok(Response::Failed { completed, failed, error, remaining }) => {
+            let mut text = fail_text(completed.len(), &failed.to_string(), &error.to_string(), remaining.to_string());
+            if organize_n.is_some() && !completed.is_empty() {
+                // The steps that did happen are in the journal; the failed and unrun ones are not.
+                state.undo_batch = Some(completed.len());
+                text.push_str(&format!("\nThe {} completed step(s) stay done. Say \"undo organize\" to put them back.", completed.len()));
+            }
+            reply(if error.to_string().contains("Cancelled.") { "message" } else { "failed" }, text)
+        }
         _ => reply("error", "unexpected state".into()),
     }
 }
@@ -602,7 +610,7 @@ fn organize_command(state: &mut UiState, input: &str) -> Option<UiReply> {
     let plan = Plan {
         ops: o.ops,
         needs_confirmation: true,
-        confirmation_reasons: vec![format!("This moves {moves} file(s) inside {}. Nothing is deleted or overwritten. Check the list before saying yes.", folder.display())],
+        confirmation_reasons: vec![format!("This moves {moves} file(s) inside {}. Files are moved, never copied, deleted or overwritten. If a move cannot be done I stop and say which. Check the list before saying yes.", folder.display())],
         assist_derived: false,
         notes: o.notes.clone(),
     };
@@ -788,6 +796,93 @@ mod memory_tests {
         // hints are rebuilt per request from zoxide/own data, so exercise the engine call directly
         assert!(matches!(st.engine.resolve_place("pics"), Err(PawError::Ambiguous { .. })));
         assert!(root.join("a/Pics/z.png").exists() && root.join("b/Pics/y.png").exists());
+    }
+
+    #[test]
+    fn organize_failure_midway_keeps_completed_moves_journaled_and_undoable() {
+        let root = org_root("fail");
+        let dl = root.join("Downloads");
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "organize downloads");
+        assert_eq!(r.kind, "confirm");
+        // after the preview: one source vanishes
+        std::fs::remove_file(dl.join("b.pdf")).unwrap();
+        let done = confirm_exec(&mut st);
+        assert_eq!(done.kind, "failed", "{}", done.text);
+        assert!(done.text.contains("Stopped partway") && done.text.contains("undo organize"), "{}", done.text);
+        // completed: Images created and a.png moved. failed one not recorded as success, the other untouched
+        assert!(dl.join("Images/a.png").is_file());
+        assert!(!dl.join("Videos/c.mp4").exists());
+        assert!(dl.join("c.mp4").is_file(), "the original of an unrun move is untouched");
+        // the completed steps are recoverable
+        let u = handle_text(&mut st, "undo organize");
+        assert!(u.text.contains("Undid the organize"), "{}", u.text);
+        assert!(dl.join("a.png").is_file() && !dl.join("Images").exists());
+        // nothing was remembered as a successful plan
+        assert!(st.organize_pending.is_none());
+    }
+
+    #[test]
+    fn organize_refuses_symlinks_outside_and_protects_undo_from_overwrites() {
+        let root = org_root("sym");
+        let dl = root.join("Downloads");
+        let outside = std::env::temp_dir().join(format!("pawline-org-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        // a symlinked category folder and a symlinked file are never followed
+        std::os::unix::fs::symlink(&outside, dl.join("Images")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.pdf"), dl.join("link.pdf")).unwrap();
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "organize downloads");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(!r.text.contains("link.pdf") && !r.text.contains("Images/a.png"), "{}", r.text);
+        let _ = confirm_exec(&mut st);
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none(), "nothing written outside");
+        assert!(dl.join("a.png").exists());
+        // a folder outside home is refused outright
+        let r = handle_text(&mut st, &format!("organize {}", outside.display()));
+        assert!(r.kind != "confirm" && st.pending.is_none(), "{}", r.text);
+        // undo never overwrites: a file that took the original name stays
+        let _ = handle_text(&mut st, "undo organize");
+        let root2 = org_root("undo");
+        let dl2 = root2.join("Downloads");
+        let mut st2 = new_state(root2.clone());
+        let _ = handle_text(&mut st2, "organize downloads");
+        let _ = confirm_exec(&mut st2);
+        std::fs::write(dl2.join("a.png"), "SOMETHING ELSE").unwrap();
+        let u = handle_text(&mut st2, "undo organize");
+        assert_eq!(u.kind, "failed", "{}", u.text);
+        assert_eq!(std::fs::read_to_string(dl2.join("a.png")).unwrap(), "SOMETHING ELSE");
+        assert_eq!(std::fs::read_to_string(dl2.join("Images/a.png")).unwrap(), "a.png", "the moved file is kept, not lost");
+    }
+
+    #[test]
+    fn organize_with_many_files_lists_every_move_and_the_count() {
+        let root = org_root("many");
+        let dl = root.join("Downloads");
+        for i in 0..230 {
+            std::fs::write(dl.join(format!("p{i:03}.png")), "x").unwrap();
+        }
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "organize downloads");
+        assert_eq!(r.kind, "confirm");
+        let moves = r.text.lines().filter(|l| l.contains(" Move ")).count();
+        assert_eq!(moves, 200, "every planned move is on the card");
+        assert!(r.text.contains("move 200 file(s)") && r.text.contains("only the first 200"), "{}", &r.text[..300]);
+    }
+
+    #[test]
+    fn organize_destination_taken_between_preview_and_confirm_is_not_overwritten() {
+        let root = org_root("race");
+        let dl = root.join("Downloads");
+        std::fs::create_dir_all(dl.join("Images")).unwrap();
+        let mut st = new_state(root.clone());
+        assert_eq!(handle_text(&mut st, "organize downloads").kind, "confirm");
+        std::fs::write(dl.join("Images/a.png"), "TAKEN").unwrap();
+        let done = confirm_exec(&mut st);
+        assert_eq!(done.kind, "failed", "{}", done.text);
+        assert_eq!(std::fs::read_to_string(dl.join("Images/a.png")).unwrap(), "TAKEN");
+        assert_eq!(std::fs::read_to_string(dl.join("a.png")).unwrap(), "a.png", "original untouched");
+        assert!(!dl.join("Documents/b.pdf").exists(), "later moves were not attempted");
     }
 
     #[test]
