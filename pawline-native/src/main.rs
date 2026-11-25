@@ -3,6 +3,7 @@
 //! OpenGL, EGL, GTK or WebKit is loaded.
 mod bridge;
 mod edit;
+mod thumb;
 
 use bridge::UiReply;
 use smithay_client_toolkit::{
@@ -85,6 +86,18 @@ const PAD: f32 = 14.0;
 const CHAT_TOP: f32 = 64.0;
 const BOTTOM: f32 = 64.0;
 const MAX_IN_LINES: usize = 4;
+const THUMB_W: u32 = 220;
+const THUMB_H: u32 = 150;
+
+/// Path of a picture Pawline just saved, taken from a "Saved <path>" line. Only files directly inside a
+/// Pictures/Pawline folder count, so no other text can make the app open an arbitrary file.
+fn saved_picture(text: &str) -> Option<std::path::PathBuf> {
+    let line = text.lines().find_map(|l| l.trim().strip_prefix("Saved "))?;
+    let p = std::path::PathBuf::from(line.trim());
+    let dir = p.parent()?;
+    let ok = dir.file_name()? == "Pawline" && dir.parent()?.file_name()? == "Pictures" && p.is_absolute();
+    ok.then_some(p)
+}
 
 /// Hard-wrap by character widths: (start, end) char ranges, never empty (an empty input is one empty line).
 fn wrap_ranges(widths: &[f32], maxw: f32, spaces: &[bool]) -> Vec<(usize, usize)> {
@@ -154,6 +167,7 @@ struct Msg {
     user: bool,
     kind: String,
     text: String,
+    thumb: Option<Pixmap>,
 }
 
 enum Surf {
@@ -474,17 +488,17 @@ impl App {
         let bot = bot0 - if hint_bot { 20.0 } else { 0.0 };
         // layout all messages
         let bub_w = inner_w - 40.0;
-        let mut items: Vec<(bool, String, Vec<String>, f32)> = Vec::new();
+        let mut items: Vec<(bool, String, Vec<String>, f32, Option<Pixmap>)> = Vec::new();
         let mut texts: Vec<String> = Vec::new();
         self.bubbles.clear();
         let mut total = 0.0;
-        let msgs: Vec<(bool, String, String)> = self.msgs.iter().map(|m| (m.user, m.kind.clone(), m.text.clone())).collect();
-        for (user, kind, text) in msgs {
+        let msgs: Vec<(bool, String, String, Option<Pixmap>)> = self.msgs.iter().map(|m| (m.user, m.kind.clone(), m.text.clone(), m.thumb.clone())).collect();
+        for (user, kind, text, thumb) in msgs {
             let lines = self.wrap(&text, PX, bub_w - 20.0);
-            let bh = lines.len() as f32 * LH + 14.0;
+            let bh = lines.len() as f32 * LH + 14.0 + thumb.as_ref().map_or(0.0, |t| t.height() as f32 + 6.0);
             total += bh + 8.0;
             texts.push(text.clone());
-            items.push((user, kind, lines, bh));
+            items.push((user, kind, lines, bh, thumb));
         }
         let view = bot - top;
         self.chat_max = (total - view).max(0.0);
@@ -494,8 +508,8 @@ impl App {
         // y of content start so that the bottom aligns with `bot` + scroll
         let mut cp = Pixmap::new(w as u32, view as u32).unwrap();
         let mut y = view - total + self.scroll;
-        for (idx, (user, kind, lines, bh)) in items.into_iter().enumerate() {
-            let bw = lines.iter().map(|l| l.chars().map(|c| self.adv(c, PX)).sum::<f32>()).fold(0.0, f32::max) + 20.0;
+        for (idx, (user, kind, lines, bh, thumb)) in items.into_iter().enumerate() {
+            let bw = lines.iter().map(|l| l.chars().map(|c| self.adv(c, PX)).sum::<f32>()).fold(0.0, f32::max).max(thumb.as_ref().map_or(0.0, |t| t.width() as f32)) + 20.0;
             let bx = if user { w - PAD - bw } else { PAD };
             if y + bh > 0.0 && y < view {
                 self.bubbles.push(((bx, top + y.max(0.0), bw, (bh).min(view - y.max(0.0)).min(y + bh)), texts[idx].clone()));
@@ -509,6 +523,10 @@ impl App {
                 fill(&mut cp, &rrect(bx, y, bw, bh, 12.0), col);
                 for (i, l) in lines.iter().enumerate() {
                     self.text(&mut cp, l, bx + 10.0, y + 7.0 + (i as f32 + 1.0) * LH - 5.0, PX, (235, 232, 245), (0.0, view));
+                }
+                if let Some(t) = &thumb {
+                    let ty = y + 7.0 + lines.len() as f32 * LH + 2.0;
+                    cp.draw_pixmap((bx + 10.0) as i32, ty as i32, t.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
                 }
             }
             y += bh + 8.0;
@@ -583,7 +601,8 @@ impl App {
     }
 
     fn push(&mut self, user: bool, kind: &str, text: String) {
-        self.msgs.push(Msg { user, kind: kind.into(), text });
+        let thumb = if user { None } else { saved_picture(&text).and_then(|p| thumb::load(&p, THUMB_W, THUMB_H)) };
+        self.msgs.push(Msg { user, kind: kind.into(), text, thumb });
         self.scroll = 0.0;
     }
 
@@ -1252,7 +1271,7 @@ fn main() {
         dragging: false,
         bubbles: Vec::new(),
         toast: None,
-        msgs: vec![Msg { user: false, kind: "message".into(), text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it.".into() }],
+        msgs: vec![Msg { user: false, kind: "message".into(), text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it.".into(), thumb: None }],
         confirm: None,
         focus: Btn::No,
         scroll: 0.0,
@@ -1335,5 +1354,19 @@ mod wrap_tests {
         assert_eq!(l.first().unwrap().0, 0);
         assert_eq!(l.last().unwrap().1, t.len());
         assert!(l.windows(2).all(|p| p[0].1 == p[1].0));
+    }
+}
+
+#[cfg(test)]
+mod saved_tests {
+    use super::*;
+    #[test]
+    fn only_pictures_pawline_files_get_a_preview() {
+        let ok = "Done:\nMake a picture\nSaved /home/u/Pictures/Pawline/pawline-1-pollinations.png\nTook 0.6s";
+        assert!(saved_picture(ok).is_some());
+        assert!(saved_picture("Saved /etc/passwd").is_none());
+        assert!(saved_picture("Saved /home/u/Pictures/other/a.png").is_none());
+        assert!(saved_picture("Saved Pictures/Pawline/a.png").is_none());
+        assert!(saved_picture("no path here").is_none());
     }
 }
