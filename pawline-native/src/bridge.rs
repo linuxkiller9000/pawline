@@ -132,6 +132,8 @@ pub struct UiState {
     pub engine: Engine,
     pub root: std::path::PathBuf,
     pub pending: Option<Plan>,
+    /// Request wording of the pending plan, kept in memory only to build the lookup key if the plan completes. Never written to disk.
+    pub pending_request: Option<String>,
     pub assist: Option<NeedleAssist>,
     pub assist_tried: bool,
     /// Journal recovery findings not yet shown to the user.
@@ -261,6 +263,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                     notes: vec![],
                 };
                 state.pending = Some(plan);
+                state.pending_request = None;
                 return UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) };
             }
             Class::Block => {
@@ -311,6 +314,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                 plan: Some(summary),
             };
             state.pending = Some(plan);
+            state.pending_request = Some(input.trim().to_string());
             r
         }
         Ok(Response::Message(m)) => reply("message", m),
@@ -345,6 +349,7 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
         Some(p) => p,
         None => return reply("error", "Nothing waiting for confirmation.".into()),
     };
+    let request = state.pending_request.take();
     let backend = match DirectFsBackend::new(&state.root).map(|inner| UiBackend { inner }) {
         Ok(b) => b,
         Err(e) => return reply("error", format!("backend: {e}")),
@@ -352,6 +357,10 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
     state.notes.extend(backend.inner.recovery_notes().iter().cloned());
     match state.engine.execute_plan(plan, &backend) {
         Ok(Response::Executed(ops)) => {
+            // Recorded only after the confirmed plan fully succeeded (cancelled and failed plans arrive as Failed).
+            if let (Some(req), Some(p)) = (request.as_deref(), pawline_core::planmem::default_path()) {
+                remember_steps(&p, req, &ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>(), pawline_core::searchmem::now_secs());
+            }
             let done: Vec<String> = ops.iter().map(|o| o.op.describe()).collect();
             let body = if ops.len() == 1
                 && matches!(ops[0].op, pawline_core::plan::Operation::Answer { .. })
@@ -389,6 +398,7 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
         engine: Engine::new(root.clone()),
         root,
         pending: None,
+        pending_request: None,
         assist: None,
         assist_tried: false,
         notes,
@@ -398,6 +408,7 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
 pub fn cancel(state: &mut UiState) -> UiReply {
     state.carried = std::time::Duration::ZERO;
     state.pending = None;
+    state.pending_request = None;
     reply("message", "Cancelled. Nothing was done.".into())
 }
 
@@ -475,13 +486,30 @@ mod memory_tests {
     }
 
     #[test]
+    fn pending_request_is_cleared_on_cancel_and_never_recorded_before_success() {
+        let root = std::env::temp_dir().join(format!("pawline-bridge-state-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&root);
+        let mut st = new_state(root);
+        st.pending_request = Some("delete x".into());
+        let _ = cancel(&mut st);
+        assert!(st.pending_request.is_none() && st.pending.is_none());
+        // a confirm with nothing pending records nothing and reports an error
+        let r = confirm_exec(&mut st);
+        assert_eq!(r.kind, "error");
+        // a confirmable step is eligible once (and only after) it completed
+        let p = tdir("conf");
+        assert!(remember_steps(&p, "delete x", &[pawline_core::plan::Operation::Delete { path: "/tmp/x".into() }], 1));
+    }
+
+    #[test]
     fn task_memory_commands_list_suggest_forget() {
         let p = tdir("cmd");
         assert!(task_memory_command("make a folder", Some(&p)).is_none());
         assert_eq!(task_memory_command("Task steps.", Some(&p)).unwrap(), "No task steps saved.");
         assert!(task_memory_command("what did you do for zzz", Some(&p)).unwrap().contains("no saved steps"));
         remember_steps(&p, "make x", &[pawline_core::plan::Operation::CreateDir { path: "/tmp/x".into() }], 1);
-        assert!(task_memory_command("task steps", Some(&p)).unwrap().contains("make x"));
+        assert!(task_memory_command("task steps", Some(&p)).unwrap().contains("Create folder /tmp/x"));
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("make x"));
         let s = task_memory_command("what did you do for make x", Some(&p)).unwrap();
         assert!(s.contains("suggestion only") && s.contains("Create folder /tmp/x"));
         assert!(task_memory_command("forget task steps", Some(&p)).unwrap().contains("Deleted 1"));
