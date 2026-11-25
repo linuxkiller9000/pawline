@@ -54,3 +54,9 @@ safety checks.
 See NOTICE. Needle3 and the cactus runtime are Apache-2.0; the cactus
 *engine source* is under a restricted license, so Pawline links the
 prebuilt Apache-2.0 binaries instead.
+
+## License
+
+Pawline is free software under the GNU General Public License v3.0 (see LICENSE).
+If you reuse this code, your project must be open source under a compatible license.
+Third-party components keep their own licenses - see NOTICE.
