@@ -1099,7 +1099,11 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("pawline [--no-ui]\n  (no flag)  floating orb and chat on Wayland\n  --no-ui    terminal mode, same commands and confirmations\nPAWLINE_NO_LAYER=1 uses a normal window. PAWLINE_ROOT sets the working folder (default: home).");
+        println!("pawline [--no-ui | --licenses]\n  --licenses prints third-party notices (offline)\n  (no flag)  floating orb and chat on Wayland\n  --no-ui    terminal mode, same commands and confirmations\nPAWLINE_NO_LAYER=1 uses a normal window. PAWLINE_ROOT sets the working folder (default: home).");
+        return;
+    }
+    if args.iter().any(|a| a == "--licenses") {
+        print!("{}", include_str!("../../licenses/THIRD-PARTY-VOICE.txt"));
         return;
     }
     if args.iter().any(|a| a == "--no-ui") {
