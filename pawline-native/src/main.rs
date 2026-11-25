@@ -998,7 +998,16 @@ fn voice_runtime() -> Result<pawline_voice::runtime::Runtime, VoiceErr> {
 fn voice_runtime_inner() -> Result<Result<pawline_voice::runtime::Runtime, VoiceErr>, String> {
     let dir = voice_cfg::voice_dir();
     let model = voice_cfg::model_dir();
+    #[cfg(feature = "embed-voice")]
+    let mut bytes: Vec<Vec<u8>> = vec![
+        include_bytes!(concat!(env!("PAWLINE_VOICE_EMBED_DIR"), "/libgcc_s.so.1")).to_vec(),
+        include_bytes!(concat!(env!("PAWLINE_VOICE_EMBED_DIR"), "/libstdc++.so.6")).to_vec(),
+        include_bytes!(concat!(env!("PAWLINE_VOICE_EMBED_DIR"), "/libonnxruntime.so.1")).to_vec(),
+        include_bytes!(concat!(env!("PAWLINE_VOICE_EMBED_DIR"), "/libmoonshine.so")).to_vec(),
+    ];
+    #[cfg(not(feature = "embed-voice"))]
     let mut bytes = Vec::new();
+    #[cfg(not(feature = "embed-voice"))]
     for (name, _) in voice_cfg::LIBS {
         let f = dir.join("lib").join(name);
         let md = std::fs::symlink_metadata(&f).map_err(|_| format!("Voice is not set up: {} is missing in {}.", name, dir.join("lib").display()))?;

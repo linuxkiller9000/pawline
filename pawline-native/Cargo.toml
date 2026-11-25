@@ -16,3 +16,8 @@ fontdue = "0.9"
 pawline-core = { path = "../pawline-core" }
 pawline-needle = { path = "../pawline-needle" }
 pawline-voice = { path = "../pawline-voice" }
+
+[features]
+# Release builds only: compile the four pinned runtime libs into the executable.
+# Needs PAWLINE_VOICE_EMBED_DIR pointing at a folder holding them; hashes are checked at load.
+embed-voice = []
