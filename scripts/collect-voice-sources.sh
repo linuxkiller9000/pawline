@@ -30,7 +30,10 @@ moonshine() {
   d=$(mktemp -d)
   git -c advice.detachedHead=false clone -q --branch v0.1.6 https://github.com/moonshine-ai/moonshine.git "$d/m"
   [ "$(git -C "$d/m" rev-parse HEAD)" = d8d8fa29d05ca67441a7719e70099f9f48917a93 ] || { echo "moonshine commit mismatch"; exit 1; }
-  EXCL="test-assets docs/audio docs/images micro language-bindings examples core/third-party/onnxruntime/lib"
+  # core/moonshine-tts: the TTS source (compiled into libmoonshine.so) stays; its per-language data
+  # directories and test data (terms per readme, unclear) are left out. Its data/README.md stays.
+  TTSDATA=$(git -C "$d/m" ls-tree -d --name-only HEAD core/moonshine-tts/data/ | tr '\n' ' ')
+  EXCL="test-assets docs/audio docs/images micro language-bindings examples core/third-party/onnxruntime/lib core/moonshine-tts/tests/data $TTSDATA"
   set --
   for e in $EXCL; do set -- "$@" ":(exclude)$e"; done
   git -C "$d/m" archive --format=tar.gz --prefix=moonshine-v0.1.6-src/ -o "$PWD/$OUT/moonshine-v0.1.6-d8d8fa2-src.tar.gz" HEAD . "$@"
@@ -49,8 +52,9 @@ ort() {
   d=$(mktemp -d)
   git clone -q --recursive --depth 1 --branch v1.23.2 https://github.com/microsoft/onnxruntime.git "$d/o"
   echo "onnxruntime v1.23.2 commit: $(git -C "$d/o" rev-parse HEAD)"
-  # Hard gate: no pinned commit means no ORT source asset and a failing script.
-  [ -n "${ORT_COMMIT:-}" ] || { echo "ORT_COMMIT is not pinned: refusing to produce an unpinned ORT source asset"; exit 1; }
+  # Gate for the OPTIONAL ORT source sidecar only (reproducibility provenance). ORT is MIT; redistribution
+  # needs its notices, not its source. Without a verified pin this step fails and no sidecar is produced.
+  [ -n "${ORT_COMMIT:-}" ] || { echo "ORT_COMMIT is not pinned: no optional ORT source sidecar is produced (notices-only redistribution is unaffected)"; exit 1; }
   [ "$(git -C "$d/o" rev-parse HEAD)" = "$ORT_COMMIT" ] || { echo "ort commit mismatch"; exit 1; }
   tar --exclude=.git -czf "$OUT/onnxruntime-v1.23.2-with-submodules.tar.gz" -C "$d" o
   rm -rf "$d"
