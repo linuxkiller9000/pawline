@@ -134,6 +134,104 @@ impl DirectFsBackend {
         }
     }
 
+    /// Smaller copy of one video, published only after it was checked. See `shrink.rs`.
+    pub fn shrink(&self, from: &Path, to: &Path, cancelled: &dyn Fn() -> bool) -> Result<String, PawError> {
+        use crate::shrink as sh;
+        use cap_std::fs::MetadataExt;
+        let (rf, rt) = (self.rel(from)?, self.rel(to)?);
+        let m = self.root.symlink_metadata(&rf)?;
+        if !m.is_file() || m.len() == 0 || !sh::is_video(from) {
+            return Err(PawError::Validation(format!("{} is not a video file I can shrink", from.display())));
+        }
+        let src_size = m.len();
+        let ffmpeg = sh::find_exe("ffmpeg").ok_or_else(|| PawError::Exec("ffmpeg is not installed, so I can't shrink videos. It is free: install it with your package manager (for example \"sudo apt install ffmpeg\"). Nothing was changed.".into()))?;
+        let ffprobe = sh::find_exe("ffprobe").ok_or_else(|| PawError::Exec("ffprobe (part of ffmpeg) is missing, so I couldn't check the result. Nothing was changed.".into()))?;
+        let src_dur = sh::probe_duration(&ffprobe, &self.root_path.join(&rf))
+            .ok_or_else(|| PawError::Exec("I could not read that video (ffprobe failed). Nothing was changed.".into()))?;
+        refuse_clobber(&self.root, &rt)?;
+        self.tracked("copy", self.rel_str(to)?, None, |id| {
+            let dir = rt.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+            let tmp_rel = dir.join(format!(".pawline-shrink-{id}-{}-{nanos}.part", std::process::id()));
+            // reserve a unique temporary name that only this run owns
+            let placeholder = self.root.open_with(&tmp_rel, cap_std::fs::OpenOptions::new().write(true).create_new(true))?;
+            let mine = placeholder.metadata().ok().map(|m| (m.dev(), m.ino()));
+            drop(placeholder);
+            let cleanup = |root: &Dir| {
+                // remove only the file this run created, never a replacement made by someone else
+                let now = root.symlink_metadata(&tmp_rel).ok().map(|m| (m.dev(), m.ino()));
+                if mine.is_some() && now == mine {
+                    let _ = root.remove_file(&tmp_rel);
+                }
+            };
+            let tmp_abs = self.root_path.join(&tmp_rel);
+            let mut child = match std::process::Command::new(&ffmpeg)
+                .args(sh::ffmpeg_args(&self.root_path.join(&rf), &tmp_abs))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    cleanup(&self.root);
+                    return Err(PawError::Exec(format!("could not start ffmpeg: {e}")));
+                }
+            };
+            let started = std::time::Instant::now();
+            let status = loop {
+                if cancelled() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    cleanup(&self.root);
+                    return Err(PawError::Exec("Cancelled. The smaller copy was not kept. Your video was not touched.".into()));
+                }
+                if started.elapsed().as_secs() > sh::TIMEOUT_SECS {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    cleanup(&self.root);
+                    return Err(PawError::Exec("Shrinking took too long and was stopped. Nothing was kept. Your video was not touched.".into()));
+                }
+                match child.try_wait() {
+                    Ok(Some(s)) => break s,
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                    Err(e) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        cleanup(&self.root);
+                        return Err(PawError::Exec(format!("lost track of ffmpeg: {e}")));
+                    }
+                }
+            };
+            if !status.success() {
+                cleanup(&self.root);
+                return Err(PawError::Exec("ffmpeg could not shrink that video. Nothing was kept. Your video was not touched.".into()));
+            }
+            // verify: readable, about the same length, and really smaller
+            let out_size = self.root.symlink_metadata(&tmp_rel).map(|m| m.len()).unwrap_or(0);
+            let out_dur = sh::probe_duration(&ffprobe, &tmp_abs);
+            let ok_len = matches!(out_dur, Some(d) if (d - src_dur).abs() <= (src_dur * 0.02).max(1.0));
+            if out_size == 0 || !ok_len {
+                cleanup(&self.root);
+                return Err(PawError::Exec("The shrunk copy did not pass the check (unreadable or the wrong length), so I threw it away. Your video was not touched.".into()));
+            }
+            if out_size >= src_size {
+                cleanup(&self.root);
+                return Err(PawError::Exec(format!(
+                    "Shrinking would not make it smaller ({} to {}), so I kept only your original. Nothing new was saved.",
+                    sh::mb(src_size),
+                    sh::mb(out_size)
+                )));
+            }
+            if let Err(e) = rename_noreplace(&self.root, &tmp_rel, &rt) {
+                cleanup(&self.root);
+                return Err(e);
+            }
+            let pct = 100 - (out_size * 100 / src_size);
+            Ok((format!("Saved {} ({} to {}, {pct}% smaller). Your original is untouched. Undo moves the new copy to the Pawline trash.", to.display(), sh::mb(src_size), sh::mb(out_size)), None))
+        })
+    }
+
     /// mtime + inode + size: changes when the content is edited or the file replaced.
     fn fingerprint_full(&self, rel: &Path) -> Option<String> {
         use cap_std::fs::MetadataExt;
@@ -483,6 +581,10 @@ impl ExecutionBackend for DirectFsBackend {
                     let d = self.wallpaper.set(&stored, *via)?;
                     Ok((d, None))
                 })?;
+                Ok(done(op, &detail))
+            }
+            Operation::Shrink { from, to } => {
+                let detail = self.shrink(from, to, &|| false)?;
                 Ok(done(op, &detail))
             }
             Operation::OpenApp { name, .. } => Err(PawError::Exec(format!(

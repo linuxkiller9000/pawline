@@ -69,6 +69,8 @@ pub enum Operation {
     Move { from: PathBuf, to: PathBuf },
     Copy { from: PathBuf, to: PathBuf },
     List { path: PathBuf },
+    /// Make a smaller copy of one video with ffmpeg at `to`. The original is never touched.
+    Shrink { from: PathBuf, to: PathBuf },
     /// `argv` is the exact reviewed command (resolved at planning time); never run through a shell.
     OpenApp { name: String, argv: Vec<String> },
     SetWallpaper { image: PathBuf, via: Option<crate::wallpaper::Adapter>, no_backup_ok: bool },
@@ -93,6 +95,7 @@ impl Operation {
             Operation::Move { from, to } => format!("Move {} to {}", from.display(), to.display()),
             Operation::Copy { from, to } => format!("Copy {} to {}", from.display(), to.display()),
             Operation::List { path } => format!("List {}", path.display()),
+            Operation::Shrink { from, to } => format!("Shrink video {} into a NEW smaller copy {} (ffmpeg, H.264 quality 28, AAC 128k). The original is not changed.", from.display(), to.display()),
             Operation::OpenApp { name, argv } => format!("Open {name}: run {}", argv.iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() }).collect::<Vec<_>>().join(" ")),
             Operation::Undo { summary, .. } => summary.clone(),
             Operation::SetWallpaper { image, via, .. } => match via {
@@ -119,7 +122,7 @@ impl Operation {
     pub fn needs_confirmation(&self) -> bool {
         matches!(
             self,
-            Operation::Delete { .. } | Operation::Move { .. } | Operation::SetWallpaper { .. }
+            Operation::Delete { .. } | Operation::Move { .. } | Operation::Shrink { .. } | Operation::SetWallpaper { .. }
                 | Operation::Undo { .. } | Operation::OpenApp { .. } | Operation::GenerateImage { .. } | Operation::AskOnline { .. }
         )
     }

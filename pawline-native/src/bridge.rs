@@ -112,6 +112,13 @@ impl ExecutionBackend for UiBackend {
         if let Operation::AskOnline { text } = op {
             return Ok(OpOutcome { op: op.clone(), detail: ask_online(text)? });
         }
+        if let Operation::Shrink { from, to } = op {
+            // Only reached after the card was confirmed. Esc/Cancel ends ffmpeg and removes the temporary file.
+            use std::sync::atomic::Ordering::SeqCst;
+            let my = GEN.fetch_add(1, SeqCst) + 1;
+            let detail = self.inner.shrink(from, to, &|| CANCEL_UPTO.load(SeqCst) >= my)?;
+            return Ok(OpOutcome { op: op.clone(), detail });
+        }
         if let Operation::OpenApp { argv, .. } = op {
             // Only reached after the plan (with the exact command) was confirmed.
             let detail = pawline_core::apps::launch(argv)?;
@@ -274,6 +281,9 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
         }
         return r;
     }
+    if let Some(r) = shrink_command(state, input) {
+        return r;
+    }
     if let Some(r) = organize_command(state, input) {
         return r;
     }
@@ -411,6 +421,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                         pawline_core::plan::Operation::GenerateImage { provider, .. } => {
                             format!("Picture ready ({})\n{}", provider.label(), o.detail)
                         }
+                        pawline_core::plan::Operation::Shrink { .. } => o.detail.clone(),
                         pawline_core::plan::Operation::Search { .. }
                         | pawline_core::plan::Operation::AskOnline { .. }
                         | pawline_core::plan::Operation::List { .. } => {
@@ -500,6 +511,7 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
                         pawline_core::plan::Operation::GenerateImage { provider, .. } => {
                             format!("Picture ready ({})\n{}", provider.label(), o.detail)
                         }
+                        pawline_core::plan::Operation::Shrink { .. } => o.detail.clone(),
                         pawline_core::plan::Operation::Search { .. }
                         | pawline_core::plan::Operation::AskOnline { .. }
                         | pawline_core::plan::Operation::List { .. } => {
@@ -544,6 +556,43 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
 }
 
 /// "organize <place>": plan moves of the loose files into type folders and ask. "undo organize" reverses the last one that ran.
+/// "shrink/compress <video>": one reviewed plan, never touches the original, new copy next to it.
+fn shrink_command(state: &mut UiState, input: &str) -> Option<UiReply> {
+    let words = pawline_core::shrink::parse(input)?;
+    let home = std::fs::canonicalize(&state.root).unwrap_or_else(|_| state.root.clone());
+    let mut found = pawline_core::shrink::find(&home, &words);
+    found.truncate(12);
+    match found.len() {
+        0 => Some(reply("message", format!("I found no video for \"{words}\" in Videos, Downloads, Desktop or your home folder. Say the full path, for example \"shrink video ~/Videos/trip.mp4\". I shrink mp4, mkv, mov, webm, avi, m4v, wmv and flv. Nothing was changed."))),
+        1 => {
+            let from = found.remove(0);
+            let to = pawline_core::shrink::output_for(&from);
+            let size = std::fs::metadata(&from).map(|m| m.len()).unwrap_or(0);
+            let op = Operation::Shrink { from: from.clone(), to };
+            let summary = format!("1. {}", op.describe());
+            let plan = Plan {
+                ops: vec![op],
+                needs_confirmation: true,
+                confirmation_reasons: vec![format!("This runs ffmpeg on a {} video and saves a new smaller file next to it. It can take several minutes (Cancel stops it). The new file is only kept if it plays, has the same length and is really smaller; otherwise nothing is saved.", pawline_core::shrink::mb(size))],
+                assist_derived: false,
+                notes: vec![],
+            };
+            state.pending = Some(plan);
+            state.pending_request = None; // never remembered as a reusable plan
+            state.organize_pending = None;
+            Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}\nIt runs ffmpeg on a {} video and saves a new smaller file next to it. It can take several minutes (Cancel stops it). The new file is only kept if it plays, has the same length and is really smaller; otherwise nothing is saved.", pawline_core::shrink::mb(size)), plan: Some(summary) })
+        }
+        _ => {
+            let rows: Vec<String> = found.iter().map(|c| format!("{}\tshrink video {}", c.display(), c.display())).collect();
+            let list = found.iter().enumerate().map(|(k, c)| format!("{}. {}", k + 1, c.display())).collect::<Vec<_>>().join("\n");
+            state.picks = rows.iter().filter_map(|r| r.split_once('\t').map(|x| x.1.to_string())).collect();
+            let mut out = reply("message", format!("Which video do you mean by \"{words}\"?\n{list}\nPick one (click, or Up/Down then Tab), then press Enter. You will see the plan first. Nothing is changed yet."));
+            out.plan = Some(rows.join("\n"));
+            Some(out)
+        }
+    }
+}
+
 fn organize_command(state: &mut UiState, input: &str) -> Option<UiReply> {
     let low = input.trim().trim_end_matches(['.', '!']).to_lowercase();
     if matches!(low.as_str(), "undo organize" | "undo the organize" | "undo organizing" | "undo all") {
@@ -898,6 +947,110 @@ mod memory_tests {
         assert_eq!(std::fs::read_to_string(dl.join("Images/a.png")).unwrap(), "MY EDITS, MUCH LONGER NOW");
         assert!(!dl.join("a.png").exists(), "not restored over anything");
         assert!(u.text.contains("Undid") , "{}", u.text);
+    }
+
+    static SHRINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn mkvideo(path: &std::path::Path, secs: u32, size: &str, codec_args: &[&str]) -> bool {
+        std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg(format!("testsrc2=duration={secs}:size={size}:rate=25"))
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=1"])
+            .args(codec_args)
+            .args(["-shortest"])
+            .arg(path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    fn leftovers(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.contains(".pawline-shrink")).collect()
+    }
+
+    #[test]
+    fn shrink_publishes_a_checked_smaller_copy_keeps_the_original_and_undoes() {
+        let _g = SHRINK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = org_root("shrink");
+        let dl = root.join("Downloads");
+        let v = dl.join("trip.mp4");
+        if !mkvideo(&v, 3, "640x480", &["-c:v", "mpeg4", "-q:v", "1", "-c:a", "aac"]) {
+            eprintln!("ffmpeg not available here; skipped");
+            return;
+        }
+        let orig = std::fs::read(&v).unwrap();
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "shrink video trip");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(r.text.contains("trip-small.mp4") && r.text.contains("original is not changed"), "{}", r.text);
+        assert!(!dl.join("trip-small.mp4").exists());
+        let done = confirm_exec(&mut st);
+        assert_eq!(done.kind, "executed", "{}", done.text);
+        let small = std::fs::metadata(dl.join("trip-small.mp4")).unwrap().len();
+        assert!(small > 0 && small < orig.len() as u64, "{small} vs {}", orig.len());
+        assert_eq!(std::fs::read(&v).unwrap(), orig, "original byte for byte");
+        assert!(leftovers(&dl).is_empty());
+        assert!(done.text.contains("smaller") && done.text.contains("original is untouched"), "{}", done.text);
+        let u = handle_text(&mut st, "undo");
+        assert_eq!(u.kind, "confirm", "{}", u.text);
+        let u = confirm_exec(&mut st);
+        assert!(!dl.join("trip-small.mp4").exists() && v.is_file(), "{}", u.text);
+    }
+
+    #[test]
+    fn shrink_that_does_not_reduce_size_saves_nothing_and_a_taken_name_is_refused() {
+        let _g = SHRINK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = org_root("shrink2");
+        let dl = root.join("Downloads");
+        let v = dl.join("tiny.mp4");
+        if !mkvideo(&v, 2, "64x64", &["-c:v", "libx264", "-crf", "51", "-preset", "veryslow", "-c:a", "aac", "-b:a", "8k"]) {
+            eprintln!("ffmpeg/libx264 not available here; skipped");
+            return;
+        }
+        let mut st = new_state(root.clone());
+        assert_eq!(handle_text(&mut st, "compress tiny.mp4").kind, "confirm");
+        let done = confirm_exec(&mut st);
+        assert!(done.kind == "failed" || done.kind == "error", "{}", done.text);
+        assert!(done.text.contains("would not make it smaller"), "{}", done.text);
+        assert!(!dl.join("tiny-small.mp4").exists() && leftovers(&dl).is_empty());
+        // a name taken between preview and confirm is not replaced
+        assert_eq!(handle_text(&mut st, "compress tiny.mp4").kind, "confirm");
+        std::fs::write(dl.join("tiny-small.mp4"), "MINE").unwrap();
+        let done = confirm_exec(&mut st);
+        assert_ne!(done.kind, "executed");
+        assert_eq!(std::fs::read_to_string(dl.join("tiny-small.mp4")).unwrap(), "MINE");
+        assert!(leftovers(&dl).is_empty());
+        // not a video / unknown name: plain message, nothing planned
+        assert!(handle_text(&mut st, "shrink notes.txt").kind == "message" && st.pending.is_none());
+    }
+
+    #[test]
+    fn cancelling_a_running_shrink_removes_the_temporary_file_and_keeps_the_original() {
+        let _g = SHRINK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = org_root("shrink3");
+        let dl = root.join("Downloads");
+        let v = dl.join("long.mp4");
+        if !mkvideo(&v, 60, "1920x1080", &["-c:v", "mpeg4", "-q:v", "1", "-c:a", "aac"]) {
+            eprintln!("ffmpeg not available here; skipped");
+            return;
+        }
+        let orig = std::fs::metadata(&v).unwrap().len();
+        let mut st = new_state(root.clone());
+        assert_eq!(handle_text(&mut st, "shrink long.mp4").kind, "confirm");
+        let h = std::thread::spawn(move || confirm_exec(&mut st));
+        for _ in 0..100 {
+            if !leftovers(&dl).is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(!leftovers(&dl).is_empty(), "ffmpeg run did not start");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        request_cancel();
+        let r = h.join().unwrap();
+        assert!(r.text.contains("Cancelled"), "{}", r.text);
+        assert!(!dl.join("long-small.mp4").exists() && leftovers(&dl).is_empty());
+        assert_eq!(std::fs::metadata(&v).unwrap().len(), orig);
     }
 
     #[test]

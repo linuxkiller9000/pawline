@@ -21,6 +21,7 @@ pub mod organize;
 pub mod plan;
 pub mod planmem;
 pub mod search;
+pub mod shrink;
 pub mod searchmem;
 pub mod textfallback;
 pub mod validate;
