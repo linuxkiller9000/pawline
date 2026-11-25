@@ -271,6 +271,19 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
         }
         return r;
     }
+    if let Some((text_search, q)) = pawline_core::finder::parse(input) {
+        let f = if text_search {
+            pawline_core::finder::find_text(&state.root, &q)
+        } else {
+            pawline_core::finder::find_names(&state.root, &q.split_whitespace().map(String::from).collect::<Vec<_>>())
+        };
+        let mut r = reply("message", pawline_core::finder::render(if text_search { "rg" } else { "fd" }, &q, &state.root, &f));
+        let rows = pawline_core::finder::dir_rows(&f);
+        if !rows.is_empty() {
+            r.plan = Some(rows.join("\n"));
+        }
+        return r;
+    }
     if let Some(m) = task_memory_command(input, pawline_core::planmem::default_path().as_deref()) {
         return reply("message", m);
     }

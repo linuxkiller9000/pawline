@@ -7,5 +7,8 @@ license = "Apache-2.0"
 
 [dependencies]
 cap-std = "3"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+ignore = "0.4"
 serde_json = "1.0.154"
 ureq = "3.5.2"

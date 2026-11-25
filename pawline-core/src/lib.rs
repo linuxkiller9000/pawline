@@ -12,6 +12,7 @@ pub mod context;
 pub mod dirs;
 pub mod error;
 pub mod exec;
+pub mod finder;
 pub mod imagegen;
 pub mod intent;
 pub mod journal;
