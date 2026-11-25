@@ -94,3 +94,35 @@ fn pawline_store_is_off_limits_and_undo_with_no_history_errors() {
     assert!(e.plan("delete .local/share/pawline").is_err());
     assert!(e.plan("delete ~/.local/share/pawline/trash").is_err());
 }
+
+#[test]
+fn undo_of_a_copy_keeps_a_copy_the_user_added_to_and_moves_an_untouched_one_to_the_trash() {
+    let (root, mut e, be) = setup("copyundo");
+    std::fs::create_dir(root.join("docs")).unwrap();
+    std::fs::create_dir(root.join("backup")).unwrap();
+    std::fs::write(root.join("docs/a.txt"), b"one").unwrap();
+    assert!(matches!(run(&mut e, &be, "copy docs to backup"), Response::Executed(_)));
+    assert_eq!(std::fs::read(root.join("backup/docs/a.txt")).unwrap(), b"one");
+    // the user added a file to the copy: undo refuses and leaves it all there
+    std::fs::write(root.join("backup/docs/mine.txt"), b"my work").unwrap();
+    match run(&mut e, &be, "undo") {
+        Response::Failed { .. } => {}
+        _ => panic!("must refuse to undo a copy that was changed"),
+    }
+    assert_eq!(std::fs::read(root.join("backup/docs/mine.txt")).unwrap(), b"my work");
+    assert_eq!(std::fs::read(root.join("docs/a.txt")).unwrap(), b"one");
+}
+
+#[test]
+fn undo_of_an_untouched_copy_moves_it_to_the_trash() {
+    let (root, mut e, be) = setup("copyundo2");
+    std::fs::create_dir(root.join("docs")).unwrap();
+    std::fs::create_dir(root.join("backup")).unwrap();
+    std::fs::write(root.join("docs/a.txt"), b"one").unwrap();
+    assert!(matches!(run(&mut e, &be, "copy docs to backup"), Response::Executed(_)));
+    assert!(matches!(run(&mut e, &be, "undo"), Response::Executed(_)));
+    assert!(!root.join("backup/docs").exists());
+    let trash = root.join(".local/share/pawline/trash");
+    assert!(std::fs::read_dir(trash).unwrap().flatten().any(|f| f.path().join("a.txt").exists()));
+    assert_eq!(std::fs::read(root.join("docs/a.txt")).unwrap(), b"one");
+}

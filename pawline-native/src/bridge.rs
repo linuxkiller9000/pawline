@@ -1075,6 +1075,9 @@ mod memory_tests {
     #[test]
     fn cancelling_a_running_shrink_removes_the_temporary_file_and_keeps_the_original() {
         let _g = SHRINK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // this test watches the named temporary file to know ffmpeg is running, so it uses the named form;
+        // the unnamed form is covered by the next test
+        std::env::set_var("PAWLINE_NO_TMPFILE", "1");
         let root = org_root("shrink3");
         let dl = root.join("Downloads");
         let v = dl.join("long.mp4");
@@ -1099,6 +1102,28 @@ mod memory_tests {
         assert!(r.text.contains("Cancelled"), "{}", r.text);
         assert!(!dl.join("long-small.mp4").exists() && leftovers(&dl).is_empty());
         assert_eq!(std::fs::metadata(&v).unwrap().len(), orig);
+    }
+
+    #[test]
+    fn cancelling_a_running_shrink_with_an_unnamed_output_leaves_nothing_behind() {
+        let _g = SHRINK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("PAWLINE_NO_TMPFILE");
+        let root = org_root("shrink4");
+        let dl = root.join("Downloads");
+        let v = dl.join("long.mp4");
+        if !mkvideo(&v, 60, "1920x1080", &["-c:v", "mpeg4", "-q:v", "1", "-c:a", "aac"]) {
+            eprintln!("ffmpeg not available here; skipped");
+            return;
+        }
+        let mut st = new_state(root.clone());
+        assert_eq!(handle_text(&mut st, "shrink long.mp4").kind, "confirm");
+        let h = std::thread::spawn(move || confirm_exec(&mut st));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        request_cancel();
+        let r = h.join().unwrap();
+        assert!(r.text.contains("Cancelled"), "{}", r.text);
+        assert!(!dl.join("long-small.mp4").exists() && leftovers(&dl).is_empty());
+        assert!(v.exists());
     }
 
     #[test]

@@ -153,3 +153,46 @@ pub fn rename_noreplace(_root: &Dir, _from: &Path, _to: &Path) -> Result<(), Paw
     // TODO(windows): MoveFileExW without MOVEFILE_REPLACE_EXISTING on handles opened through the root, with a real-machine test.
     Err(PawError::Exec("moving files is not implemented on this system yet; nothing was changed".into()))
 }
+
+/// An unnamed new file (O_TMPFILE) in the folder `dir` (relative to the root, "" = the root itself), opened through the
+/// confined root. It has no name until `link_anon`, so nothing can be swapped in under a temporary name.
+/// Any failure (old kernel, a filesystem without O_TMPFILE) means "use a named temporary file instead".
+#[cfg(unix)]
+pub fn anon_file(root: &Dir, dir: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let d = if dir.as_os_str().is_empty() { root.try_clone()? } else { root.open_dir(dir)? };
+    // SAFETY: d is a live directory fd; "." is NUL-terminated; on success the new fd is owned by the File.
+    let fd = unsafe { libc::openat(d.as_raw_fd(), b".\0".as_ptr() as *const libc::c_char, libc::O_TMPFILE | libc::O_RDWR | libc::O_CLOEXEC, 0o666 as libc::c_uint) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+#[cfg(not(unix))]
+pub fn anon_file(_root: &Dir, _dir: &Path) -> std::io::Result<std::fs::File> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no unnamed files here"))
+}
+
+/// Give an unnamed file its name with linkat. Like the no-replace rename it can never replace an existing name.
+#[cfg(unix)]
+pub fn link_anon(root: &Dir, dir: &Path, file: &std::fs::File, name: &std::ffi::OsStr) -> Result<(), PawError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let d = if dir.as_os_str().is_empty() { root.try_clone()? } else { root.open_dir(dir)? };
+    let cname = std::ffi::CString::new(name.as_bytes()).map_err(|_| PawError::Exec("bad name".into()))?;
+    let proc_path = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd())).map_err(|_| PawError::Exec("bad fd".into()))?;
+    // SAFETY: proc_path and cname are NUL-terminated; d is a live directory fd.
+    let r = unsafe { libc::linkat(libc::AT_FDCWD, proc_path.as_ptr(), d.as_raw_fd(), cname.as_ptr(), libc::AT_SYMLINK_FOLLOW) };
+    if r == 0 {
+        return Ok(());
+    }
+    let e = std::io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::EEXIST) => Err(PawError::ConfirmationRequired(format!("{} exists; not overwriting", Path::new(name).display()))),
+        _ => Err(e.into()),
+    }
+}
+#[cfg(not(unix))]
+pub fn link_anon(_root: &Dir, _dir: &Path, _file: &std::fs::File, _name: &std::ffi::OsStr) -> Result<(), PawError> {
+    Err(PawError::Exec("saving new files is not implemented on this system yet; nothing was changed".into()))
+}

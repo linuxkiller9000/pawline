@@ -146,27 +146,14 @@ impl DirectFsBackend {
         let bytes = crate::deck::build_pptx(&slides);
         refuse_clobber(&self.root, &rt)?;
         self.tracked("copy", self.rel_str(to)?, None, |id| {
-            let dir = rt.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-            let tmp_rel = dir.join(format!(".pawline-deck-{id}-{}.part", std::process::id()));
-            let mut out = self.root.open_with(&tmp_rel, cap_std::fs::OpenOptions::new().write(true).create_new(true))?;
-            let mine = out.metadata().ok().and_then(|m| crate::platform::id_cap(&m));
-            let is_mine = |root: &Dir| mine.is_some() && root.symlink_metadata(&tmp_rel).ok().and_then(|m| crate::platform::id_cap(&m)) == mine;
+            let nf = NewFile::create(&self.root, &rt, "deck", id, true)?;
+            let mut out = &nf.file;
             if let Err(e) = out.write_all(&bytes).and_then(|_| out.sync_all()) {
-                if is_mine(&self.root) {
-                    let _ = self.root.remove_file(&tmp_rel);
-                }
+                nf.discard(&self.root);
                 return Err(e.into());
             }
-            if !is_mine(&self.root) {
-                return Err(PawError::Exec("the temporary file was replaced while I worked, so I did not publish anything".into()));
-            }
-            if let Err(e) = rename_noreplace(&self.root, &tmp_rel, &rt) {
-                if is_mine(&self.root) {
-                    let _ = self.root.remove_file(&tmp_rel);
-                }
-                return Err(e);
-            }
-            Ok((format!("Saved {} ({} slides). Open it with LibreOffice Impress, PowerPoint or Google Slides. The outline is untouched. Undo moves the new file to the Pawline trash.", to.display(), slides.len()), None))
+            nf.publish(&self.root, &rt).inspect_err(|_| nf.discard(&self.root))?;
+            Ok((format!("Saved {} ({} slides). Open it with LibreOffice Impress, PowerPoint or Google Slides. The outline is untouched. Undo moves the new file to the Pawline trash.", to.display(), slides.len()), self.fingerprint_full(&rt)))
         })
     }
 
@@ -175,7 +162,6 @@ impl DirectFsBackend {
     /// the temporary file as stdout), never on paths, so nothing can be swapped in between the checks and the work.
     pub fn shrink(&self, from: &Path, to: &Path, cancelled: &dyn Fn() -> bool) -> Result<String, PawError> {
         use crate::shrink as sh;
-        use cap_std::fs::MetadataExt;
         let (rf, rt) = (self.rel(from)?, self.rel(to)?);
         let ex = |m: String| PawError::Exec(m);
         let src = self.root.open(&rf)?.into_std();
@@ -196,21 +182,10 @@ impl DirectFsBackend {
         }
         refuse_clobber(&self.root, &rt)?;
         self.tracked("copy", self.rel_str(to)?, None, |id| {
-            let dir = rt.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-            let tmp_rel = dir.join(format!(".pawline-shrink-{id}-{}-{nanos}.part", std::process::id()));
-            // a unique temporary name only this run owns; the handle stays open for the whole run
-            let out = self.root.open_with(&tmp_rel, cap_std::fs::OpenOptions::new().read(true).write(true).create_new(true))?.into_std();
-            let mine = crate::platform::id_std(&out.metadata()?).ok_or_else(|| ex("cannot tell files apart on this system, so I did not start".into()))?;
-            let is_mine = |root: &Dir| root.symlink_metadata(&tmp_rel).ok().and_then(|m| crate::platform::id_cap(&m)) == Some(mine);
-            let cleanup = |root: &Dir| {
-                // remove only the file this run created, never a replacement made by someone else
-                if is_mine(root) {
-                    let _ = root.remove_file(&tmp_rel);
-                }
-            };
+            let nf = NewFile::create(&self.root, &rt, "shrink", id, true)?;
+            let out = nf.file.try_clone()?;
             let fail = |root: &Dir, m: &str| -> PawError {
-                cleanup(root);
+                nf.discard(root);
                 PawError::Exec(m.to_string())
             };
             let limit = std::time::Duration::from_secs(sh::TIMEOUT_SECS);
@@ -224,6 +199,9 @@ impl DirectFsBackend {
             // verify on the open temp file: same length, same streams, and it decodes end to end
             let out_size = out.metadata().map(|m| m.len()).unwrap_or(0);
             let probed = sh::probe(&ffprobe, out.try_clone()?, cancelled);
+            if probed.is_none() && cancelled() {
+                return Err(fail(&self.root, "Cancelled. The smaller copy was not kept. Your video was not touched."));
+            }
             let streams_ok = matches!(probed, Some((d, v, a)) if v == 1 && a == src_a && (d - src_dur).abs() <= (src_dur * 0.02).max(1.0));
             if out_size == 0 || !streams_ok {
                 return Err(fail(&self.root, "The shrunk copy did not pass the check (wrong length, or it lost a video or audio stream), so I threw it away. Your video was not touched."));
@@ -240,21 +218,9 @@ impl DirectFsBackend {
                     sh::mb(out_size)
                 )));
             }
-            // the temporary name must still be the very file that was checked
-            if !is_mine(&self.root) {
-                return Err(ex("the temporary file was replaced while I worked, so I did not publish anything. Your video was not touched.".into()));
-            }
-            if let Err(e) = rename_noreplace(&self.root, &tmp_rel, &rt) {
-                cleanup(&self.root);
-                return Err(e);
-            }
-            // confirm what now sits at the final name is the checked file
-            let landed = self.root.symlink_metadata(&rt).ok().and_then(|m| crate::platform::id_cap(&m));
-            if landed != Some(mine) {
-                return Err(ex("the new file was swapped right after saving; I can't vouch for it, please check it. Your original video was not touched.".into()));
-            }
+            nf.publish(&self.root, &rt).inspect_err(|_| nf.discard(&self.root))?;
             let pct = 100 - (out_size * 100 / src_size);
-            Ok((format!("Saved {} ({} to {}, {pct}% smaller). Checked: it decodes end to end, same length, {src_v}->1 video and {src_a} audio stream(s). Your original is untouched. Undo moves the new copy to the Pawline trash.", to.display(), sh::mb(src_size), sh::mb(out_size)), None))
+            Ok((format!("Saved {} ({} to {}, {pct}% smaller). Checked: it decodes end to end, same length, {src_v}->1 video and {src_a} audio stream(s). Your original is untouched. Undo moves the new copy to the Pawline trash.", to.display(), sh::mb(src_size), sh::mb(out_size)), self.fingerprint_full(&rt)))
         })
     }
 
@@ -374,6 +340,14 @@ impl DirectFsBackend {
                 self.private_dir(crate::journal::TRASH)?;
                 let name = a.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                 self.root.symlink_metadata(&a)?;
+                if let Some(want) = &e.meta {
+                    if self.fingerprint_full(&a).as_deref() != Some(want.as_str()) {
+                        return Err(PawError::Validation(format!(
+                            "~/{} was changed (or replaced) after I made it; leaving it where it is so your edits are kept",
+                            e.a
+                        )));
+                    }
+                }
                 rename_noreplace(&self.root, &a, Path::new(&format!("{}/{}-undo-{name}", crate::journal::TRASH, e.id)))?;
             }
             "delete" => {
@@ -507,7 +481,7 @@ impl ExecutionBackend for DirectFsBackend {
                 let (rf, rt) = (self.rel(from)?, self.rel(to)?);
                 self.tracked("copy", self.rel_str(to)?, None, |_| {
                     copy_tree(&self.root, &rf, &rt)?;
-                    Ok(((), None))
+                    Ok(((), self.fingerprint_full(&rt)))
                 })?;
                 Ok(done(op, "copied (undo moves the copy to the trash)"))
             }
@@ -642,6 +616,77 @@ impl ExecutionBackend for DirectFsBackend {
 /// never followed out.
 /// Copy one regular file with create_new. If the copy fails, the partial file is removed only when the name still
 /// points at the file this call created. `after_create` lets tests inject a failure at that point.
+/// A new file being written before it gets its final name. Preferred form: an unnamed file (O_TMPFILE) that is
+/// given its name by linkat, so there is no temporary name to swap and nothing to clean up. Fallback (filesystems
+/// without O_TMPFILE): a uniquely named `.part` file whose identity is checked before and after publishing.
+/// Either way publishing can never replace an existing name.
+struct NewFile {
+    file: std::fs::File,
+    tmp: Option<PathBuf>,
+    mine: crate::platform::FileId,
+}
+
+impl NewFile {
+    fn create(root: &Dir, rt: &Path, tag: &str, id: u64, allow_anon: bool) -> Result<Self, PawError> {
+        let dir = rt.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let ident = |f: &std::fs::File| -> Result<crate::platform::FileId, PawError> {
+            crate::platform::id_std(&f.metadata()?).ok_or_else(|| PawError::Exec("cannot tell files apart on this system, so I did not start".into()))
+        };
+        if allow_anon && std::env::var_os("PAWLINE_NO_TMPFILE").is_none() {
+            if let Ok(f) = crate::platform::anon_file(root, &dir) {
+                let mine = ident(&f)?;
+                return Ok(NewFile { file: f, tmp: None, mine });
+            }
+        }
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let tmp_rel = dir.join(format!(".pawline-{tag}-{id}-{}-{nanos}.part", std::process::id()));
+        let f = root.open_with(&tmp_rel, cap_std::fs::OpenOptions::new().read(true).write(true).create_new(true))?.into_std();
+        let mine = ident(&f)?;
+        Ok(NewFile { file: f, tmp: Some(tmp_rel), mine })
+    }
+
+    fn is_mine(&self, root: &Dir) -> bool {
+        match &self.tmp {
+            None => true,
+            Some(t) => root.symlink_metadata(t).ok().and_then(|m| crate::platform::id_cap(&m)) == Some(self.mine),
+        }
+    }
+
+    /// Remove only the temporary name this run created, never a replacement made by someone else.
+    fn discard(&self, root: &Dir) {
+        if let Some(t) = &self.tmp {
+            if self.is_mine(root) {
+                let _ = root.remove_file(t);
+            }
+        }
+    }
+
+    fn publish(&self, root: &Dir, rt: &Path) -> Result<(), PawError> {
+        match &self.tmp {
+            None => {
+                let dir = rt.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                let name = rt.file_name().ok_or_else(|| PawError::Exec("bad path".into()))?;
+                crate::platform::link_anon(root, &dir, &self.file, name)?;
+            }
+            Some(t) => {
+                if !self.is_mine(root) {
+                    return Err(PawError::Exec("the temporary file was replaced while I worked, so I did not publish anything".into()));
+                }
+                if let Err(e) = rename_noreplace(root, t, rt) {
+                    self.discard(root);
+                    return Err(e);
+                }
+            }
+        }
+        // what now sits at the final name must be the file that was written and checked
+        let landed = root.symlink_metadata(rt).ok().and_then(|m| crate::platform::id_cap(&m));
+        if landed != Some(self.mine) {
+            return Err(PawError::Exec("the new file was swapped right after saving; I can't vouch for it, please check it. Nothing else was touched.".into()));
+        }
+        Ok(())
+    }
+}
+
 fn copy_file(dir: &Dir, from: &Path, to: &Path, after_create: &dyn Fn() -> std::io::Result<()>) -> Result<(), PawError> {
     let mut src = dir.open(from)?;
     let mut dst = dir.open_with(to, cap_std::fs::OpenOptions::new().write(true).create_new(true))?;
@@ -723,6 +768,72 @@ mod noreplace_tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("sub")).unwrap();
         std::fs::canonicalize(&d).unwrap()
+    }
+
+    fn names(d: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn unnamed_file_gets_its_name_only_at_publish_and_never_replaces() {
+        use std::io::Write;
+        let root = tmp("anon");
+        let dir = Dir::open_ambient_dir(&root, cap_std::ambient_authority()).unwrap();
+        let rt = Path::new("sub/out.bin");
+        let nf = NewFile::create(&dir, rt, "t", 1, true).unwrap();
+        if nf.tmp.is_some() {
+            eprintln!("no O_TMPFILE here; the named fallback is covered by the next test");
+            return;
+        }
+        (&nf.file).write_all(b"mine").unwrap();
+        assert!(names(&root.join("sub")).is_empty(), "no name exists before publish");
+        nf.publish(&dir, rt).unwrap();
+        assert_eq!(std::fs::read(root.join("sub/out.bin")).unwrap(), b"mine");
+        // a name that is taken is never replaced, and nothing is left behind
+        let nf2 = NewFile::create(&dir, rt, "t", 2, true).unwrap();
+        (&nf2.file).write_all(b"other").unwrap();
+        let err = nf2.publish(&dir, rt).unwrap_err();
+        assert!(matches!(err, PawError::ConfirmationRequired(_)), "{err}");
+        assert_eq!(std::fs::read(root.join("sub/out.bin")).unwrap(), b"mine");
+        drop(nf2);
+        assert_eq!(names(&root.join("sub")), vec!["out.bin"]);
+        // a competitor that appeared first survives byte for byte
+        std::fs::write(root.join("sub/taken"), "theirs").unwrap();
+        let nf3 = NewFile::create(&dir, Path::new("sub/taken"), "t", 3, true).unwrap();
+        assert!(nf3.publish(&dir, Path::new("sub/taken")).is_err());
+        assert_eq!(std::fs::read(root.join("sub/taken")).unwrap(), b"theirs");
+    }
+
+    #[test]
+    fn named_fallback_checks_identity_and_cleans_only_its_own_file() {
+        use std::io::Write;
+        let root = tmp("named");
+        let dir = Dir::open_ambient_dir(&root, cap_std::ambient_authority()).unwrap();
+        let rt = Path::new("sub/out.bin");
+        let nf = NewFile::create(&dir, rt, "t", 1, false).unwrap();
+        let tmp_path = root.join(nf.tmp.as_ref().unwrap());
+        (&nf.file).write_all(b"mine").unwrap();
+        nf.publish(&dir, rt).unwrap();
+        assert_eq!(std::fs::read(root.join("sub/out.bin")).unwrap(), b"mine");
+        assert!(!tmp_path.exists());
+        // the temporary name swapped for someone else's file before publishing: nothing is published, their file stays
+        let nf = NewFile::create(&dir, Path::new("sub/b.bin"), "t", 2, false).unwrap();
+        let tp = root.join(nf.tmp.as_ref().unwrap());
+        std::fs::remove_file(&tp).unwrap();
+        std::fs::write(&tp, "intruder").unwrap();
+        assert!(nf.publish(&dir, Path::new("sub/b.bin")).is_err());
+        nf.discard(&dir);
+        assert_eq!(std::fs::read(&tp).unwrap(), b"intruder", "a replacement is never deleted");
+        assert!(!root.join("sub/b.bin").exists());
+        // taken final name: our own temp goes away, the competitor stays
+        std::fs::write(root.join("sub/c.bin"), "theirs").unwrap();
+        let nf = NewFile::create(&dir, Path::new("sub/c.bin"), "t", 3, false).unwrap();
+        let tp = root.join(nf.tmp.as_ref().unwrap());
+        assert!(nf.publish(&dir, Path::new("sub/c.bin")).is_err());
+        assert!(!tp.exists());
+        assert_eq!(std::fs::read(root.join("sub/c.bin")).unwrap(), b"theirs");
     }
 
     #[test]
