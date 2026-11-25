@@ -45,6 +45,8 @@ pub struct UiState {
     pub assist_tried: bool,
     /// Journal recovery findings not yet shown to the user.
     pub notes: Vec<String>,
+    /// Working time already spent on the pending plan (planning/validation), not counting any wait for the user.
+    pub carried: std::time::Duration,
 }
 
 pub fn startup_notes_from(root: &std::path::Path) -> Vec<String> {
@@ -182,6 +184,7 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
 pub fn new_state(root: std::path::PathBuf) -> UiState {
     let notes = startup_notes_from(&root);
     UiState {
+        carried: std::time::Duration::ZERO,
         engine: Engine::new(root.clone()),
         root,
         pending: None,
@@ -192,6 +195,7 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
 }
 
 pub fn cancel(state: &mut UiState) -> UiReply {
+    state.carried = std::time::Duration::ZERO;
     state.pending = None;
     reply("message", "Cancelled. Nothing was done.".into())
 }
@@ -211,18 +215,30 @@ fn timed(mut r: UiReply, d: std::time::Duration) -> UiReply {
     r
 }
 
-/// Request received -> result ready (parsing, planning, any online lookup, and execution when no confirmation is needed).
+/// Request submitted -> result ready. Planning time before a confirmation is carried over and
+/// added to the execution time after it; the wait for the user is never counted.
 pub fn handle_text(state: &mut UiState, input: &str) -> UiReply {
+    state.carried = std::time::Duration::ZERO;
     let t = std::time::Instant::now();
     let r = handle_text_inner(state, input);
-    timed(r, t.elapsed())
+    finish(state, r, t.elapsed())
 }
 
-/// Confirmation received -> result ready (execution only).
+/// Confirmation received -> result ready: carried planning time plus execution.
 pub fn confirm_inner(state: &mut UiState) -> UiReply {
     let t = std::time::Instant::now();
     let r = confirm_exec(state);
-    timed(r, t.elapsed())
+    finish(state, r, t.elapsed())
+}
+
+fn finish(state: &mut UiState, r: UiReply, spent: std::time::Duration) -> UiReply {
+    if r.kind == "confirm" {
+        state.carried += spent;
+        return r;
+    }
+    let total = state.carried + spent;
+    state.carried = std::time::Duration::ZERO;
+    timed(r, total)
 }
 
 #[cfg(test)]
@@ -244,5 +260,18 @@ mod timing_tests {
         assert_eq!(timed(plan, D::from_secs(3)).text, "p");
         let done = timed(reply("executed", "Done".into()), D::from_millis(50));
         assert_eq!(done.text, "Done\nTook 0.1s");
+    }
+    #[test]
+    fn planning_plus_execution_excludes_wait() {
+        let mut st = new_state(std::env::temp_dir());
+        // planning 0.21s, then the user waits 10s (never measured), then execution 0.31s
+        let plan = finish(&mut st, reply("confirm", "p".into()), D::from_millis(210));
+        assert_eq!(plan.text, "p");
+        let done = finish(&mut st, reply("executed", "Done".into()), D::from_millis(310));
+        assert_eq!(done.text, "Done\nTook 0.6s");
+        assert_eq!(st.carried, D::ZERO);
+        // a later request does not inherit it
+        let again = finish(&mut st, reply("executed", "Done".into()), D::from_millis(100));
+        assert_eq!(again.text, "Done\nTook 0.1s");
     }
 }
