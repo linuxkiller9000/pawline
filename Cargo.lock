@@ -301,6 +301,7 @@ dependencies = [
 name = "pawline-needle-native"
 version = "0.1.0"
 dependencies = [
+ "needle-core",
  "needle-infer",
  "serde_json",
 ]
