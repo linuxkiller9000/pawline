@@ -14,6 +14,16 @@ pub fn try_answer(input: &str) -> Option<String> {
     }
     let lower = t.to_lowercase();
 
+    // bare "x = 19 - 8 * (4)": x alone on the left, a number expression on the right
+    if let Some((l, r)) = lower.split_once('=') {
+        let r = r.trim().trim_end_matches('?').trim();
+        if l.trim() == "x" && r.chars().any(|c| c.is_ascii_digit()) && !r.contains('=') && !r.contains('x') {
+            if let Some(ans) = solve_linear(&format!("solve {lower}")) {
+                return Some(ans);
+            }
+        }
+    }
+
     // linear equations in x: "solve 2x + 4 = 10"
     if lower.starts_with("solve") {
         if let Some(ans) = solve_linear(&lower) {
@@ -377,6 +387,15 @@ mod tests {
         );
         assert_eq!(a("solve x = 2 * (3 + 4)").as_deref(), Some("x = 2 * (3 + 4)  =>  x = 14"));
         assert_eq!(a("solve 2x = 3 * (4)").as_deref(), Some("2x = 3 * (4)  =>  x = 6"));
+    }
+
+    #[test]
+    fn bare_x_equals_number_expression() {
+        assert_eq!(a("x=19-8*(4)").as_deref(), Some("x = 19-8*(4)  =>  x = -13"));
+        assert_eq!(a("x = 2 * (3 + 4)").as_deref(), Some("x = 2 * (3 + 4)  =>  x = 14"));
+        assert!(a("x = y").is_none());
+        assert!(a("x = x + 1").is_none());
+        assert!(a("x=").is_none());
     }
 
     #[test]
