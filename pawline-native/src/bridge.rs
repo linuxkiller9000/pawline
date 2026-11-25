@@ -174,6 +174,30 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             );
         }
     }
+    // Task-step memory controls (local file, suggestions only, nothing is ever replayed).
+    {
+        use pawline_core::planmem as pm;
+        let low = input.trim().to_lowercase();
+        let low = low.trim_end_matches(['.', '!']);
+        if matches!(low, "task steps" | "show task steps" | "task memory") {
+            return reply("message", pm::default_path().map_or("No data folder.".into(), |p| pm::describe_all(&p)));
+        }
+        if matches!(low, "forget task steps" | "clear task steps" | "forget task memory") {
+            return reply(
+                "message",
+                match pm::default_path() {
+                    Some(p) => format!("Deleted {} saved task routine(s).", pm::forget_all(&p)),
+                    None => "No data folder.".into(),
+                },
+            );
+        }
+        if let Some(rest) = low.strip_prefix("what did you do for ") {
+            return reply(
+                "message",
+                pm::default_path().and_then(|p| pm::suggest(&p, rest)).unwrap_or_else(|| "I have no saved steps for that request.".into()),
+            );
+        }
+    }
     let refreshed;
     let input = if let Some(rest) = input.trim().strip_prefix("refresh:") {
         FORCE_REFRESH.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -237,6 +261,12 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     match r {
         Ok(Response::Executed(ops)) => {
             let done: Vec<String> = ops.iter().map(|o| o.op.describe()).collect();
+            // Remember only local, completed file/app steps as readable text (never answers, searches or online asks).
+            if ops.iter().all(|o| !matches!(o.op, pawline_core::plan::Operation::Answer { .. } | pawline_core::plan::Operation::Search { .. } | pawline_core::plan::Operation::AskOnline { .. } | pawline_core::plan::Operation::GenerateImage { .. } | pawline_core::plan::Operation::Undo { .. } | pawline_core::plan::Operation::List { .. })) {
+                if let Some(p) = pawline_core::planmem::default_path() {
+                    pawline_core::planmem::record_success(&p, input, &done, pawline_core::searchmem::now_secs());
+                }
+            }
             let body = if ops.len() == 1
                 && matches!(ops[0].op, pawline_core::plan::Operation::Answer { .. })
             {
