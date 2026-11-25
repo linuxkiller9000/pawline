@@ -6,6 +6,7 @@ mod edit;
 mod thumb;
 
 mod ctl;
+mod x11;
 use bridge::UiReply;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -19,7 +20,7 @@ use smithay_client_toolkit::{
     delegate_data_device, delegate_registry, delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     reexports::{
-        calloop::{self, channel, EventLoop},
+        calloop::{channel, EventLoop},
         calloop_wayland_source::WaylandSource,
         client::{globals::registry_queue_init, protocol::*, Connection, QueueHandle},
     },
@@ -194,13 +195,15 @@ impl Surf {
 }
 
 struct App {
-    registry: RegistryState,
-    seat: SeatState,
-    output: OutputState,
-    shm: Shm,
-    pool: SlotPool,
-    surf: Surf,
-    qh: QueueHandle<App>,
+    registry: Option<RegistryState>,
+    seat: Option<SeatState>,
+    output: Option<OutputState>,
+    shm: Option<Shm>,
+    pool: Option<SlotPool>,
+    surf: Option<Surf>,
+    qh: Option<QueueHandle<App>>,
+    /// X11 backend (XFCE and other X11 sessions). None on Wayland.
+    xb: Option<x11::Xb>,
     ddm: Option<DataDeviceManagerState>,
     ddev: Option<DataDevice>,
     csrc: Option<CopyPasteSource>,
@@ -411,8 +414,12 @@ impl App {
             *g = st;
         }
         if self.hidden {
-            self.surf.wl().attach(None, 0, 0);
-            self.surf.commit();
+            if let Some(x) = self.xb.as_mut() {
+                x.hide();
+            } else if let Some(sf) = &self.surf {
+                sf.wl().attach(None, 0, 0);
+                sf.commit();
+            }
             return;
         }
         let (w, h) = (self.w, self.h);
@@ -424,9 +431,22 @@ impl App {
         } else {
             self.draw_card(&mut pm);
         }
+        if self.xb.is_some() {
+            let first = !self.xb.as_ref().unwrap().is_shown();
+            self.x_place();
+            let x = self.xb.as_mut().unwrap();
+            x.show();
+            x.present(&pm);
+            if first || self.expanded {
+                x.focus();
+            }
+            return;
+        }
         let stride = w as i32 * 4;
         let (buffer, canvas) = self
             .pool
+            .as_mut()
+            .unwrap()
             .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
             .unwrap();
         // tiny-skia: premultiplied RGBA; wl_shm Argb8888 (LE): B,G,R,A premultiplied
@@ -436,9 +456,10 @@ impl App {
             d[2] = s[0];
             d[3] = s[3];
         }
-        self.surf.wl().damage_buffer(0, 0, w as i32, h as i32);
-        buffer.attach_to(self.surf.wl()).unwrap();
-        self.surf.commit();
+        let sf = self.surf.as_ref().unwrap();
+        sf.wl().damage_buffer(0, 0, w as i32, h as i32);
+        buffer.attach_to(sf.wl()).unwrap();
+        sf.commit();
     }
 
     fn draw_card(&mut self, pm: &mut Pixmap) {
@@ -649,14 +670,15 @@ impl App {
         } else {
             (self.w, self.h) = if self.bar { (BAR_W, BAR_H) } else { (COMPACT, COMPACT) };
         }
-        match &self.surf {
-            Surf::Layer(l) => {
+        match self.surf.as_ref() {
+            None => {}
+            Some(Surf::Layer(l)) => {
                 // The open card docks in the corner so it always fits the screen; the orb returns to where it was left.
                 let m = if exp { (12, 12) } else { self.margin };
                 l.set_margin(m.0, m.1, 0, 0);
                 l.set_size(self.w, self.h)
             }
-            Surf::Win(win) => {
+            Some(Surf::Win(win)) => {
                 win.set_min_size(Some((self.w, self.h)));
                 win.set_max_size(Some((self.w, self.h)));
             }
@@ -1070,7 +1092,7 @@ impl CompositorHandler for App {
 }
 impl OutputHandler for App {
     fn output_state(&mut self) -> &mut OutputState {
-        &mut self.output
+        self.output.as_mut().unwrap()
     }
     fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
@@ -1094,18 +1116,18 @@ impl WindowHandler for App {
 }
 impl SeatHandler for App {
     fn seat_state(&mut self) -> &mut SeatState {
-        &mut self.seat
+        self.seat.as_mut().unwrap()
     }
     fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, cap: Capability) {
         if cap == Capability::Keyboard && self.kb.is_none() {
-            self.kb = self.seat.get_keyboard(qh, &seat, None).ok();
+            self.kb = self.seat.as_mut().unwrap().get_keyboard(qh, &seat, None).ok();
             if let (Some(m), None) = (&self.ddm, &self.ddev) {
                 self.ddev = Some(m.get_data_device(qh, &seat));
             }
         }
         if cap == Capability::Pointer && self.ptr.is_none() {
-            self.ptr = self.seat.get_pointer(qh, &seat).ok();
+            self.ptr = self.seat.as_mut().unwrap().get_pointer(qh, &seat).ok();
         }
     }
     fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, cap: Capability) {
@@ -1140,53 +1162,135 @@ impl PointerHandler for App {
         for e in evs {
             self.ptr_pos = e.position;
             match e.kind {
-                PointerEventKind::Press { button: 274, .. } if !self.expanded => {
-                    // middle click on the orb: back to the corner
-                    self.margin = (12, 12);
-                    if let Surf::Layer(l) = &self.surf {
-                        l.set_margin(12, 12, 0, 0);
-                    }
-                    self.draw();
-                }
-                PointerEventKind::Press { button: 273, .. } if !self.expanded => self.toggle_bar(),
-                PointerEventKind::Press { button: 273, .. } => self.right_click(),
-                PointerEventKind::Press { .. } if !self.expanded && matches!(self.surf, Surf::Layer(_)) => {
-                    self.orb_drag = Some((e.position.0, e.position.1, false, self.margin));
-                }
-                PointerEventKind::Press { .. } => self.click(),
-                PointerEventKind::Release { .. } if self.orb_drag.is_some() => {
-                    let moved = self.orb_drag.take().is_some_and(|d| d.2);
-                    // in the strip only the orb end opens the card; the rest just takes typing
-                    if !moved && (!self.bar || self.ptr_pos.0 < 40.0) {
-                        self.set_expanded(true);
-                    }
-                }
-                PointerEventKind::Release { .. } => self.dragging = false,
-                PointerEventKind::Motion { .. } if self.orb_drag.is_some() => {
-                    // sway keeps reporting positions relative to the surface's place at the press, so the
-                    // total move is (position - press position) from the margins at the press.
-                    let (px, py, moved, m0) = self.orb_drag.unwrap();
-                    let (dx, dy) = (e.position.0 - px, e.position.1 - py);
-                    if moved || dx.abs() + dy.abs() >= 6.0 {
-                        self.margin = ((m0.0 + dy.round() as i32).max(0), (m0.1 - dx.round() as i32).max(0));
-                        if let Surf::Layer(l) = &self.surf {
-                            l.set_margin(self.margin.0, self.margin.1, 0, 0);
-                        }
-                        self.draw();
+                PointerEventKind::Press { button, .. } => self.ptr_press(button, e.position),
+                PointerEventKind::Release { .. } => self.ptr_release(),
+                PointerEventKind::Motion { .. } => {
+                    if self.ptr_motion(e.position, e.position) {
                         let _ = conn.flush();
-                        self.orb_drag = Some((px, py, true, m0));
                     }
-                }
-                PointerEventKind::Motion { .. } if self.dragging => {
-                    let i = self.idx_at(e.position.0 as f32, e.position.1 as f32);
-                    self.input.set_caret(i, true);
-                    self.draw();
                 }
                 PointerEventKind::Axis { vertical, .. } => {
                     let d = if vertical.discrete != 0 { vertical.discrete as f32 * 40.0 } else { vertical.absolute as f32 };
                     self.wheel(d);
                 }
                 _ => {}
+            }
+        }
+    }
+}
+
+impl App {
+    fn can_drag(&self) -> bool {
+        self.xb.is_some() || matches!(self.surf, Some(Surf::Layer(_)))
+    }
+
+    /// Move the orb to the current margins (Wayland layer margins, or the X11 window position).
+    fn apply_margin(&mut self) {
+        if let Some(Surf::Layer(l)) = &self.surf {
+            l.set_margin(self.margin.0, self.margin.1, 0, 0);
+        }
+        if self.xb.is_some() {
+            self.x_place();
+        }
+    }
+
+    /// X11: window position from the margins (top, right) of the whole screen; the open card docks in the corner.
+    fn x_place(&self) {
+        if let Some(x) = &self.xb {
+            let m = if self.expanded { (12, 12) } else { self.margin };
+            x.place(x.sw as i32 - self.w as i32 - m.1, m.0, self.w, self.h);
+        }
+    }
+
+    /// Shared by Wayland and X11. `button`: 272 left, 273 right, 274 middle.
+    fn ptr_press(&mut self, button: u32, pos: (f64, f64)) {
+        match button {
+            274 if !self.expanded => {
+                // middle click on the orb: back to the corner
+                self.margin = (12, 12);
+                self.apply_margin();
+                self.draw();
+            }
+            273 if !self.expanded => self.toggle_bar(),
+            273 => self.right_click(),
+            _ if !self.expanded && self.can_drag() => {
+                self.orb_drag = Some((pos.0, pos.1, false, self.margin));
+            }
+            _ => self.click(),
+        }
+    }
+
+    fn ptr_release(&mut self) {
+        if self.orb_drag.is_some() {
+            let moved = self.orb_drag.take().is_some_and(|d| d.2);
+            // in the strip only the orb end opens the card; the rest just takes typing
+            if !moved && (!self.bar || self.ptr_pos.0 < 40.0) {
+                self.set_expanded(true);
+            }
+        } else {
+            self.dragging = false;
+        }
+    }
+
+    /// `pos` is relative to the window; `abs` is what the drag maths uses (Wayland: same as pos, because sway keeps
+    /// reporting positions relative to the surface's place at the press; X11: root coordinates).
+    fn ptr_motion(&mut self, pos: (f64, f64), abs: (f64, f64)) -> bool {
+        self.ptr_pos = pos;
+        if let Some((px, py, moved, m0)) = self.orb_drag {
+            let (dx, dy) = (abs.0 - px, abs.1 - py);
+            if moved || dx.abs() + dy.abs() >= 6.0 {
+                self.margin = ((m0.0 + dy.round() as i32).max(0), (m0.1 - dx.round() as i32).max(0));
+                self.apply_margin();
+                self.draw();
+                self.orb_drag = Some((px, py, true, m0));
+                return true;
+            }
+        } else if self.dragging {
+            let i = self.idx_at(pos.0 as f32, pos.1 as f32);
+            self.input.set_caret(i, true);
+            self.draw();
+        }
+        false
+    }
+
+    fn x_event(&mut self, ev: x11::XEv) {
+        use x11::XEv;
+        if std::env::var_os("PAWLINE_DEBUG").is_some() {
+            eprintln!("xev {}", match &ev { XEv::Key { sym, .. } => format!("key {sym:x}"), XEv::Press { button, x, y, .. } => format!("press {button} {x} {y}"), XEv::Release { .. } => "release".into(), XEv::Motion { .. } => "motion".into(), XEv::Expose => "expose".into() });
+        }
+        match ev {
+            XEv::Expose => self.draw(),
+            XEv::Key { sym, state } => {
+                self.shift = state & 1 != 0;
+                self.ctrl = state & 4 != 0;
+                let ks = Keysym::new(sym);
+                // plain text only: Ctrl/Alt chords and control characters carry no text
+                let utf8 = if self.ctrl || state & 8 != 0 { None } else { ks.key_char().filter(|c| !c.is_control()).map(|c| c.to_string()) };
+                self.key(KeyEvent { time: 0, raw_code: 0, keysym: ks, utf8 });
+            }
+            XEv::Press { button, x, y, rx, ry, state } => {
+                self.shift = state & 1 != 0;
+                self.ctrl = state & 4 != 0;
+                self.ptr_pos = (x, y);
+                if let Some(xb) = &self.xb {
+                    xb.focus();
+                }
+                match button {
+                    1 => self.ptr_press(272, (rx, ry)),
+                    2 => self.ptr_press(274, (rx, ry)),
+                    3 => self.ptr_press(273, (rx, ry)),
+                    4 => self.wheel(-40.0),
+                    5 => self.wheel(40.0),
+                    _ => {}
+                }
+            }
+            XEv::Release { x, y } => {
+                self.ptr_pos = (x, y);
+                self.ptr_release();
+            }
+            XEv::Motion { x, y, rx, ry, state } => {
+                self.shift = state & 1 != 0;
+                self.ptr_motion((x, y), (rx, ry));
             }
         }
     }
@@ -1236,8 +1340,11 @@ impl DataSourceHandler for App {
 impl App {
     /// Put text on the system clipboard (CLIPBOARD selection).
     fn clip_copy(&mut self, text: String) -> bool {
+        if let Some(x) = &self.xb {
+            return x.clip_copy(text);
+        }
         let (Some(m), Some(dev)) = (&self.ddm, &self.ddev) else { return false };
-        let src = m.create_copy_paste_source(&self.qh, CLIP_MIMES);
+        let src = m.create_copy_paste_source(self.qh.as_ref().unwrap(), CLIP_MIMES);
         src.set_selection(dev, self.serial);
         self.csrc = Some(src);
         self.clip_text = text;
@@ -1245,6 +1352,9 @@ impl App {
     }
     /// Read text from the system clipboard. Never blocks the UI for more than half a second.
     fn clip_paste(&mut self) -> Option<String> {
+        if let Some(x) = &self.xb {
+            return x.clip_paste();
+        }
         if self.csrc.is_some() {
             // we own the selection: a self-read would wait on our own event loop
             return Some(self.clip_text.clone());
@@ -1276,7 +1386,7 @@ impl App {
 
 impl ShmHandler for App {
     fn shm_state(&mut self) -> &mut Shm {
-        &mut self.shm
+        self.shm.as_mut().unwrap()
     }
 }
 delegate_compositor!(App);
@@ -1292,7 +1402,7 @@ delegate_data_device!(App);
 delegate_registry!(App);
 impl ProvidesRegistryState for App {
     fn registry(&mut self) -> &mut RegistryState {
-        &mut self.registry
+        self.registry.as_mut().unwrap()
     }
     registry_handlers![OutputState, SeatState];
 }
@@ -1439,8 +1549,9 @@ fn main() {
         run_terminal();
         return;
     }
-    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
-        eprintln!("No Wayland display found, so the window can't open. Starting terminal mode (same commands, same confirmations). Use --no-ui to choose this directly.");
+    let x_mode = std::env::var("PAWLINE_BACKEND").is_ok_and(|v| v == "x11") || std::env::var_os("WAYLAND_DISPLAY").is_none();
+    if x_mode && std::env::var_os("DISPLAY").is_none() {
+        eprintln!("No Wayland or X11 display found, so the window can't open. Starting terminal mode (same commands, same confirmations). Use --no-ui to choose this directly.");
         run_terminal();
         return;
     }
@@ -1450,51 +1561,85 @@ fn main() {
     }
     let panel_only = args.iter().any(|a| a == "--panel-only");
     let state: ctl::Shared = std::sync::Arc::new(std::sync::Mutex::new("idle"));
-    let conn = Connection::connect_to_env().expect("no Wayland compositor found (WAYLAND_DISPLAY)");
-    let (globals, queue) = registry_queue_init(&conn).unwrap();
-    let qh = queue.handle();
-    let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor missing");
-    let shm = Shm::bind(&globals, &qh).expect("wl_shm missing");
-    let force_window = std::env::var("PAWLINE_NO_LAYER").is_ok();
-    let layer_shell = if force_window { None } else { LayerShell::bind(&globals, &qh).ok() };
-    let surface = compositor.create_surface(&qh);
-    let (surf, layer_mode) = match layer_shell {
-        Some(ls) => {
-            let l = ls.create_layer_surface(&qh, surface, Layer::Top, Some("pawline"), None);
-            l.set_anchor(Anchor::TOP | Anchor::RIGHT);
-            l.set_margin(12, 12, 0, 0);
-            l.set_size(COMPACT, COMPACT);
-            l.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
-            l.commit();
-            (Surf::Layer(l), true)
-        }
-        None => {
-            let xdg = XdgShell::bind(&globals, &qh).expect("neither wlr-layer-shell nor xdg-shell is available");
-            let win = xdg.create_window(surface, WindowDecorations::RequestServer, &qh);
-            win.set_title("Pawline");
-            win.set_app_id("pawline");
-            win.set_min_size(Some((COMPACT, COMPACT)));
-            win.set_max_size(Some((COMPACT, COMPACT)));
-            win.commit();
-            (Surf::Win(win), false)
-        }
+    struct Wl {
+        conn: Connection,
+        queue: smithay_client_toolkit::reexports::client::EventQueue<App>,
+        globals: smithay_client_toolkit::reexports::client::globals::GlobalList,
+        shm: Shm,
+        pool: SlotPool,
+        surf: Surf,
+        layer_mode: bool,
+    }
+    let wl: Option<Wl> = if x_mode {
+        None
+    } else {
+        let conn = Connection::connect_to_env().expect("no Wayland compositor found (WAYLAND_DISPLAY)");
+        let (globals, queue) = registry_queue_init(&conn).unwrap();
+        let qh = queue.handle();
+        let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor missing");
+        let shm = Shm::bind(&globals, &qh).expect("wl_shm missing");
+        let force_window = std::env::var("PAWLINE_NO_LAYER").is_ok();
+        let layer_shell = if force_window { None } else { LayerShell::bind(&globals, &qh).ok() };
+        let surface = compositor.create_surface(&qh);
+        let (surf, layer_mode) = match layer_shell {
+            Some(ls) => {
+                let l = ls.create_layer_surface(&qh, surface, Layer::Top, Some("pawline"), None);
+                l.set_anchor(Anchor::TOP | Anchor::RIGHT);
+                l.set_margin(12, 12, 0, 0);
+                l.set_size(COMPACT, COMPACT);
+                l.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
+                l.commit();
+                (Surf::Layer(l), true)
+            }
+            None => {
+                let xdg = XdgShell::bind(&globals, &qh).expect("neither wlr-layer-shell nor xdg-shell is available");
+                let win = xdg.create_window(surface, WindowDecorations::RequestServer, &qh);
+                win.set_title("Pawline");
+                win.set_app_id("pawline");
+                win.set_min_size(Some((COMPACT, COMPACT)));
+                win.set_max_size(Some((COMPACT, COMPACT)));
+                win.commit();
+                (Surf::Win(win), false)
+            }
+        };
+        let pool = SlotPool::new((W * H * 4) as usize, &shm).unwrap();
+        Some(Wl { conn, queue, globals, shm, pool, surf, layer_mode })
     };
-    let pool = SlotPool::new((W * H * 4) as usize, &shm).unwrap();
+    let (x_tx, x_rx) = channel::channel::<x11::XEv>();
+    let xb = if x_mode {
+        match x11::Xb::open(COMPACT as u16, COMPACT as u16, x_tx) {
+            Ok(x) => Some(x),
+            Err(e) => {
+                eprintln!("Could not open the X11 display ({e}). Starting terminal mode (same commands, same confirmations).");
+                run_terminal();
+                return;
+            }
+        }
+    } else {
+        None
+    };
     let font = fontdue::Font::from_bytes(FONT, fontdue::FontSettings::default()).unwrap();
 
     let (req_tx, req_rx) = mpsc::channel::<Req>();
     let (back_tx, back_rx) = channel::channel::<UiReply>();
     std::thread::spawn(move || worker(req_rx, back_tx));
 
+    let (conn_opt, queue_opt, mut wl_rest) = match wl {
+        Some(w) => (Some(w.conn), Some(w.queue), Some((w.globals, w.shm, w.pool, w.surf, w.layer_mode))),
+        None => (None, None, None),
+    };
+    let layer_mode = wl_rest.as_ref().is_some_and(|r| r.4);
+    let qh0 = queue_opt.as_ref().map(|q| q.handle());
     let mut app = App {
-        registry: RegistryState::new(&globals),
-        seat: SeatState::new(&globals, &qh),
-        output: OutputState::new(&globals, &qh),
-        shm,
-        pool,
-        surf,
-        qh: qh.clone(),
-        ddm: DataDeviceManagerState::bind(&globals, &qh).ok(),
+        registry: wl_rest.as_ref().map(|r| RegistryState::new(&r.0)),
+        seat: wl_rest.as_ref().zip(qh0.as_ref()).map(|(r, q)| SeatState::new(&r.0, q)),
+        output: wl_rest.as_ref().zip(qh0.as_ref()).map(|(r, q)| OutputState::new(&r.0, q)),
+        shm: None,
+        pool: None,
+        surf: None,
+        qh: qh0.clone(),
+        xb,
+        ddm: wl_rest.as_ref().zip(qh0.as_ref()).and_then(|(r, q)| DataDeviceManagerState::bind(&r.0, q).ok()),
         ddev: None,
         csrc: None,
         clip_text: String::new(),
@@ -1540,6 +1685,11 @@ fn main() {
         plan_max: 0.0,
         chat_max: 0.0,
     };
+    if let Some(r) = wl_rest.take() {
+        app.shm = Some(r.1);
+        app.pool = Some(r.2);
+        app.surf = Some(r.3);
+    }
     let (ctl_tx, ctl_rx) = channel::channel::<ctl::Ctl>();
     if !ctl::serve(ctl_tx, state.clone()) {
         eprintln!("(panel control socket not available; panel widgets will show Pawline as off)");
@@ -1549,7 +1699,7 @@ fn main() {
         app.hidden = false;
         app.w = W;
         app.h = H;
-        if let Surf::Layer(l) = &app.surf {
+        if let Some(Surf::Layer(l)) = &app.surf {
             l.set_size(W, H);
         }
     }
@@ -1557,14 +1707,23 @@ fn main() {
         app.expanded = true;
         app.w = W;
         app.h = H;
-        if let Surf::Layer(l) = &app.surf {
+        if let Some(Surf::Layer(l)) = &app.surf {
             l.set_size(W, H);
         }
     }
 
     let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
     let handle = event_loop.handle();
-    WaylandSource::new(conn.clone(), queue).insert(handle.clone()).unwrap();
+    if let (Some(c), Some(q)) = (conn_opt.clone(), queue_opt) {
+        WaylandSource::new(c, q).insert(handle.clone()).unwrap();
+    }
+    handle
+        .insert_source(x_rx, |ev, _, app: &mut App| {
+            if let channel::Event::Msg(e) = ev {
+                app.x_event(e);
+            }
+        })
+        .unwrap();
     handle
         .insert_source(back_rx, |ev, _, app: &mut App| {
             if let channel::Event::Msg(r) = ev {
@@ -1579,7 +1738,9 @@ fn main() {
             }
         })
         .unwrap();
-    let _ = calloop::timer::Timer::immediate();
+    if app.xb.is_some() {
+        app.draw();
+    }
     while !app.exit {
         event_loop.dispatch(None, &mut app).unwrap();
     }
