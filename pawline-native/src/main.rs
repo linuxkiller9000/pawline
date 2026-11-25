@@ -1113,6 +1113,7 @@ fn main() {
     }
     if args.iter().any(|a| a == "--licenses") {
         print!("{}", include_str!("../../licenses/THIRD-PARTY-VOICE.txt"));
+        print!("\n\n{}", include_str!("../../licenses/THIRD-PARTY-NATIVE.txt"));
         print!("\n\n{}", include_str!("../../licenses/THIRD-PARTY-ORT.txt"));
         print!("\n\n{}", include_str!("../../licenses/THIRD-PARTY-RUST.txt"));
         return;

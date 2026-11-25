@@ -1,0 +1,259 @@
+PAWLINE: THIRD-PARTY NOTICES FOR THE NATIVE (DEFAULT) BUILD
+DRAFT, part of the overall release audit. Added because the NOTICE file lists names only.
+
+1. STATIC LLVM C++ RUNTIME (linked into the executable)
+Build inputs, identical (sha256) to the files in these Ubuntu 22.04 packages, version 1:14.0.0-1ubuntu1:
+ libc++.a      ebd5c9b9fb457601ddc583a090866a9960dbf5b2f5e7cb527f05492874c343b4   from libc++-14-dev_14.0.0-1ubuntu1_amd64.deb (273f5d3e402fb0ace27c677af8d5545038c5110570446a27650e1dc19a74637c)
+ libc++abi.a   a4c5038f1f2fbefd032ea6411e4a19b4999b806a93e475aa1e4e22c137a363bf   from libc++abi-14-dev_14.0.0-1ubuntu1_amd64.deb (65282aa7e219082ccbd579099381de26f563e26216e1380ce74705ccdc36b56f)
+ libunwind.a   33fb4fdea2b1a84985531a9dc9f4eb5b731b04feb9354cb7ca787e2d6693fd46   from libunwind-14-dev_14.0.0-1ubuntu1_amd64.deb (73cced4e8db27c6a938840e8b313c3f8a19e5bcaa31362fc84daefd76c26ecd4)
+ Licence: Apache-2.0 WITH LLVM-exception (copyright file of these packages follows).
+ Source package: llvm-toolchain-14 1:14.0.0-1ubuntu1 (Ubuntu launchpad.net/ubuntu/+source/llvm-toolchain-14).
+ PENDING: the source files of that exact version were not retrieved (the main Ubuntu pool now holds
+ 14.0.6 only). Apache-2.0/LLVM-exception does not require shipping source, but the exact version
+ is recorded here so it can be fetched for the source assets if the owner wants them.
+
+2. CACTUS RUNTIME AND NEEDLE3 WEIGHTS (committed in the repository as pawline-needle/libcactus.a and needle3.cact)
+ libcactus.a   9e5e7abe1b0bf6675b69a00a5c5e875e80fde496d4e79f7ae86faeae5cab8fd6
+ needle3.cact  c9d915eca282ed42d1a09b143b592adb4cc6744ffe2d294adf5cfc5548170c38
+ Licence per the upstream projects: Apache-2.0 (see NOTICE for URLs). Standard Apache-2.0 text:
+ see THIRD-PARTY-VOICE.txt section 4d (kaldi-native-fbank LICENSE is the unmodified Apache-2.0 text).
+ PENDING: confirm the upstream copyright holder line, source tag/commit for libcactus.a, and
+ that the weights licence file travels with the model; not verifiable offline here.
+
+3. FONT: Liberation Sans (pawline-native/assets/font.ttf)
+ sha256 36efda825bcd7d1de846204c3adad51ced9d9b5cb7df571fb33edc21207e324a, byte-identical to LiberationSans-Regular.ttf in the Ubuntu package
+ fonts-liberation 1:1.07.4-11 (deb sha256 d359cba9c3ac8a40fb57773881e20827845e9fab1b2d6fd25cde4b7bade7d57f).
+ CORRECTION: this is Liberation 1.07.x, licensed under the GNU GPL v.2 with the font exceptions in the
+ text below (Red Hat), NOT the SIL Open Font License that NOTICE currently says (OFL applies to
+ Liberation 2.x). Pawline is GPL-3.0; whether GPL-2.0-only font data may be embedded in a GPL-3.0 program
+ is unresolved here and needs an owner/legal decision, or replacing the font with Liberation 2.x (OFL-1.1).
+
+
+==============================================================================
+LLVM libc++/libc++abi/libunwind 14.0.0-1ubuntu1 copyright file
+==============================================================================
+
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: LLVM/Clang
+Source: https://llvm.org/releases/download.html
+
+Files: *
+Copyright: 2003-2017 University of Illinois at Urbana-Champaign.
+License: APACHE-2-LLVM-EXCEPTIONS
+ On Debian systems the full text of the Apache Software License 2.0 can be
+ found in the `/usr/share/common-licenses/Apache-2.0' file.
+ .
+ ---- LLVM Exceptions to the Apache 2.0 License ----
+ .
+ As an exception, if, as a result of your compiling your source code, portions
+ of this Software are embedded into an Object form of such source code, you
+ may redistribute such embedded portions in such Object form without complying
+ with the conditions of Sections 4(a), 4(b) and 4(d) of the License.
+ .
+ In addition, if you combine or link compiled forms of this Software with
+ software that is licensed under the GPLv2 ("Combined Software") and if a
+ court of competent jurisdiction determines that the patent provision (Section
+ 3), the indemnity provision (Section 9) or other Section of the License
+ conflicts with the conditions of the GPLv2, you may retroactively and
+ prospectively choose to deem waived or otherwise exclude such Section(s) of
+ the License, but only in their entirety and only with respect to the Combined
+ Software.
+
+Files: debian/*
+Copyright: 2003-2020 Sylvestre Ledru and others
+License: APACHE-2-LLVM-EXCEPTIONS
+ On Debian systems the full text of the Apache Software License 2.0 can be
+ found in the `/usr/share/common-licenses/Apache-2.0' file.
+ .
+ ---- LLVM Exceptions to the Apache 2.0 License ----
+ .
+ As an exception, if, as a result of your compiling your source code, portions
+ of this Software are embedded into an Object form of such source code, you
+ may redistribute such embedded portions in such Object form without complying
+ with the conditions of Sections 4(a), 4(b) and 4(d) of the License.
+ .
+ In addition, if you combine or link compiled forms of this Software with
+ software that is licensed under the GPLv2 ("Combined Software") and if a
+ court of competent jurisdiction determines that the patent provision (Section
+ 3), the indemnity provision (Section 9) or other Section of the License
+ conflicts with the conditions of the GPLv2, you may retroactively and
+ prospectively choose to deem waived or otherwise exclude such Section(s) of
+ the License, but only in their entirety and only with respect to the Combined
+ Software.
+
+Files: compiler-rt/lib/BlocksRuntime/*
+ lldb/tools/debugserver/source/MacOSX/stack_logging.h
+Copyright: 2008-2010 Apple, Inc.
+License: MIT
+
+Files: llvm/lib/Support/reg*
+Copyright: 1992, 1993, 1994 Henry Spencer
+           1992, 1993, 1994 The Regents of the University of California
+License: BSD-3-clause
+
+Files: llvm/lib/Support/MD5.cpp llvm/include/llvm/Support/MD5.h
+Copyright: 2001 Alexander Peslyak <solar at openwall.com>
+License: solar-public-domain
+ This software was written by Alexander Peslyak in 2001.  No copyright is
+ claimed, and the software is hereby placed in the public domain.
+ In case this attempt to disclaim copyright and place the software in the
+ public domain is deemed null and void, then the software is
+ Copyright (c) 2001 Alexander Peslyak and it is hereby released to the
+ general public under the following terms:
+ .
+ Redistribution and use in source and binary forms, with or without
+ modification, are permitted.
+ .
+ * There's ABSOLUTELY NO WARRANTY, express or implied.
+
+Files: lldb/third_party/Python/module/unittest2*
+Copyright: 1999-2003 Steve Purcell
+           2003-2010 Python Software Foundation
+License: Python
+ This module is free software, and you may redistribute it and/or modify
+ it under the same terms as Python itself, so long as this copyright message
+ and disclaimer are retained in their original form.
+ .
+ IN NO EVENT SHALL THE AUTHOR BE LIABLE TO ANY PARTY FOR DIRECT, INDIRECT,
+ SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OF
+ THIS CODE, EVEN IF THE AUTHOR HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
+ DAMAGE.
+ .
+ THE AUTHOR SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING, BUT NOT
+ LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+ PARTICULAR PURPOSE.  THE CODE PROVIDED HEREUNDER IS ON AN "AS IS" BASIS,
+ AND THERE IS NO OBLIGATION WHATSOEVER TO PROVIDE MAINTENANCE,
+ SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+
+Files: llvm/llvmtest/YAMLParser/*
+Copyright: 2006 Kirill Simonov
+License: MIT
+
+Files: llvm/utils/unittest/googletest/*
+Copyright: 2006-2008, Google Inc.
+License: BSD-3-Clause
+
+Files: llvm/utils/unittest/googlemock/*
+Copyright: 2008, Google Inc.
+License: BSD-3-Clause
+
+Files: clang/lib/Headers/cuda_wrappers/*
+ clang/lib/Headers/avx512vlvp2intersectintrin.h
+ clang/lib/Headers/avx512vp2intersectintrin.h
+Copyright: 2016-2020, Google Inc.
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ THE SOFTWARE.
+
+
+License: MIT
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ THE SOFTWARE.
+
+
+==============================================================================
+fonts-liberation 1.07.4-11 copyright file (licence of the embedded font)
+==============================================================================
+
+This package was debianized by Alan Baghumian <alan@technotux.org> on
+Sat, 12 May 2007 16:13:31 +0330.
+
+It was downloaded from https://pagure.io/liberation-fonts/
+
+Upstream Author: Red Hat Inc.
+
+Copyright: (C) 2007 Red Hat, Inc. All rights reserved. 
+	       LIBERATION is a trademark of Red Hat, Inc.
+
+License:
+
+ This agreement governs the use of the Software and any updates to the Software,
+ regardless of the delivery mechanism. Subject to the following terms, Red Hat, Inc.
+ ("Red Hat") grants to the user ("Client") a license to this work pursuant to 
+ the GNU General Public License v.2 with the exceptions set forth below and such 
+ other terms as our set forth in this End User License Agreement.
+
+ 1. The Software and License Exception. LIBERATION font software  (the "Software")
+ consists of TrueType-OpenType formatted font software for rendering LIBERATION
+ typefaces in sans serif, serif, and monospaced character styles. You are licensed 
+ to  use, modify, copy, and distribute the Software pursuant to the GNU General
+ Public License v.2 with the following exceptions:  
+
+ (a) As a special exception, if you create a document which uses this font, and 
+     embed this font or unaltered portions of this font into the document, this
+     font does not by itself cause the resulting document to be covered by the 
+     GNU General Public License.  This exception does not however invalidate any
+     other reasons why the document might be covered by the GNU General Public 
+     License.  If you modify this font, you may extend this exception to your 
+     version of the font, but you are not obligated to do so. If you do not 
+     wish to do so, delete this exception statement from your version.
+
+ (b) As a further exception, any distribution of the object code of the Software 
+     in a physical product must provide you the right to access and modify the
+     source code for the Software and to reinstall that modified version of the 
+     Software in object code form on the same physical product on which you 
+     received it.
+
+ 2. Intellectual Property Rights. The Software and each of its components, including 
+    the source code, documentation, appearance, structure and organization are owned 
+    by Red Hat and others and are protected under copyright and other laws. Title to 
+    the Software and any component, or to any copy, modification, or merged portion
+    shall remain with the aforementioned, subject to the applicable license. 
+    The "LIBERATION" trademark is a trademark of Red Hat, Inc. in the U.S. and other
+    countries. This agreement does not permit Client to distribute modified versions 
+    of the Software using Red Hat's trademarks. If Client makes a redistribution of 
+    a modified version of the Software, then Client must modify the files names to 
+    remove any reference to the Red Hat trademarks and must not use the Red Hat 
+    trademarks in any way to reference or promote the modified Software. 
+
+ 3. Limited Warranty. To the maximum extent permitted under applicable law, the 
+    Software is provided and licensed "as is" without warranty of any kind, 
+    expressed or implied, including the implied warranties of merchantability, 
+    non-infringement or fitness for a particular purpose. Red Hat does not warrant
+    that the functions contained in the Software will meet Client's requirements or
+    that the operation of the Software will be entirely error free or appear precisely
+    as described in the accompanying documentation. 
+
+ 4. Limitation of Remedies and Liability.  To the maximum extent permitted by applicable
+    law, Red Hat or any Red Hat authorized dealer will not be liable to Client for any
+    incidental or consequential damages, including lost profits or lost savings arising 
+    out of the use or inability to use the Software, even if Red Hat or such dealer has
+    been advised of the possibility of such damages. 
+
+ 5. General. If any provision of this agreement is held to be unenforceable, that shall
+    not affect the enforceability of the remaining provisions. This agreement shall be
+    governed by the laws of the State of North Carolina and of the United States, without
+    regard to any conflict of laws provisions, except that the United Nations Convention 
+    on the International Sale of Goods shall not apply.
+
+On Debian systems, the complete text of the GNU General
+Public License version 2 can be found in `/usr/share/common-licenses/GPL-2'.
