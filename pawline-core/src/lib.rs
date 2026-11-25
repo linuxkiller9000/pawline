@@ -11,6 +11,7 @@ pub mod context;
 pub mod error;
 pub mod exec;
 pub mod intent;
+pub mod journal;
 pub mod math;
 pub mod plan;
 pub mod search;

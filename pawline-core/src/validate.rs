@@ -143,7 +143,11 @@ impl Validator {
             LocationRef::CurrentDir => self.root.clone(),
         };
         let n = self.normalize(&raw)?;
-        self.real_confine(&n)
+        let n = self.real_confine(&n)?;
+        if n.starts_with(self.root.join(crate::journal::STORE)) {
+            return Err(PawError::UnsafePath("Pawline's own store is off limits".into()));
+        }
+        Ok(n)
     }
 
     fn apply_ext_hint(name: &str, kind: &CreateKind) -> String {
@@ -254,6 +258,14 @@ impl Validator {
                 Directive::List { target } => {
                     let path = self.resolve_location(target, &sim)?;
                     ops.push(Operation::List { path });
+                }
+                Directive::Undo => {
+                    let text = std::fs::read_to_string(self.root.join(crate::journal::JOURNAL))
+                        .unwrap_or_default();
+                    let e = crate::journal::last_open(&text).ok_or_else(|| {
+                        PawError::Validation("there is nothing to undo yet".into())
+                    })?;
+                    ops.push(Operation::Undo { entry: e.id, summary: e.describe_undo() });
                 }
                 Directive::SetWallpaper { image } => {
                     let path = self.resolve_location(image, &sim)?;

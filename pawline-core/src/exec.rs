@@ -59,6 +59,94 @@ impl DirectFsBackend {
         self
     }
 
+    fn read_journal(&self) -> String {
+        use std::io::Read;
+        let mut s = String::new();
+        if let Ok(mut f) = self.root.open(crate::journal::JOURNAL) {
+            let _ = f.read_to_string(&mut s);
+        }
+        s
+    }
+
+    fn append_journal(&self, line: &str) -> Result<(), PawError> {
+        use std::io::Write;
+        self.root.create_dir_all(crate::journal::STORE)?;
+        let mut f = self.root.open_with(
+            crate::journal::JOURNAL,
+            cap_std::fs::OpenOptions::new().append(true).create(true),
+        )?;
+        writeln!(f, "{line}")?;
+        Ok(())
+    }
+
+    /// Record a change that already happened. A journal failure is reported,
+    /// not swallowed: the change itself succeeded, but it cannot be undone.
+    fn record(&self, kind: &str, a: &Path, b: Option<String>) -> Result<(), PawError> {
+        let id = crate::journal::next_id(&self.read_journal());
+        let e = crate::journal::Entry {
+            id,
+            kind: kind.into(),
+            a: self.rel(a)?.to_string_lossy().to_string(),
+            b,
+        };
+        self.append_journal(&e.to_line()).map_err(|err| {
+            PawError::Exec(format!("{kind} done, but it could not be recorded for undo: {err}"))
+        })
+    }
+
+    fn undo(&self, entry: u64) -> Result<String, PawError> {
+        let text = self.read_journal();
+        let e = crate::journal::last_open(&text)
+            .ok_or_else(|| PawError::Validation("nothing to undo".into()))?;
+        if e.id != entry {
+            return Err(PawError::Validation(
+                "the history changed since you were asked; ask to undo again".into(),
+            ));
+        }
+        let a = PathBuf::from(&e.a);
+        let b = e.b.as_ref().map(PathBuf::from);
+        let gone = |p: &Path| !self.root.try_exists(p).unwrap_or(true);
+        match e.kind.as_str() {
+            "create_dir" => {
+                self.root.remove_dir(&a).map_err(|_| {
+                    PawError::Validation(format!("~/{} is missing or not empty; leaving it", e.a))
+                })?;
+            }
+            "create_file" => {
+                let m = self.root.symlink_metadata(&a)?;
+                if !m.is_file() || m.len() != 0 {
+                    return Err(PawError::Validation(format!(
+                        "~/{} has content now; not removing it",
+                        e.a
+                    )));
+                }
+                self.root.remove_file(&a)?;
+            }
+            "rename" | "move" => {
+                let b = b.ok_or_else(|| PawError::Exec("journal entry is damaged".into()))?;
+                if !gone(&a) {
+                    return Err(PawError::Validation(format!("~/{} exists again; not overwriting", e.a)));
+                }
+                self.root.rename(&b, &self.root, &a)?;
+            }
+            "delete" => {
+                let b = b.ok_or_else(|| PawError::Exec("journal entry is damaged".into()))?;
+                if !gone(&a) {
+                    return Err(PawError::Validation(format!("~/{} exists again; not overwriting", e.a)));
+                }
+                if let Some(parent) = a.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        self.root.create_dir_all(parent)?;
+                    }
+                }
+                self.root.rename(&b, &self.root, &a)?;
+            }
+            k => return Err(PawError::Exec(format!("cannot undo a \"{k}\" entry"))),
+        }
+        self.append_journal(&crate::journal::undone_line(e.id))?;
+        Ok(format!("undone: {}", e.describe_undo()))
+    }
+
     fn rel(&self, p: &Path) -> Result<PathBuf, PawError> {
         p.strip_prefix(&self.root_path)
             .map(|r| r.to_path_buf())
@@ -81,6 +169,7 @@ impl ExecutionBackend for DirectFsBackend {
         match op {
             Operation::CreateDir { path } => {
                 self.root.create_dir(self.rel(path)?)?;
+                self.record("create_dir", path, None)?;
                 Ok(done(op, "folder created"))
             }
             Operation::CreateFile { path } => {
@@ -96,21 +185,30 @@ impl ExecutionBackend for DirectFsBackend {
                             PawError::Exec(e.to_string())
                         }
                     })?;
+                self.record("create_file", path, None)?;
                 Ok(done(op, "file created"))
             }
             Operation::Delete { path } => {
                 let rel = self.rel(path)?;
-                let meta = self.root.symlink_metadata(&rel)?;
-                if meta.is_dir() {
-                    self.root.remove_dir_all(&rel)?;
-                } else {
-                    self.root.remove_file(&rel)?;
+                // Nothing is destroyed: the item moves into the Pawline trash
+                // and the journal remembers where it came from.
+                self.root.symlink_metadata(&rel)?;
+                if rel.starts_with(crate::journal::STORE) {
+                    return Err(PawError::UnsafePath("Pawline's own store is off limits".into()));
                 }
-                Ok(done(op, "deleted"))
+                self.root.create_dir_all(crate::journal::TRASH)?;
+                let id = crate::journal::next_id(&self.read_journal());
+                let name = rel.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let stored = format!("{}/{id}-{name}", crate::journal::TRASH);
+                self.root.rename(&rel, &self.root, &stored)?;
+                self.record("delete", path, Some(stored))?;
+                Ok(done(op, "moved to the Pawline trash (undo brings it back)"))
             }
             Operation::Rename { from, to } | Operation::Move { from, to } => {
                 refuse_clobber(&self.root, &self.rel(to)?)?;
                 self.root.rename(self.rel(from)?, &self.root, self.rel(to)?)?;
+                let kind = if matches!(op, Operation::Move { .. }) { "move" } else { "rename" };
+                self.record(kind, from, Some(self.rel(to)?.to_string_lossy().to_string()))?;
                 Ok(done(op, "done"))
             }
             Operation::Copy { from, to } => {
@@ -132,6 +230,10 @@ impl ExecutionBackend for DirectFsBackend {
                         names.join(", ")
                     },
                 })
+            }
+            Operation::Undo { entry, .. } => {
+                let detail = self.undo(*entry)?;
+                Ok(done(op, &detail))
             }
             Operation::SetWallpaper { image } => {
                 // Re-check at execution time, beneath the root handle: the

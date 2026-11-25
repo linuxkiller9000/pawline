@@ -8,7 +8,7 @@ const CREATE_VERBS: &[&str] = &["make", "create", "add", "new"];
 const DELETE_VERBS: &[&str] = &["delete", "remove", "trash"];
 const VERBS: &[&str] = &[
     "make", "create", "add", "new", "delete", "remove", "trash", "rename", "move", "copy", "open",
-    "launch", "start", "list", "show", "set", "change",
+    "launch", "start", "list", "show", "set", "change", "undo",
 ];
 
 /// Parse a full user message into directives, in order.
@@ -182,6 +182,12 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
                 });
             }
         }
+    }
+    if matches!(
+        lower.trim_end_matches(|c| c == '.' || c == '!'),
+        "undo" | "undo that" | "undo it" | "undo the last change" | "undo last change"
+    ) {
+        return Ok(Directive::Undo);
     }
     if let Some(d) = parse_wallpaper(cmd) {
         return d;
