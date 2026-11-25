@@ -613,7 +613,16 @@ impl SeatHandler for App {
             self.ptr = self.seat.get_pointer(qh, &seat).ok();
         }
     }
-    fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, _: Capability) {}
+    fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, cap: Capability) {
+        // Devices can be unplugged and re-plugged: drop the dead object so
+        // new_capability binds a fresh one.
+        if cap == Capability::Keyboard {
+            self.kb = None;
+        }
+        if cap == Capability::Pointer {
+            self.ptr = None;
+        }
+    }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
 }
 impl KeyboardHandler for App {
