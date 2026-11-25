@@ -983,6 +983,7 @@ mod memory_tests {
         let r = handle_text(&mut st, "shrink video trip");
         assert_eq!(r.kind, "confirm", "{}", r.text);
         assert!(r.text.contains("trip-small.mp4") && r.text.contains("original is not changed"), "{}", r.text);
+        assert!(r.text.contains("lossy re-encode") && r.text.contains("quality can drop") && r.text.contains("all audio streams") && r.text.contains("Drops subtitles"), "{}", r.text);
         assert!(!dl.join("trip-small.mp4").exists());
         let done = confirm_exec(&mut st);
         assert_eq!(done.kind, "executed", "{}", done.text);
@@ -1051,6 +1052,46 @@ mod memory_tests {
         assert!(r.text.contains("Cancelled"), "{}", r.text);
         assert!(!dl.join("long-small.mp4").exists() && leftovers(&dl).is_empty());
         assert_eq!(std::fs::metadata(&v).unwrap().len(), orig);
+    }
+
+    #[test]
+    fn shrink_keeps_every_audio_stream_drops_subtitles_and_says_so_and_missing_tools_change_nothing() {
+        let _g = SHRINK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = org_root("shrink4");
+        let dl = root.join("Downloads");
+        let v = dl.join("multi.mkv");
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=duration=3:size=640x480:rate=25", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-f", "lavfi", "-i", "sine=frequency=880:duration=3", "-map", "0", "-map", "1", "-map", "2", "-c:v", "mpeg4", "-q:v", "1", "-c:a", "aac"])
+            .arg(&v)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("ffmpeg not available here; skipped");
+            return;
+        }
+        let mut st = new_state(root.clone());
+        assert_eq!(handle_text(&mut st, "shrink multi.mkv").kind, "confirm");
+        // tools missing: nothing changes, says how to fix it
+        let old = std::env::var_os("PATH");
+        let empty = root.join("emptybin");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::env::set_var("PATH", &empty);
+        let r = confirm_exec(&mut st);
+        if let Some(o) = old.clone() {
+            std::env::set_var("PATH", o);
+        }
+        assert!(r.text.contains("ffmpeg is not installed") && r.text.contains("Nothing was changed"), "{}", r.text);
+        assert!(!dl.join("multi-small.mp4").exists() && leftovers(&dl).is_empty());
+        // real run
+        assert_eq!(handle_text(&mut st, "shrink multi.mkv").kind, "confirm");
+        let r = confirm_exec(&mut st);
+        assert_eq!(r.kind, "executed", "{}", r.text);
+        let out = std::process::Command::new("ffprobe").args(["-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0"]).arg(dl.join("multi-small.mp4")).output().unwrap();
+        let t = String::from_utf8_lossy(&out.stdout).to_string();
+        assert_eq!(t.lines().filter(|l| l.trim() == "audio").count(), 2, "{t}");
+        assert_eq!(t.lines().filter(|l| l.trim() == "video").count(), 1, "{t}");
+        assert!(r.text.contains("decodes end to end"), "{}", r.text);
     }
 
     #[test]

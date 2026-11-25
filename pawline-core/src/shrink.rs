@@ -97,32 +97,97 @@ pub fn find_exe(name: &str) -> Option<PathBuf> {
     })
 }
 
-/// Fixed ffmpeg arguments (no shell, no user text except two absolute paths after -i / at the end).
-pub fn ffmpeg_args(src: &Path, tmp: &Path) -> Vec<std::ffi::OsString> {
-    let mut a: Vec<std::ffi::OsString> = ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"].iter().map(|s| (*s).into()).collect();
-    a.push(src.as_os_str().to_owned());
-    for s in [
-        "-map", "0:v:0", "-map", "0:a?", "-sn", "-dn", "-c:v", "libx264", "-crf", "28", "-preset", "medium", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-f", "mp4",
-    ] {
-        a.push(s.into());
-    }
-    a.push(tmp.as_os_str().to_owned());
-    a
+/// The streams the copy keeps: the first video stream and EVERY audio stream. Subtitles, data/attachment streams
+/// and any further video streams are dropped. Chapters/metadata are not carried over by this command line.
+pub const KEEPS: &str = "Keeps the first video stream and all audio streams. Drops subtitles, extra video streams, attachments and chapters.";
+
+/// Fixed ffmpeg arguments. No user text at all: the input is the source file handed over as stdin and the output is
+/// the temporary file handed over as stdout, so the process works on exactly the two files this program opened.
+pub fn ffmpeg_args() -> Vec<std::ffi::OsString> {
+    ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", "/dev/fd/0",
+     "-map", "0:v:0", "-map", "0:a?", "-sn", "-dn", "-map_chapters", "-1", "-c:v", "libx264", "-crf", "28", "-preset", "medium", "-pix_fmt", "yuv420p",
+     "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-f", "mp4", "/dev/fd/1"]
+        .iter().map(|s| (*s).into()).collect()
 }
 
-/// Duration in seconds via ffprobe, None if it cannot be read.
-pub fn probe_duration(ffprobe: &Path, f: &Path) -> Option<f64> {
-    let o = std::process::Command::new(ffprobe)
-        .args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"])
-        .arg(f)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !o.status.success() {
+/// Run a helper program on an already-open file (as its stdin, read through /dev/fd/0), bounded in time and output.
+/// `cancelled` is polled. Returns (success, stdout up to 64 KB), or None when stopped for time or cancel.
+pub fn run_bounded(exe: &Path, args: &[&str], stdin: std::fs::File, stdout: Option<std::fs::File>, limit: std::time::Duration, cancelled: &dyn Fn() -> bool) -> Result<(bool, Vec<u8>), String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let capture = stdout.is_none();
+    let mut child = Command::new(exe)
+        .args(args)
+        .stdin(Stdio::from(stdin))
+        .stdout(match stdout { Some(f) => Stdio::from(f), None => Stdio::piped() })
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("could not start {}: {e}", exe.display()))?;
+    let mut reader = child.stdout.take();
+    let (tx, rx) = std::sync::mpsc::channel();
+    if capture {
+        if let Some(mut r) = reader.take() {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = (&mut r).take(65536).read_to_end(&mut buf);
+                let _ = std::io::copy(&mut r, &mut std::io::sink());
+                let _ = tx.send(buf);
+            });
+        }
+    }
+    let t0 = std::time::Instant::now();
+    loop {
+        if cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("cancelled".into());
+        }
+        if t0.elapsed() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("timeout".into());
+        }
+        match child.try_wait() {
+            Ok(Some(st)) => {
+                let out = if capture { rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap_or_default() } else { vec![] };
+                return Ok((st.success(), out));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("lost track of {}: {e}", exe.display()));
+            }
+        }
+    }
+}
+
+/// (duration seconds, video stream count, audio stream count) from ffprobe, reading the open file.
+pub fn probe(ffprobe: &Path, f: std::fs::File, cancelled: &dyn Fn() -> bool) -> Option<(f64, usize, usize)> {
+    let (ok, out) = run_bounded(ffprobe, &["-v", "error", "-show_entries", "format=duration:stream=codec_type", "-of", "csv=p=0", "/dev/fd/0"], f, None, std::time::Duration::from_secs(30), cancelled).ok()?;
+    if !ok {
         return None;
     }
-    String::from_utf8_lossy(&o.stdout).trim().parse::<f64>().ok().filter(|d| *d > 0.0)
+    let text = String::from_utf8_lossy(&out).to_string();
+    let (mut v, mut a, mut dur) = (0, 0, None);
+    for l in text.lines() {
+        match l.trim() {
+            "video" => v += 1,
+            "audio" => a += 1,
+            x => {
+                if let Ok(d) = x.parse::<f64>() {
+                    dur = Some(d);
+                }
+            }
+        }
+    }
+    dur.filter(|d| *d > 0.0).map(|d| (d, v, a))
+}
+
+/// Decode the whole file; true only if ffmpeg reads every frame without an error.
+pub fn decodes_fully(ffmpeg: &Path, f: std::fs::File, limit: std::time::Duration, cancelled: &dyn Fn() -> bool) -> Result<bool, String> {
+    let nul = std::fs::OpenOptions::new().write(true).open("/dev/null").map_err(|e| e.to_string())?;
+    run_bounded(ffmpeg, &["-nostdin", "-v", "error", "-xerror", "-i", "/dev/fd/0", "-f", "null", "-"], f, Some(nul), limit, cancelled).map(|r| r.0)
 }
 
 pub fn mb(n: u64) -> String {
@@ -138,7 +203,7 @@ mod tests {
         assert_eq!(parse("compress my trip").as_deref(), Some("trip"));
         assert_eq!(parse("compress"), None);
         assert!(is_video(Path::new("/a/B.MKV")) && !is_video(Path::new("/a/b.txt")));
-        let a = ffmpeg_args(Path::new("/h/a.mp4"), Path::new("/h/.t"));
-        assert_eq!(a[a.len() - 1], std::ffi::OsString::from("/h/.t"));
+        let a = ffmpeg_args();
+        assert_eq!(a[a.len() - 1], std::ffi::OsString::from("/dev/fd/1"));
     }
 }

@@ -135,100 +135,91 @@ impl DirectFsBackend {
     }
 
     /// Smaller copy of one video, published only after it was checked. See `shrink.rs`.
+    /// ffmpeg and ffprobe work on file handles this function opened through the confined root (the source as stdin,
+    /// the temporary file as stdout), never on paths, so nothing can be swapped in between the checks and the work.
     pub fn shrink(&self, from: &Path, to: &Path, cancelled: &dyn Fn() -> bool) -> Result<String, PawError> {
         use crate::shrink as sh;
         use cap_std::fs::MetadataExt;
         let (rf, rt) = (self.rel(from)?, self.rel(to)?);
-        let m = self.root.symlink_metadata(&rf)?;
-        if !m.is_file() || m.len() == 0 || !sh::is_video(from) {
+        let ex = |m: String| PawError::Exec(m);
+        let src = self.root.open(&rf)?.into_std();
+        let sm = src.metadata()?; // the handle's own metadata, not the path's
+        if !sm.is_file() || sm.len() == 0 || !sh::is_video(from) {
             return Err(PawError::Validation(format!("{} is not a video file I can shrink", from.display())));
         }
-        let src_size = m.len();
-        let ffmpeg = sh::find_exe("ffmpeg").ok_or_else(|| PawError::Exec("ffmpeg is not installed, so I can't shrink videos. It is free: install it with your package manager (for example \"sudo apt install ffmpeg\"). Nothing was changed.".into()))?;
-        let ffprobe = sh::find_exe("ffprobe").ok_or_else(|| PawError::Exec("ffprobe (part of ffmpeg) is missing, so I couldn't check the result. Nothing was changed.".into()))?;
-        let src_dur = sh::probe_duration(&ffprobe, &self.root_path.join(&rf))
-            .ok_or_else(|| PawError::Exec("I could not read that video (ffprobe failed). Nothing was changed.".into()))?;
+        let src_size = sm.len();
+        if !Path::new("/dev/fd/0").exists() {
+            return Err(ex("this system has no /dev/fd, so I can't run ffmpeg on exact open files; nothing was changed".into()));
+        }
+        let ffmpeg = sh::find_exe("ffmpeg").ok_or_else(|| ex("ffmpeg is not installed, so I can't shrink videos. It is free: install it with your package manager (for example \"sudo apt install ffmpeg\"). Nothing was changed.".into()))?;
+        let ffprobe = sh::find_exe("ffprobe").ok_or_else(|| ex("ffprobe (part of ffmpeg) is missing, so I couldn't check the result. Nothing was changed.".into()))?;
+        let (src_dur, src_v, src_a) = sh::probe(&ffprobe, src.try_clone()?, cancelled)
+            .ok_or_else(|| ex("I could not read that video (ffprobe failed or took too long). Nothing was changed.".into()))?;
+        if src_v == 0 {
+            return Err(ex("that file has no video stream. Nothing was changed.".into()));
+        }
         refuse_clobber(&self.root, &rt)?;
         self.tracked("copy", self.rel_str(to)?, None, |id| {
             let dir = rt.parent().map(|p| p.to_path_buf()).unwrap_or_default();
             let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
             let tmp_rel = dir.join(format!(".pawline-shrink-{id}-{}-{nanos}.part", std::process::id()));
-            // reserve a unique temporary name that only this run owns
-            let placeholder = self.root.open_with(&tmp_rel, cap_std::fs::OpenOptions::new().write(true).create_new(true))?;
-            let mine = placeholder.metadata().ok().map(|m| (m.dev(), m.ino()));
-            drop(placeholder);
+            // a unique temporary name only this run owns; the handle stays open for the whole run
+            let out = self.root.open_with(&tmp_rel, cap_std::fs::OpenOptions::new().read(true).write(true).create_new(true))?.into_std();
+            let om = out.metadata()?;
+            let mine = (std::os::unix::fs::MetadataExt::dev(&om), std::os::unix::fs::MetadataExt::ino(&om));
+            let is_mine = |root: &Dir| root.symlink_metadata(&tmp_rel).ok().map(|m| (m.dev(), m.ino())) == Some(mine);
             let cleanup = |root: &Dir| {
                 // remove only the file this run created, never a replacement made by someone else
-                let now = root.symlink_metadata(&tmp_rel).ok().map(|m| (m.dev(), m.ino()));
-                if mine.is_some() && now == mine {
+                if is_mine(root) {
                     let _ = root.remove_file(&tmp_rel);
                 }
             };
-            let tmp_abs = self.root_path.join(&tmp_rel);
-            let mut child = match std::process::Command::new(&ffmpeg)
-                .args(sh::ffmpeg_args(&self.root_path.join(&rf), &tmp_abs))
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    cleanup(&self.root);
-                    return Err(PawError::Exec(format!("could not start ffmpeg: {e}")));
-                }
+            let fail = |root: &Dir, m: &str| -> PawError {
+                cleanup(root);
+                PawError::Exec(m.to_string())
             };
-            let started = std::time::Instant::now();
-            let status = loop {
-                if cancelled() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    cleanup(&self.root);
-                    return Err(PawError::Exec("Cancelled. The smaller copy was not kept. Your video was not touched.".into()));
-                }
-                if started.elapsed().as_secs() > sh::TIMEOUT_SECS {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    cleanup(&self.root);
-                    return Err(PawError::Exec("Shrinking took too long and was stopped. Nothing was kept. Your video was not touched.".into()));
-                }
-                match child.try_wait() {
-                    Ok(Some(s)) => break s,
-                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
-                    Err(e) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        cleanup(&self.root);
-                        return Err(PawError::Exec(format!("lost track of ffmpeg: {e}")));
-                    }
-                }
-            };
-            if !status.success() {
-                cleanup(&self.root);
-                return Err(PawError::Exec("ffmpeg could not shrink that video. Nothing was kept. Your video was not touched.".into()));
+            let limit = std::time::Duration::from_secs(sh::TIMEOUT_SECS);
+            match sh::run_bounded(&ffmpeg, &sh::ffmpeg_args().iter().map(|a| a.to_str().unwrap_or("")).collect::<Vec<_>>(), src.try_clone()?, Some(out.try_clone()?), limit, cancelled) {
+                Err(e) if e == "cancelled" => return Err(fail(&self.root, "Cancelled. The smaller copy was not kept. Your video was not touched.")),
+                Err(e) if e == "timeout" => return Err(fail(&self.root, "Shrinking took too long and was stopped. Nothing was kept. Your video was not touched.")),
+                Err(e) => return Err(fail(&self.root, &format!("could not run ffmpeg: {e}. Nothing was kept."))),
+                Ok((false, _)) => return Err(fail(&self.root, "ffmpeg could not shrink that video. Nothing was kept. Your video was not touched.")),
+                Ok((true, _)) => {}
             }
-            // verify: readable, about the same length, and really smaller
-            let out_size = self.root.symlink_metadata(&tmp_rel).map(|m| m.len()).unwrap_or(0);
-            let out_dur = sh::probe_duration(&ffprobe, &tmp_abs);
-            let ok_len = matches!(out_dur, Some(d) if (d - src_dur).abs() <= (src_dur * 0.02).max(1.0));
-            if out_size == 0 || !ok_len {
-                cleanup(&self.root);
-                return Err(PawError::Exec("The shrunk copy did not pass the check (unreadable or the wrong length), so I threw it away. Your video was not touched.".into()));
+            // verify on the open temp file: same length, same streams, and it decodes end to end
+            let out_size = out.metadata().map(|m| m.len()).unwrap_or(0);
+            let probed = sh::probe(&ffprobe, out.try_clone()?, cancelled);
+            let streams_ok = matches!(probed, Some((d, v, a)) if v == 1 && a == src_a && (d - src_dur).abs() <= (src_dur * 0.02).max(1.0));
+            if out_size == 0 || !streams_ok {
+                return Err(fail(&self.root, "The shrunk copy did not pass the check (wrong length, or it lost a video or audio stream), so I threw it away. Your video was not touched."));
+            }
+            match sh::decodes_fully(&ffmpeg, out.try_clone()?, limit, cancelled) {
+                Ok(true) => {}
+                Err(e) if e == "cancelled" => return Err(fail(&self.root, "Cancelled. The smaller copy was not kept. Your video was not touched.")),
+                _ => return Err(fail(&self.root, "The shrunk copy did not play through without errors, so I threw it away. Your video was not touched.")),
             }
             if out_size >= src_size {
-                cleanup(&self.root);
-                return Err(PawError::Exec(format!(
+                return Err(fail(&self.root, &format!(
                     "Shrinking would not make it smaller ({} to {}), so I kept only your original. Nothing new was saved.",
                     sh::mb(src_size),
                     sh::mb(out_size)
                 )));
             }
+            // the temporary name must still be the very file that was checked
+            if !is_mine(&self.root) {
+                return Err(ex("the temporary file was replaced while I worked, so I did not publish anything. Your video was not touched.".into()));
+            }
             if let Err(e) = rename_noreplace(&self.root, &tmp_rel, &rt) {
                 cleanup(&self.root);
                 return Err(e);
             }
+            // confirm what now sits at the final name is the checked file
+            let landed = self.root.symlink_metadata(&rt).ok().map(|m| (m.dev(), m.ino()));
+            if landed != Some(mine) {
+                return Err(ex("the new file was swapped right after saving; I can't vouch for it, please check it. Your original video was not touched.".into()));
+            }
             let pct = 100 - (out_size * 100 / src_size);
-            Ok((format!("Saved {} ({} to {}, {pct}% smaller). Your original is untouched. Undo moves the new copy to the Pawline trash.", to.display(), sh::mb(src_size), sh::mb(out_size)), None))
+            Ok((format!("Saved {} ({} to {}, {pct}% smaller). Checked: it decodes end to end, same length, {src_v}->1 video and {src_a} audio stream(s). Your original is untouched. Undo moves the new copy to the Pawline trash.", to.display(), sh::mb(src_size), sh::mb(out_size)), None))
         })
     }
 
@@ -610,6 +601,27 @@ impl ExecutionBackend for DirectFsBackend {
 
 /// Recursive copy beneath the root handle; symlinks are copied as links,
 /// never followed out.
+/// Copy one regular file with create_new. If the copy fails, the partial file is removed only when the name still
+/// points at the file this call created. `after_create` lets tests inject a failure at that point.
+fn copy_file(dir: &Dir, from: &Path, to: &Path, after_create: &dyn Fn() -> std::io::Result<()>) -> Result<(), PawError> {
+    use cap_std::fs::MetadataExt;
+    let mut src = dir.open(from)?;
+    let mut dst = dir.open_with(to, cap_std::fs::OpenOptions::new().write(true).create_new(true))?;
+    let mine = dst.metadata().ok().map(|m| (m.dev(), m.ino()));
+    let res = after_create().and_then(|_| std::io::copy(&mut src, &mut dst).map(|_| ())).and_then(|_| dst.sync_all());
+    if let Err(e) = res {
+        let same = dir.symlink_metadata(to).ok().map(|m| (m.dev(), m.ino()));
+        if mine.is_some() && same == mine {
+            let _ = dir.remove_file(to);
+        }
+        return Err(e.into());
+    }
+    if let Ok(m) = src.metadata() {
+        let _ = dst.set_permissions(m.permissions());
+    }
+    Ok(())
+}
+
 fn copy_tree(dir: &Dir, from: &Path, to: &Path) -> Result<(), PawError> {
     let meta = dir.symlink_metadata(from)?;
     if meta.is_dir() {
@@ -622,24 +634,7 @@ fn copy_tree(dir: &Dir, from: &Path, to: &Path) -> Result<(), PawError> {
         let target = dir.read_link(from)?;
         dir.symlink(&target, to)?;
     } else {
-        // create_new: a destination that appeared since the check is never overwritten
-        let mut src = dir.open(from)?;
-        let mut dst = dir.open_with(to, cap_std::fs::OpenOptions::new().write(true).create_new(true))?;
-        use cap_std::fs::MetadataExt;
-        let mine = dst.metadata().ok().map(|m| (m.dev(), m.ino()));
-        let res = std::io::copy(&mut src, &mut dst).map(|_| ()).and_then(|_| dst.sync_all());
-        if let Err(e) = res {
-            // Remove only the partial file this call created: if the name now points at something else
-            // (another process replaced it), leave that alone.
-            let same = dir.symlink_metadata(to).ok().map(|m| (m.dev(), m.ino()));
-            if mine.is_some() && same == mine {
-                let _ = dir.remove_file(to);
-            }
-            return Err(e.into());
-        }
-        if let Ok(m) = src.metadata() {
-            let _ = dst.set_permissions(m.permissions());
-        }
+        copy_file(dir, from, to, &|| Ok(()))?;
     }
     Ok(())
 }
@@ -765,5 +760,35 @@ mod noreplace_tests {
             }
         }
         assert!(moved > 0);
+    }
+}
+
+#[cfg(test)]
+mod copy_failure_tests {
+    use super::*;
+
+    #[test]
+    fn failed_copy_removes_only_its_own_partial_file_and_never_a_replacement() {
+        let d = std::env::temp_dir().join(format!("pawline-cf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let d = std::fs::canonicalize(&d).unwrap();
+        std::fs::write(d.join("src"), "SRC").unwrap();
+        let root = Dir::open_ambient_dir(&d, cap_std::ambient_authority()).unwrap();
+        // 1: failure, nobody replaced it: the partial file is gone
+        let r = copy_file(&root, Path::new("src"), Path::new("dst1"), &|| Err(std::io::Error::other("boom")));
+        assert!(r.is_err() && !d.join("dst1").exists());
+        // 2: failure after another process replaced the destination: its bytes survive
+        let dd = d.clone();
+        let r = copy_file(&root, Path::new("src"), Path::new("dst2"), &move || {
+            std::fs::write(dd.join("other"), "THEIRS")?;
+            std::fs::rename(dd.join("other"), dd.join("dst2"))?;
+            Err(std::io::Error::other("boom"))
+        });
+        assert!(r.is_err());
+        assert_eq!(std::fs::read_to_string(d.join("dst2")).unwrap(), "THEIRS");
+        // 3: success
+        copy_file(&root, Path::new("src"), Path::new("dst3"), &|| Ok(())).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("dst3")).unwrap(), "SRC");
     }
 }
