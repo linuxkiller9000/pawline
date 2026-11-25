@@ -141,6 +141,17 @@ impl DirectFsBackend {
                 }
                 self.root.rename(&b, &self.root, &a)?;
             }
+            "wallpaper" => {
+                let prev = b.ok_or_else(|| {
+                    PawError::Validation(
+                        "no earlier Pawline-set wallpaper is known, so I cannot revert this one".into(),
+                    )
+                })?;
+                if !self.root.symlink_metadata(&prev).map(|m| m.is_file()).unwrap_or(false) {
+                    return Err(PawError::Validation("the previous wallpaper copy is missing".into()));
+                }
+                self.wallpaper.set(&self.root_path.join(&prev), None)?;
+            }
             k => return Err(PawError::Exec(format!("cannot undo a \"{k}\" entry"))),
         }
         self.append_journal(&crate::journal::undone_line(e.id))?;
@@ -235,19 +246,60 @@ impl ExecutionBackend for DirectFsBackend {
                 let detail = self.undo(*entry)?;
                 Ok(done(op, &detail))
             }
-            Operation::SetWallpaper { image } => {
-                // Re-check at execution time, beneath the root handle: the
-                // plan was validated earlier and the file may have changed.
+            Operation::SetWallpaper { image, via } => {
+                // Open beneath the root handle, check the OPEN file (not the
+                // path), then copy its bytes into Pawline's private store.
+                // The external tool only ever sees our copy, so nothing can
+                // swap the picture between this check and the tool opening it.
+                use std::io::Read;
                 let rel = self.rel(image)?;
-                let meta = self.root.metadata(&rel)?;
-                if !meta.is_file() || !crate::wallpaper::extension_ok(image) {
+                if !crate::wallpaper::extension_ok(image) {
+                    return Err(PawError::Validation(format!(
+                        "{} is not a picture I can use",
+                        image.display()
+                    )));
+                }
+                let mut f = self.root.open(&rel)?;
+                let meta = f.metadata()?;
+                if !meta.is_file() {
                     return Err(PawError::Validation(format!(
                         "{} is no longer a usable picture",
                         image.display()
                     )));
                 }
-                let canon = self.root_path.join(&rel);
-                let detail = self.wallpaper.set(&canon)?;
+                const MAX: u64 = 64 * 1024 * 1024;
+                if meta.len() > MAX {
+                    return Err(PawError::Validation("that picture is over 64 MB".into()));
+                }
+                let mut bytes = Vec::new();
+                (&mut f).take(MAX + 1).read_to_end(&mut bytes)?;
+                if bytes.len() as u64 > MAX {
+                    return Err(PawError::Validation("that picture is over 64 MB".into()));
+                }
+                let journal = self.read_journal();
+                let id = crate::journal::next_id(&journal);
+                let previous = crate::journal::last_open_of(&journal, "wallpaper").map(|e| e.a);
+                self.root.create_dir_all(crate::journal::WALLPAPERS)?;
+                let name = rel
+                    .file_name()
+                    .map(|n| n.to_string_lossy().replace(['/', ' '], "_"))
+                    .unwrap_or_else(|| "wallpaper".into());
+                let stored_rel = format!("{}/{id}-{name}", crate::journal::WALLPAPERS);
+                {
+                    use cap_std::fs::OpenOptionsExt;
+                    use std::io::Write;
+                    let mut out = self.root.open_with(
+                        &stored_rel,
+                        cap_std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600),
+                    )?;
+                    out.write_all(&bytes)?;
+                }
+                let stored = self.root_path.join(&stored_rel);
+                let detail = self.wallpaper.set(&stored, *via)?;
+                let e = crate::journal::Entry { id, kind: "wallpaper".into(), a: stored_rel, b: previous };
+                self.append_journal(&e.to_line()).map_err(|err| {
+                    PawError::Exec(format!("wallpaper set, but it could not be recorded for undo: {err}"))
+                })?;
                 Ok(done(op, &detail))
             }
             Operation::OpenApp { name } => Err(PawError::Exec(format!(

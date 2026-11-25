@@ -31,7 +31,7 @@ pub enum Directive {
     /// Undo the most recent journaled change.
     Undo,
     /// Set the desktop wallpaper to an image the user pointed at.
-    SetWallpaper { image: LocationRef },
+    SetWallpaper { image: LocationRef, via: Option<String> },
     /// A side-effect-free computed answer (deterministic math). Never
     /// touches disk, never needs confirmation.
     Answer { text: String },
@@ -68,7 +68,7 @@ pub enum Operation {
     Copy { from: PathBuf, to: PathBuf },
     List { path: PathBuf },
     OpenApp { name: String },
-    SetWallpaper { image: PathBuf },
+    SetWallpaper { image: PathBuf, via: Option<crate::wallpaper::Adapter> },
     /// Undo journal entry `entry`; `summary` is what it will do.
     Undo { entry: u64, summary: String },
     Answer { text: String },
@@ -89,7 +89,10 @@ impl Operation {
             Operation::List { path } => format!("List {}", path.display()),
             Operation::OpenApp { name } => format!("Open {name}"),
             Operation::Undo { summary, .. } => summary.clone(),
-            Operation::SetWallpaper { image } => format!("Set wallpaper to {}", image.display()),
+            Operation::SetWallpaper { image, via } => match via {
+                Some(a) => format!("Set wallpaper to {} (using {})", image.display(), a.program()),
+                None => format!("Set wallpaper to {}", image.display()),
+            },
             Operation::Answer { text } => text.clone(),
             Operation::Search { engine, query } => match engine {
                 SearchEngine::Web => format!("Search the web for \"{query}\""),

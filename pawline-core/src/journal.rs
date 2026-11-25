@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 pub const STORE: &str = ".local/share/pawline";
 pub const JOURNAL: &str = ".local/share/pawline/journal.jsonl";
+pub const WALLPAPERS: &str = ".local/share/pawline/wallpapers";
 pub const TRASH: &str = ".local/share/pawline/trash";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +38,10 @@ impl Entry {
                 self.b.clone().unwrap_or_default(),
                 self.a
             ),
+            "wallpaper" => match &self.b {
+                Some(_) => "Undo: put the previous Pawline-set wallpaper back".to_string(),
+                None => "Undo: no earlier Pawline-set wallpaper is known, so this cannot be reverted".to_string(),
+            },
             "delete" => format!("Undo: restore ~/{} from the Pawline trash", self.a),
             k => format!("Undo: {k}"),
         }
@@ -68,6 +73,29 @@ pub fn last_open(text: &str) -> Option<Entry> {
         }
     }
     entries.pop()
+}
+
+/// The most recent entry of one kind that has not been undone.
+pub fn last_open_of(text: &str, kind: &str) -> Option<Entry> {
+    let mut entries: Vec<Entry> = Vec::new();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if let Some(u) = v.get("undo_of").and_then(|x| x.as_u64()) {
+            entries.retain(|e| e.id != u);
+        } else if let (Some(id), Some(k), Some(a)) = (
+            v.get("id").and_then(|x| x.as_u64()),
+            v.get("kind").and_then(|x| x.as_str()),
+            v.get("a").and_then(|x| x.as_str()),
+        ) {
+            entries.push(Entry {
+                id,
+                kind: k.into(),
+                a: a.into(),
+                b: v.get("b").and_then(|x| x.as_str()).map(String::from),
+            });
+        }
+    }
+    entries.into_iter().rev().find(|e| e.kind == kind)
 }
 
 pub fn next_id(text: &str) -> u64 {

@@ -43,14 +43,20 @@ Working slice, tested in a headless sandbox (not yet on the target Dell):
 - Deterministic math answers ("what is 21 * 2", "20% of 85")
 - Fail-closed refusal of unrecognized input
 
-Unreleased (in source, not in any beta yet): wallpaper setting ("set wallpaper
-to ~/Pictures/a.png"). Always asks for confirmation, only accepts an existing
-image inside your home area, and runs a fixed command with no shell: `awww img`,
-`swaybg -i ... -m fill`, or on KDE `plasma-apply-wallpaperimage`. Tested so far:
-unit tests plus the swaybg path in a headless sway sandbox. awww and Plasma
-are checked against their documented syntax only, not run.
+Unreleased (in source, not in any beta yet):
+- Wallpaper: "set wallpaper to ~/Pictures/a.png [using awww|swaybg|plasma]".
+  Always confirms. The picture is opened beneath your home folder, checked,
+  and copied into Pawline's private store; the wallpaper tool only sees that
+  copy. Runs a fixed command, no shell. It will not guess between wallpaper
+  managers: it uses the one that is actually running, and asks you to say
+  "using ..." if that is unclear. Limits: swaybg path run in a headless sway
+  sandbox only; awww and Plasma checked against docs, never run; the previous
+  wallpaper can only be restored if Pawline set it.
+- Undo: "undo" reverts the last change (create, rename, move, delete,
+  wallpaper) after confirming. Delete no longer destroys data: it moves the
+  item into ~/.local/share/pawline/trash. Nothing empties the trash yet.
 
-Planned, in stages: per-change backup/restore, named reusable actions through
+Planned, in stages: named reusable actions through
 the same safety checks, KDE Plasma integration and KDE Connect, theme matching.
 
 ## Layout

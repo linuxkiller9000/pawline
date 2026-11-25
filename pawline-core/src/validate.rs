@@ -267,7 +267,7 @@ impl Validator {
                     })?;
                     ops.push(Operation::Undo { entry: e.id, summary: e.describe_undo() });
                 }
-                Directive::SetWallpaper { image } => {
+                Directive::SetWallpaper { image, via } => {
                     let path = self.resolve_location(image, &sim)?;
                     let meta = std::fs::metadata(&path).map_err(|_| {
                         PawError::Validation(format!("no such image: {}", path.display()))
@@ -284,7 +284,15 @@ impl Validator {
                             path.display()
                         )));
                     }
-                    ops.push(Operation::SetWallpaper { image: path });
+                    let via = match via {
+                        Some(n) => Some(crate::wallpaper::Adapter::from_name(n).ok_or_else(|| {
+                            PawError::Validation(format!(
+                                "I don't know a wallpaper tool called \"{n}\" (try awww, swaybg or plasma)"
+                            ))
+                        })?),
+                        None => None,
+                    };
+                    ops.push(Operation::SetWallpaper { image: path, via });
                 }
                 Directive::OpenApp { name } => ops.push(Operation::OpenApp { name: name.clone() }),
                 Directive::Answer { text } => ops.push(Operation::Answer { text: text.clone() }),

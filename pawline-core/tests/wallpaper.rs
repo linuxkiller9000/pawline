@@ -8,7 +8,7 @@ use pawline_core::{Engine, Response};
 
 struct Rec(Arc<Mutex<Vec<PathBuf>>>);
 impl WallpaperSetter for Rec {
-    fn set(&self, image: &Path) -> Result<String, PawError> {
+    fn set(&self, image: &Path, _via: Option<pawline_core::wallpaper::Adapter>) -> Result<String, PawError> {
         self.0.lock().unwrap().push(image.to_path_buf());
         Ok("recorded".into())
     }
@@ -53,7 +53,50 @@ fn confirmed_wallpaper_runs_once_with_canonical_path() {
         Response::Executed(o) => assert_eq!(o.len(), 1),
         _ => panic!("expected executed"),
     }
-    assert_eq!(*log.lock().unwrap(), vec![root.join("Pictures/sunset.png")]);
+    // the tool is handed Pawline's private copy, not the user's path
+    let got = log.lock().unwrap().clone();
+    assert_eq!(got.len(), 1);
+    assert!(got[0].starts_with(root.join(".local/share/pawline/wallpapers")), "{:?}", got[0]);
+    assert_eq!(std::fs::read(&got[0]).unwrap(), b"x");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(&got[0]).unwrap().permissions().mode() & 0o777, 0o600);
+}
+
+#[test]
+fn swapping_the_original_after_the_copy_cannot_change_what_the_tool_sees() {
+    let (root, mut e, be, log) = setup();
+    let plan = e.plan("set wallpaper to ~/Pictures/sunset.png").unwrap();
+    e.execute_plan(plan, &be).unwrap();
+    std::fs::write(root.join("Pictures/sunset.png"), b"evil").unwrap();
+    let got = log.lock().unwrap().clone();
+    assert_eq!(std::fs::read(&got[0]).unwrap(), b"x");
+}
+
+#[test]
+fn undo_returns_to_previous_pawline_wallpaper_and_refuses_without_one() {
+    let (root, mut e, be, log) = setup();
+    std::fs::write(root.join("Pictures/two.jpg"), b"y").unwrap();
+    let run = |e: &mut Engine, s: &str| {
+        let p = e.plan(s).unwrap();
+        e.execute_plan(p, &be).unwrap()
+    };
+    run(&mut e, "set wallpaper to ~/Pictures/sunset.png");
+    // only one change so far: nothing earlier to return to
+    assert!(matches!(run(&mut e, "undo"), Response::Failed { .. }));
+    run(&mut e, "set wallpaper to ~/Pictures/two.jpg");
+    assert!(matches!(run(&mut e, "undo"), Response::Executed(_)));
+    let l = log.lock().unwrap().clone();
+    assert_eq!(l.len(), 3);
+    assert_eq!(std::fs::read(&l[2]).unwrap(), b"x");
+    assert_eq!(l[2], l[0]);
+}
+
+#[test]
+fn using_clause_selects_adapter_and_unknown_names_are_refused() {
+    let (_root, e, _be, _log) = setup();
+    let p = e.plan("set wallpaper to ~/Pictures/sunset.png using awww").unwrap();
+    assert!(p.summary().contains("using awww"), "{}", p.summary());
+    assert!(e.plan("set wallpaper to ~/Pictures/sunset.png using feh").is_err());
 }
 
 #[test]

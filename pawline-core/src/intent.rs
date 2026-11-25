@@ -433,10 +433,20 @@ fn parse_wallpaper(cmd: &str) -> Option<Result<Directive, PawError>> {
     } else {
         return None;
     };
+    let mut path_words = path_words;
+    let mut via: Option<String> = None;
+    if path_words.len() >= 3 {
+        let n = path_words.len();
+        let kw = path_words[n - 2].to_lowercase();
+        if kw == "using" || kw == "with" || kw == "via" {
+            via = Some(path_words[n - 1].to_string());
+            path_words.truncate(n - 2);
+        }
+    }
     let target = path_words.join(" ");
     let target = target.trim().trim_matches(|c| c == '"' || c == '\'').trim();
     if target.is_empty() {
         return Some(Err(PawError::Parse("which picture should be the wallpaper?".into())));
     }
-    Some(Ok(Directive::SetWallpaper { image: name_to_location(target) }))
+    Some(Ok(Directive::SetWallpaper { image: name_to_location(target), via }))
 }
