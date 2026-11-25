@@ -67,6 +67,16 @@ impl Engine {
         }
     }
 
+    /// The folder requests mean when they name no place (the "folder pill"). `None` goes back to the home folder.
+    /// A folder outside the home area or one that is gone is refused and the old setting is cleared.
+    pub fn set_working_dir(&mut self, dir: Option<&std::path::Path>) -> Result<(), PawError> {
+        let r = self.validator.set_work_dir(dir);
+        if r.is_err() {
+            let _ = self.validator.set_work_dir(None);
+        }
+        r
+    }
+
     pub fn context(&self) -> &ContextManager {
         &self.ctx
     }

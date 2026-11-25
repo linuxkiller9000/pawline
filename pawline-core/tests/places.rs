@@ -133,3 +133,35 @@ fn a_full_path_pick_prepares_a_confirmation_with_that_path() {
     // outside home: not usable
     assert!(e.handle("make a folder called x in /etc", &bk, false).is_err());
 }
+
+#[test]
+fn working_folder_is_where_unplaced_requests_go_and_is_confined() {
+    use pawline_core::plan::Operation;
+    let root = sandbox("workdir");
+    let proj = root.join("Projects/app");
+    std::fs::create_dir_all(&proj).unwrap();
+    let mut e = Engine::new(root.clone());
+    let made = |e: &Engine| -> PathBuf {
+        match &e.plan("make a folder called notes").unwrap().ops[0] {
+            Operation::CreateDir { path } => path.clone(),
+            _ => panic!("expected CreateDir"),
+        }
+    };
+    assert_eq!(made(&e), root.join("notes"));
+    e.set_working_dir(Some(&proj)).unwrap();
+    assert_eq!(made(&e), proj.join("notes"));
+    // outside the home area, a file and a missing folder are refused, and the setting falls back to home
+    assert!(e.set_working_dir(Some(std::path::Path::new("/etc"))).is_err());
+    assert_eq!(made(&e), root.join("notes"));
+    let f = root.join("a.txt");
+    std::fs::write(&f, "x").unwrap();
+    e.set_working_dir(Some(&proj)).unwrap();
+    assert!(e.set_working_dir(Some(&f)).is_err());
+    assert_eq!(made(&e), root.join("notes"));
+    e.set_working_dir(Some(&proj)).unwrap();
+    assert!(e.set_working_dir(Some(&root.join("nope"))).is_err());
+    assert_eq!(made(&e), root.join("notes"));
+    e.set_working_dir(Some(&proj)).unwrap();
+    e.set_working_dir(None).unwrap();
+    assert_eq!(made(&e), root.join("notes"));
+}

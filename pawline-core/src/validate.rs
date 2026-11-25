@@ -21,13 +21,33 @@ pub struct Validator {
     /// The request came from a chooser pick: always show the full path and wait for a yes.
     pub force_confirm: std::cell::Cell<bool>,
     hint_notes: std::cell::RefCell<Vec<String>>,
+    /// Folder (inside the home area) that stands in for "here" when a request names no place. None = the home folder.
+    work_dir: Option<PathBuf>,
 }
 
 impl Validator {
     pub fn new(root: PathBuf) -> Self {
         // The root itself may live behind a symlink; compare in canonical form.
         let root = std::fs::canonicalize(&root).unwrap_or(root);
-        Validator { root, app_env: None, dir_hints: vec![], literal_names: std::cell::Cell::new(false), force_confirm: std::cell::Cell::new(false), hint_notes: std::cell::RefCell::new(vec![]) }
+        Validator { root, app_env: None, dir_hints: vec![], literal_names: std::cell::Cell::new(false), force_confirm: std::cell::Cell::new(false), hint_notes: std::cell::RefCell::new(vec![]), work_dir: None }
+    }
+
+    /// Set (or clear) the working folder. Only an existing real folder inside the home area, never Pawline's own store, is accepted.
+    pub fn set_work_dir(&mut self, dir: Option<&Path>) -> Result<(), PawError> {
+        let Some(d) = dir else {
+            self.work_dir = None;
+            return Ok(());
+        };
+        let n = self.normalize(d)?;
+        let n = self.real_confine(&n)?;
+        if n.starts_with(self.root.join(crate::journal::STORE)) {
+            return Err(PawError::UnsafePath("Pawline's own store is off limits".into()));
+        }
+        if !n.is_dir() {
+            return Err(PawError::UnsafePath(format!("{} is not a folder", n.display())));
+        }
+        self.work_dir = Some(n);
+        Ok(())
     }
 
     /// Words like "home container models" -> "models": drop a leading "home" and filler words.
@@ -314,7 +334,7 @@ impl Validator {
             }
             // Bare creates land at the root: predictable beats clever here.
             // Context-driven placement happens through "inside it"/names instead.
-            LocationRef::CurrentDir => self.root.clone(),
+            LocationRef::CurrentDir => self.work_dir.clone().unwrap_or_else(|| self.root.clone()),
         };
         let n = self.normalize(&raw)?;
         let n = self.real_confine(&n)?;

@@ -4,6 +4,7 @@
 mod bridge;
 mod edit;
 mod shape;
+mod md;
 mod thumb;
 
 mod ctl;
