@@ -7,6 +7,12 @@ use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong};
 use std::os::fd::{AsFd, BorrowedFd, RawFd};
 use x11_dl::xlib;
 
+/// Allowance for a window manager frame when keeping the window on screen.
+const FRAME_L: c_int = 6;
+const FRAME_R: c_int = 6;
+const FRAME_TOP: c_int = 34;
+const FRAME_B: c_int = 6;
+
 struct Conn {
     x: xlib::Xlib,
     dpy: *mut xlib::Display,
@@ -57,7 +63,20 @@ impl Out for X11Out {
         let c = &self.c;
         unsafe {
             set_fixed_size(c, w, h);
-            (c.x.XResizeWindow)(c.dpy, c.win, w, h);
+            // Keep the right edge where it is and make sure the whole window (plus a WM frame
+            // allowance) stays on the screen, so the expanded card's buttons are never off-screen.
+            let screen = (c.x.XDefaultScreen)(c.dpy);
+            let (sw, sh) = ((c.x.XDisplayWidth)(c.dpy, screen), (c.x.XDisplayHeight)(c.dpy, screen));
+            let root = (c.x.XRootWindow)(c.dpy, screen);
+            let (mut rx, mut ry, mut ch): (c_int, c_int, c_ulong) = (0, 0, 0);
+            let mut wa: xlib::XWindowAttributes = std::mem::zeroed();
+            (c.x.XGetWindowAttributes)(c.dpy, c.win, &mut wa);
+            (c.x.XTranslateCoordinates)(c.dpy, c.win, root, 0, 0, &mut rx, &mut ry, &mut ch);
+            let (ow, _oh) = (wa.width, wa.height);
+            let right = rx + ow;
+            let nx = (right - w as c_int).clamp(FRAME_L, (sw - w as c_int - FRAME_R).max(FRAME_L));
+            let ny = ry.clamp(FRAME_TOP, (sh - h as c_int - FRAME_B).max(FRAME_TOP));
+            (c.x.XMoveResizeWindow)(c.dpy, c.win, nx, ny, w, h);
             (c.x.XFlush)(c.dpy);
         }
     }
@@ -122,8 +141,8 @@ pub fn run(req_tx: mpsc::Sender<Req>, back_rx: channel::Channel<UiReply>) -> Res
         let win = (x.XCreateWindow)(
             dpy,
             root,
-            0,
-            0,
+            (x.XDisplayWidth)(dpy, screen) - COMPACT as c_int - 20,
+            FRAME_TOP + 6,
             COMPACT,
             COMPACT,
             0,
@@ -185,11 +204,17 @@ unsafe fn drain(c: &Conn, ui: &mut Ui, del: c_ulong) {
     while (c.x.XPending)(c.dpy) > 0 {
         let mut ev: xlib::XEvent = std::mem::zeroed();
         (c.x.XNextEvent)(c.dpy, &mut ev);
+        if std::env::var_os("PAWLINE_X11_TRACE").is_some() {
+            eprintln!("x11 event type {}", ev.get_type());
+        }
         match ev.get_type() {
             xlib::Expose => ui.draw(),
             xlib::FocusOut => {
                 // Ignore grab-related focus changes (NotifyGrab/NotifyUngrab); a real loss closes the mic.
                 if ev.focus_change.mode == xlib::NotifyNormal {
+                    if std::env::var_os("PAWLINE_X11_TRACE").is_some() {
+                        eprintln!("x11 focus lost -> focus_lost()");
+                    }
                     ui.focus_lost();
                 }
             }
