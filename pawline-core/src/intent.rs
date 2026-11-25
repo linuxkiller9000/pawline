@@ -184,10 +184,17 @@ fn split_clauses(s: &str) -> Vec<&str> {
     spans
 }
 
+/// Built-in skills only. Learned skills are not built yet; when they are, they will be
+/// reviewed, validated, scoped data listed here, never downloaded commands.
+const SKILLS_TEXT: &str = "Skills (built in):\n/files: make, delete, rename, move, copy, list\n/open: open an installed app (exact name, asks first)\n/wallpaper: set a wallpaper (asks first, undoable)\n/search: search the web or Wikipedia\n/math: simple math and solve for x\n/picture: make a picture with Pollinations or AI Horde (you pick, asks first)\n/ask: ask an online model a question (asks first unless it is clearly general)\n/undo: undo the last change\nLearned skills: none yet.";
+
 fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawError> {
     // ASCII lowercase keeps byte offsets identical to `cmd`, so slices of
     // `lower` can be mapped back to the user's exact letters.
     let lower = cmd.to_ascii_lowercase();
+    if matches!(lower.trim().trim_end_matches(['?', '.', '!']), "/skills" | "/skill" | "skills" | "my skills" | "list skills" | "what skills do you have") {
+        return Ok(Directive::Answer { text: SKILLS_TEXT.into() });
+    }
     // Greetings, thanks and "what can you do" get a plain reply, never a refusal.
     if let Some(text) = small_talk(&lower) {
         return Ok(Directive::Answer { text });
@@ -779,5 +786,19 @@ mod image_tests {
     #[test]
     fn wallpaper_and_other_words_are_untouched() {
         assert!(!matches!(one("set wallpaper to ~/Pictures/a.png"), Directive::GenerateImage { .. }));
+    }
+}
+
+#[cfg(test)]
+mod skills_tests {
+    use super::*;
+    #[test]
+    fn skills_lists_builtins_and_touches_nothing() {
+        for q in ["/skills", "skills", "What skills do you have?"] {
+            match parse(q).unwrap().remove(0) {
+                Directive::Answer { text } => assert!(text.contains("Learned skills: none yet") && text.contains("/picture")),
+                o => panic!("{o:?}"),
+            }
+        }
     }
 }

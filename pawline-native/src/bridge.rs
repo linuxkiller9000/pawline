@@ -189,6 +189,9 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                 state.pending = Some(plan);
                 return UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) };
             }
+            Class::Block => {
+                return reply("message", "That looks like it contains a password, key, token or other secret. I won't send it to an online service, and there is no way to approve that. Nothing was sent.".into());
+            }
             Class::No => {}
         }
     }
