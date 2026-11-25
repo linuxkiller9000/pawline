@@ -1016,9 +1016,11 @@ fn voice_runtime_inner() -> Result<Result<pawline_voice::runtime::Runtime, Voice
 
 fn need_model_text() -> String {
     let p = &pawline_voice::download::EN_TINY;
+    let mb = p.total_bytes() as f64 / 1e6;
     format!(
-        "Voice needs a speech model that is not on this computer. Download it now?\n\nModel: {} (English)\nFrom: {}\nSize: {:.1} MB\nSaved to: {}\n\nEvery file is checked against a fixed checksum before it is used. If it fails the check, or you cancel, nothing is kept. Nothing is downloaded unless you choose Download. Cancel is selected.",
-        p.id, p.host(), p.total_bytes() as f64 / 1e6, voice_cfg::model_dir().display()
+        "Voice needs a speech model. Download it now?\n\nModel: {} (English)\nFrom: {}\nSize: {:.1} MB (about {:.0} MB free space needed)\nSaved to: {}\n\nEach file is checked against a fixed checksum and installed only if all pass. If a check fails, you cancel (Esc) or you close Pawline, nothing usable is kept; leftovers are deleted on the next try. {}Nothing downloads unless you choose Download. To remove it later, delete that folder.",
+        p.id, p.host(), mb, mb.ceil(), voice_cfg::model_dir().display(),
+        if voice_cfg::model_dir().exists() { "A model already there failed its check; it is replaced only after the new one passes. " } else { "" }
     )
 }
 
@@ -1042,6 +1044,7 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
                 Err(VoiceErr::Msg(e)) => bridge::reply("voice-error", e),
             },
             Req::Download(c) => {
+                let had_model = pawline_voice::download::verify_dir(&pawline_voice::download::EN_TINY, &voice_cfg::model_dir());
                 let last = std::cell::Cell::new(0u64);
                 let b2 = back.clone();
                 let r = pawline_voice::download::download_model(&pawline_voice::download::EN_TINY, &voice_cfg::model_dir(), &c, &|d, t| {
@@ -1052,6 +1055,13 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
                 });
                 match r {
                     Err(e) => bridge::reply("voice-error", format!("Model download stopped: {e}. Nothing was kept.")),
+                    Ok(()) if c.load(std::sync::atomic::Ordering::SeqCst) => {
+                        // Cancel arrived after the last file finished. Cancel wins: voice stays off.
+                        if !had_model {
+                            let _ = std::fs::remove_dir_all(voice_cfg::model_dir());
+                        }
+                        bridge::reply("voice-error", "Download cancelled. Voice stays off and the new model was not kept.".into())
+                    }
                     Ok(()) => match voice_runtime() {
                         Ok(rt) => {
                             vrt = Some(rt);
