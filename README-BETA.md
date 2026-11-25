@@ -44,4 +44,11 @@ Pawline works inside your home folder (or the folder in PAWLINE_ROOT).
 
 ## Assist limit
 
-The optional model assist can clip or alter a name in its raw output (seen: "pets" came back as "ets"). Pawline now refuses any assist proposal whose path or name is not in your own words, and says so. Nothing is planned or corrected silently. Plain commands ("make a folder called pets") do not use the assist. Every assist plan still needs your explicit confirmation.
+The optional model assist can clip or change what you wrote (seen: "pets" came back as "ets"). Before any assist plan is shown, Pawline checks it against your own words and refuses, with a message, when:
+
+- a name or path is not in your words as a whole name (a clipped, extended or invented name; part of a longer path or file name);
+- a file type was added that you did not say;
+- your words do not clearly ask for exactly one operation, or the model chose a different one (for example delete instead of make);
+- for move, copy and rename, the source and target cannot be confirmed in the order you wrote them.
+
+Nothing is corrected or guessed. This does not prove the assist understood you: it removes known mismatches only. Plain commands ("make a folder called pets") do not use the assist. Every assist plan still needs your explicit confirmation. Sentences with several operations are refused by the assist.

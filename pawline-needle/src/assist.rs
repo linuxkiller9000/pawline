@@ -177,60 +177,186 @@ fn one_call(v: &Value) -> Result<Directive, PawError> {
 /// observed good and bad cases; tunable as more data lands.
 pub const MIN_CONFIDENCE: f64 = 0.3;
 
-/// True when `needle` occurs in `hay` as whole words: the characters on both
-/// sides (if any) are not letters or digits. Case-insensitive.
-fn occurs_as_words(hay: &str, needle: &str) -> bool {
+/// Position of the first whole-token occurrence of `needle` in `hay`
+/// (case-insensitive), as a byte offset into the lowercased text. A token
+/// boundary is a character that is not a letter or digit and does not
+/// extend a path or file name (`_ - / ~`, or a `.` followed by a letter or
+/// digit). Unicode names and names with spaces work; a name that is only
+/// part of a longer word, path or file name does not match.
+fn find_token(hay: &str, needle: &str) -> Option<usize> {
     let h = hay.to_lowercase();
     let n = needle.trim().to_lowercase();
     if n.is_empty() {
-        return false;
+        return None;
     }
     let mut from = 0;
     while let Some(i) = h[from..].find(&n) {
         let a = from + i;
         let b = a + n.len();
-        let before_ok = h[..a].chars().next_back().map_or(true, |c| !c.is_alphanumeric());
-        let after_ok = h[b..].chars().next().map_or(true, |c| !c.is_alphanumeric());
+        let joins = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '/' | '~');
+        let before_ok = h[..a].chars().next_back().map_or(true, |c| !joins(c) && c != '.');
+        let mut after = h[b..].chars();
+        let after_ok = match after.next() {
+            None => true,
+            Some('.') => after.next().map_or(true, |c| !c.is_alphanumeric()),
+            Some(c) => !joins(c),
+        };
         if before_ok && after_ok {
-            return true;
+            return Some(a);
         }
         from = a + h[a..].chars().next().map_or(1, |c| c.len_utf8());
     }
-    false
+    None
 }
 
-/// The model must not invent or clip names: every name or path it proposes
-/// has to appear in the user's own words, as whole words. A name that only
-/// appears inside a longer word ("ets" inside "pets") is rejected. Refusing
-/// is the only response: nothing is corrected or guessed here.
+
+fn words(input: &str) -> Vec<String> {
+    input
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Operation classes the user's own words can express.
+fn classes_in(input: &str) -> Vec<&'static str> {
+    let w = words(input);
+    let has = |l: &[&str]| w.iter().any(|x| l.contains(&x.as_str()));
+    let mut out = Vec::new();
+    if has(&["make", "create", "new", "mkdir", "add", "build", "whip", "generate", "setup", "creating", "making", "created", "made"])
+        || (has(&["set"]) && has(&["up"]))
+    {
+        out.push("create");
+    }
+    if has(&["delete", "remove", "trash", "erase", "rm", "destroy", "deleting", "removing", "deleted", "removed"]) {
+        out.push("delete");
+    }
+    if has(&["rename", "renaming", "renamed"]) {
+        out.push("rename");
+    }
+    if has(&["move", "mv", "put", "relocate", "moving", "moved", "putting"]) {
+        out.push("move");
+    }
+    if has(&["copy", "cp", "duplicate", "copying", "copied"]) {
+        out.push("copy");
+    }
+    if has(&["list", "ls", "show", "listing", "showing"]) {
+        out.push("list");
+    }
+    if has(&["open", "launch", "start", "run", "opening", "starting"]) {
+        out.push("open");
+    }
+    out
+}
+
+fn tool_class(tool: &str) -> &'static str {
+    match tool {
+        "create_folder" | "create_file" => "create",
+        "delete" => "delete",
+        "rename" => "rename",
+        "move_item" => "move",
+        "copy_item" => "copy",
+        "list_items" => "list",
+        _ => "open",
+    }
+}
+
+fn ext_in_input(input: &str, ext: &str) -> bool {
+    let w = words(input);
+    let aliases: &[&str] = match ext {
+        "md" => &["md", "markdown"],
+        "txt" => &["txt", "text"],
+        "py" => &["py", "python"],
+        "rs" => &["rs", "rust"],
+        "js" => &["js", "javascript"],
+        "sh" => &["sh", "shell", "bash"],
+        "json" => &["json"],
+        "csv" => &["csv"],
+        "html" => &["html"],
+        _ => &[],
+    };
+    w.iter().any(|x| x == ext || aliases.contains(&x.as_str()))
+}
+
+fn refuse(msg: String) -> PawError {
+    PawError::Parse(msg)
+}
+
+/// The model must not invent, clip or re-role what the user wrote. For every
+/// proposed call: (1) the operation must be one the user's words express and
+/// no other operation may appear in them; (2) every name or path must appear
+/// as a whole token in the user's words; (3) a stem is accepted only when
+/// the user also named the extension; (4) for rename, move and copy the
+/// source must come before the target in the user's words. Anything that
+/// cannot be grounded is refused. Nothing is corrected or guessed here.
 pub fn check_grounding(input: &str, reply: &str) -> Result<(), PawError> {
     let v = extract_json(reply)?;
     let calls: Vec<&Value> = match v.get("function_calls").and_then(Value::as_array) {
         Some(arr) if !arr.is_empty() => arr.iter().collect(),
         _ => vec![&v],
     };
+    let classes = classes_in(input);
     for c in calls {
+        let tool = c
+            .get("name")
+            .or_else(|| c.get("function"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let args = match c.get("arguments").or_else(|| c.get("parameters")) {
             Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
             Some(o) => o.clone(),
             None => Value::Null,
         };
-        let ext = args.get("extension").and_then(Value::as_str).map(|e| e.trim_start_matches('.').to_lowercase());
+        let want = tool_class(tool);
+        if tool != "open_app" && (classes.len() != 1 || classes[0] != want) {
+            return Err(refuse(format!(
+                "assist proposed `{tool}` but your words do not clearly ask for exactly that one operation. Nothing was planned; please rephrase or use a plain command like: make a folder called <name>"
+            )));
+        }
+        let ext = args
+            .get("extension")
+            .and_then(Value::as_str)
+            .map(|e| e.trim_start_matches('.').to_lowercase());
+        let mut positions: Vec<(&str, usize)> = Vec::new();
         for key in ["path", "new_name", "destination", "name"] {
             if let Some(val) = args.get(key).and_then(Value::as_str) {
                 let mut cand = val.to_string();
-                if key == "path" {
+                if key == "path" && !cand.is_empty() {
                     if let Some(e) = &ext {
                         let suffix = format!(".{e}");
-                        if cand.to_lowercase().ends_with(&suffix) && !occurs_as_words(input, &cand) {
+                        if cand.to_lowercase().ends_with(&suffix)
+                            && find_token(input, &cand).is_none()
+                        {
+                            if !ext_in_input(input, e) {
+                                return Err(refuse(format!(
+                                    "assist added the file type \".{e}\" but you did not name it. Nothing was planned; please say the full file name, like: make a file called {}.{e}",
+                                    &cand[..cand.len() - suffix.len()]
+                                )));
+                            }
                             cand.truncate(cand.len() - suffix.len());
                         }
                     }
                 }
-                if !occurs_as_words(input, &cand) {
-                    return Err(PawError::Parse(format!(
-                        "assist proposed the name \"{val}\" but that is not what you wrote. Nothing was planned; please rephrase or use a plain command like: make a folder called <name>"
-                    )));
+                match find_token(input, &cand) {
+                    Some(p) => positions.push((key, p)),
+                    None => {
+                        return Err(refuse(format!(
+                            "assist proposed the name \"{val}\" but that is not what you wrote. Nothing was planned; please rephrase or use a plain command like: make a folder called <name>"
+                        )))
+                    }
+                }
+            }
+        }
+        let pos = |k: &str| positions.iter().find(|(x, _)| *x == k).map(|(_, p)| *p);
+        let second = if tool == "rename" { "new_name" } else { "destination" };
+        if matches!(tool, "rename" | "move_item" | "copy_item") {
+            match (pos("path"), pos(second)) {
+                (Some(a), Some(b)) if a < b => {}
+                _ => {
+                    return Err(refuse(
+                        "assist could not confirm which name is the source and which is the target from your words. Nothing was planned; please rephrase or use a plain command like: move <source> to <target>".into(),
+                    ))
                 }
             }
         }
@@ -356,33 +482,88 @@ mod envelope_tests {
 #[cfg(test)]
 mod grounding_tests {
     use super::*;
-    fn reply(path: &str) -> String {
-        format!(r#"{{"success":true,"function_calls":[{{"name":"create_folder","arguments":{{"path":"{path}"}}}}],"confidence":0.4}}"#)
+    fn call(tool: &str, args: &str) -> String {
+        format!(r#"{{"success":true,"function_calls":[{{"name":"{tool}","arguments":{args}}}],"confidence":0.5}}"#)
+    }
+    fn mk(path: &str) -> String {
+        call("create_folder", &format!(r#"{{"path":"{path}"}}"#))
     }
     #[test]
     fn rejects_clipped_name() {
-        // Observed raw model reply for "...directory named pets..." was path "ets".
-        assert!(check_grounding("could you please set up a new directory named pets for me", &reply("ets")).is_err());
-        assert!(check_grounding("make a directory named pets", &reply("ets")).is_err());
+        assert!(check_grounding("could you please set up a new directory named pets for me", &mk("ets")).is_err());
+        assert!(check_grounding("make a directory named pets", &mk("ets")).is_err());
+        for (inp, bad) in [("create a folder called reports", "eports"), ("make a folder called invoices", "nvoices"), ("make a folder called taxes", "axes")] {
+            assert!(check_grounding(inp, &mk(bad)).is_err(), "{inp}");
+        }
     }
     #[test]
     fn accepts_exact_names() {
-        assert!(check_grounding("set up a new directory named pets for me", &reply("pets")).is_ok());
-        assert!(check_grounding("set up a new directory named Dogs", &reply("dogs")).is_ok());
-        assert!(check_grounding("set up a new directory named kitten paws for me", &reply("kitten paws")).is_ok());
-        assert!(check_grounding("make notes.md here", &reply("notes.md")).is_ok());
+        assert!(check_grounding("set up a new directory named pets for me", &mk("pets")).is_ok());
+        assert!(check_grounding("set up a new directory named Dogs", &mk("dogs")).is_ok());
+        assert!(check_grounding("set up a new directory named kitten paws for me", &mk("kitten paws")).is_ok());
+        assert!(check_grounding("create a folder called pets.", &mk("pets")).is_ok());
+        assert!(check_grounding("make a folder called \"my pets\"", &mk("my pets")).is_ok());
+        assert!(check_grounding("make a folder called caf\u{e9}s", &mk("caf\u{e9}s")).is_ok());
+        assert!(check_grounding("make a folder called \u{627}\u{644}\u{642}\u{637}\u{629}", &mk("\u{627}\u{644}\u{642}\u{637}\u{629}")).is_ok());
+        assert!(check_grounding("make a file called notes.md here", &call("create_file", r#"{"path":"notes.md"}"#)).is_ok());
     }
     #[test]
-    fn rejects_invented_names() {
-        assert!(check_grounding("set up a new directory named dogs", &reply("cats")).is_err());
-        assert!(check_grounding("set up a new directory named dogs", &reply("dogs2")).is_err());
-        assert!(check_grounding("set up a new directory named dogs", &reply("dog")).is_err());
+    fn rejects_invented_or_partial_names() {
+        assert!(check_grounding("set up a new directory named dogs", &mk("cats")).is_err());
+        assert!(check_grounding("set up a new directory named dogs", &mk("dogs2")).is_err());
+        assert!(check_grounding("set up a new directory named dogs", &mk("dog")).is_err());
+        // part of a longer file name or path is not the whole name
+        assert!(check_grounding("make a folder called pets.bak", &mk("pets")).is_err());
+        assert!(check_grounding("make a folder called docs/pets", &mk("pets")).is_err());
+        assert!(check_grounding("make a folder called my-pets", &mk("pets")).is_err());
+        assert!(check_grounding("make a folder called pets_old", &mk("pets")).is_err());
     }
     #[test]
-    fn extension_hint_allows_bare_stem() {
-        let r = r#"{"success":true,"function_calls":[{"name":"create_file","arguments":{"path":"ideas.md","extension":"md"}}]}"#;
-        assert!(check_grounding("whip up a file called ideas", r).is_ok());
-        assert!(check_grounding("whip up a file called plans", r).is_err());
+    fn extension_hint_cannot_invent_a_type() {
+        let r = call("create_file", r#"{"path":"ideas.md","extension":"md"}"#);
+        assert!(check_grounding("whip up a markdown file called ideas", &r).is_ok());
+        assert!(check_grounding("whip up a md file called ideas", &r).is_ok());
+        assert!(check_grounding("whip up a file called ideas", &r).is_err());
+        assert!(check_grounding("whip up a file called plans", &r).is_err());
+        let r2 = call("create_file", r#"{"path":"ideas.exe","extension":"exe"}"#);
+        assert!(check_grounding("whip up a file called ideas", &r2).is_err());
+    }
+    #[test]
+    fn operation_must_match_the_users_words() {
+        // same name, wrong operation
+        let del = call("delete", r#"{"path":"pets"}"#);
+        assert!(check_grounding("make a folder called pets", &del).is_err());
+        assert!(check_grounding("please delete pets", &mk("pets")).is_err());
+        assert!(check_grounding("please delete pets", &del).is_ok());
+        // user words with two operations cannot be grounded to one call
+        assert!(check_grounding("make pets and delete pets", &mk("pets")).is_err());
+        assert!(check_grounding("make pets and delete pets", &del).is_err());
+        // no operation word at all
+        assert!(check_grounding("pets", &mk("pets")).is_err());
+    }
+    #[test]
+    fn inflected_verbs_are_recognised() {
+        let ok = call("move_item", r#"{"path":"a.txt","destination":"docs"}"#);
+        assert!(check_grounding("would you mind moving a.txt into docs", &ok).is_ok());
+        let del = call("delete", r#"{"path":"pets"}"#);
+        assert!(check_grounding("deleting pets", &mk("pets")).is_err());
+        assert!(check_grounding("deleting pets", &del).is_ok());
+    }
+    #[test]
+    fn source_and_destination_roles_cannot_be_swapped() {
+        let ok = call("move_item", r#"{"path":"a.txt","destination":"docs"}"#);
+        let rev = call("move_item", r#"{"path":"docs","destination":"a.txt"}"#);
+        assert!(check_grounding("move a.txt to docs", &ok).is_ok());
+        assert!(check_grounding("move a.txt to docs", &rev).is_err());
+        let cp = call("copy_item", r#"{"path":"docs","destination":"a.txt"}"#);
+        assert!(check_grounding("copy a.txt into docs", &cp).is_err());
+        let rn = call("rename", r#"{"path":"old","new_name":"new1"}"#);
+        let rn_rev = call("rename", r#"{"path":"new1","new_name":"old"}"#);
+        assert!(check_grounding("rename old to new1", &rn).is_ok());
+        assert!(check_grounding("rename old to new1", &rn_rev).is_err());
+        // a name in only one slot, or a clipped one, is refused
+        let clip = call("move_item", r#"{"path":"a.txt","destination":"ocs"}"#);
+        assert!(check_grounding("move a.txt to docs", &clip).is_err());
     }
 }
 
