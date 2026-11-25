@@ -228,10 +228,17 @@ impl DirectFsBackend {
                 if !gone(&a) {
                     return Err(PawError::Validation(format!("~/{} exists again; not overwriting", e.a)));
                 }
-                if let Some(want) = &e.meta {
-                    if self.fingerprint_full(&b).as_deref() != Some(want.as_str()) {
+                match &e.meta {
+                    Some(want) if self.fingerprint_full(&b).as_deref() == Some(want.as_str()) => {}
+                    Some(_) => {
                         return Err(PawError::Validation(format!(
                             "~/{} was changed (or replaced) after I moved it; leaving it where it is so your edits are kept",
+                            e.b.as_deref().unwrap_or("")
+                        )));
+                    }
+                    None => {
+                        return Err(PawError::Validation(format!(
+                            "I can't verify that ~/{} is unchanged since it was moved (this history entry has no fingerprint), so I left it where it is. Move it back yourself if you want.",
                             e.b.as_deref().unwrap_or("")
                         )));
                     }
@@ -516,7 +523,18 @@ fn copy_tree(dir: &Dir, from: &Path, to: &Path) -> Result<(), PawError> {
         // create_new: a destination that appeared since the check is never overwritten
         let mut src = dir.open(from)?;
         let mut dst = dir.open_with(to, cap_std::fs::OpenOptions::new().write(true).create_new(true))?;
-        std::io::copy(&mut src, &mut dst)?;
+        use cap_std::fs::MetadataExt;
+        let mine = dst.metadata().ok().map(|m| (m.dev(), m.ino()));
+        let res = std::io::copy(&mut src, &mut dst).map(|_| ()).and_then(|_| dst.sync_all());
+        if let Err(e) = res {
+            // Remove only the partial file this call created: if the name now points at something else
+            // (another process replaced it), leave that alone.
+            let same = dir.symlink_metadata(to).ok().map(|m| (m.dev(), m.ino()));
+            if mine.is_some() && same == mine {
+                let _ = dir.remove_file(to);
+            }
+            return Err(e.into());
+        }
         if let Ok(m) = src.metadata() {
             let _ = dst.set_permissions(m.permissions());
         }

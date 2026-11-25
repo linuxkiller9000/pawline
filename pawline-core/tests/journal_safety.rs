@@ -74,8 +74,10 @@ fn recovery_settles_pending_intents_from_disk_state() {
     let mut e = Engine::new(root.clone());
     let plan = e.plan("undo").unwrap();
     assert!(plan.summary().contains("put ~/new.txt back at ~/old.txt"), "{}", plan.summary());
-    e.execute_plan(plan, &be).unwrap();
-    assert!(root.join("old.txt").exists() && !root.join("new.txt").exists());
+    // a recovered move has no fingerprint, so undo cannot verify the file is unchanged: it fails closed
+    let r = e.execute_plan(plan, &be).unwrap();
+    assert!(matches!(r, Response::Failed { ref error, .. } if error.to_string().contains("can't verify")));
+    assert!(root.join("new.txt").exists() && !root.join("old.txt").exists());
     // a second start finds nothing pending
     assert!(DirectFsBackend::new(&root).unwrap().recovery_notes().is_empty());
 }
