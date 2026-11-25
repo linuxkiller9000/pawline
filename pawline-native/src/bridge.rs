@@ -58,24 +58,36 @@ pub fn reply(kind: &str, text: String) -> UiReply {
 
 
 pub fn handle_text(state: &mut UiState, input: &str) -> UiReply {
+    handle_text_from(state, input, false)
+}
+
+/// `from_voice`: the text came from speech recognition. Every plan that does
+/// anything then needs a fresh explicit confirmation, saved-action commands
+/// cannot be dictated, and the words are never trusted as typed.
+pub fn handle_text_from(state: &mut UiState, input: &str, from_voice: bool) -> UiReply {
+    const VOICE_WHY: &str = "this text came from speech recognition, so check the words before you say yes";
     let backend = match DirectFsBackend::new(&state.root).map(|inner| UiBackend { inner }) {
         Ok(b) => b,
         Err(e) => return reply("error", format!("backend: {e}")),
     };
     state.notes.extend(backend.inner.recovery_notes().iter().cloned());
     if let Some(m) = pawline_core::actions::parse_meta(input) {
+        if from_voice {
+            return reply("message", "Saved-action commands can't be dictated. Type them instead.".into());
+        }
         return handle_meta(state, &backend.inner, m);
     }
     // Parser first. The 35 MB model is loaded only when the parser has a
     // gap, so ordinary commands never wait for it.
-    let mut r = state.engine.handle_with(input, &backend, false, None);
+    let why = if from_voice { Some(VOICE_WHY) } else { None };
+    let mut r = state.engine.handle_with_force(input, &backend, false, None, why);
     if r.is_err() {
         if !state.assist_tried {
             state.assist_tried = true;
             state.assist = NeedleAssist::embedded().ok();
         }
         if let Some(a) = state.assist.as_ref() {
-            r = state.engine.handle_with(input, &backend, false, Some(a as &dyn pawline_core::assist::Assist));
+            r = state.engine.handle_with_force(input, &backend, false, Some(a as &dyn pawline_core::assist::Assist), why);
         }
     }
     match r {

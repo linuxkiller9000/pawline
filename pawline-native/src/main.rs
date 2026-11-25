@@ -50,7 +50,7 @@ const BOTTOM: f32 = 64.0;
 enum Req {
     VoiceCheck,
     Voice(Vec<f32>),
-    Text(String),
+    Text(String, bool),
     Confirm,
     Cancel,
 }
@@ -126,6 +126,10 @@ struct App {
     cap: Option<pawline_voice::capture::Capture>,
     voice_status: String,
     voice_preview: bool,
+    /// True while the text in the input box came from speech (stays set while edited).
+    voice_origin: bool,
+    /// Height reserved under the chat for the (wrapping) input box.
+    bottom: f32,
 }
 
 fn inside(r: (f32, f32, f32, f32), p: (f64, f64)) -> bool {
@@ -315,23 +319,30 @@ impl App {
         if self.confirm.is_some() {
             self.draw_confirm(pm, w, h, inner_w);
         } else {
-            self.draw_chat(pm, w, h, inner_w);
-            // input box
-            fill(pm, &rrect(PAD - 2.0, h - 52.0, w - 2.0 * PAD + 4.0, 40.0, 12.0), (52, 48, 70, 255));
-            let mut s = self.input.clone();
-            // keep the tail of long input visible
-            while s.chars().map(|c| self.adv(c, PX)).sum::<f32>() > inner_w - 20.0 {
-                s.remove(0);
+            // wrapping input box: the whole text stays readable (last 6 lines if longer)
+            let shown = format!("{}|", self.input);
+            let mut lines = self.wrap(&shown, PX, inner_w - 20.0);
+            if lines.len() > 6 {
+                lines.drain(..lines.len() - 6);
             }
-            let shown = format!("{s}|");
+            let n = lines.len().max(1) as f32;
+            let box_h = 20.0 + n * LH;
+            self.bottom = (box_h + 24.0).max(BOTTOM);
+            self.draw_chat(pm, w, h, inner_w);
+            fill(pm, &rrect(PAD - 2.0, h - 12.0 - box_h, w - 2.0 * PAD + 4.0, box_h, 12.0), (52, 48, 70, 255));
             let col = if self.busy { (150, 145, 165) } else { (255, 255, 255) };
-            self.text(pm, &shown, PAD + 8.0, h - 26.0, PX, col, (0.0, h));
+            for (i, l) in lines.iter().enumerate() {
+                self.text(pm, l, PAD + 8.0, h - 12.0 - box_h + 8.0 + (i as f32 + 1.0) * LH - 5.0, PX, col, (0.0, h));
+            }
+            if self.voice_origin {
+                self.text(pm, "from voice: check the words, Enter sends", PAD + 8.0, h - 14.0 - box_h, 12.0, (170, 165, 195), (0.0, h));
+            }
         }
     }
 
     fn draw_chat(&mut self, pm: &mut Pixmap, w: f32, h: f32, inner_w: f32) {
         let top = CHAT_TOP;
-        let bot = h - BOTTOM + 4.0;
+        let bot = h - self.bottom + 4.0;
         // layout all messages
         let bub_w = inner_w - 40.0;
         let mut items: Vec<(bool, String, Vec<String>, f32)> = Vec::new();
@@ -383,7 +394,7 @@ impl App {
     fn draw_confirm(&mut self, pm: &mut Pixmap, w: f32, h: f32, inner_w: f32) {
         let text = self.confirm.clone().unwrap();
         let top = CHAT_TOP;
-        let bot = h - BOTTOM - 8.0;
+        let bot = h - self.bottom - 8.0;
         let panel = rrect(PAD - 4.0, top, w - 2.0 * PAD + 8.0, bot - top, 14.0);
         fill(pm, &panel, (29, 20, 64, 255));
         stroke(pm, &panel, (124, 58, 237, 255), 1.5);
@@ -500,7 +511,8 @@ impl App {
         self.voice_preview = false;
         self.push(true, "user", t.clone());
         self.busy = true;
-        let _ = self.tx.send(Req::Text(t));
+        let from_voice = std::mem::take(&mut self.voice_origin);
+        let _ = self.tx.send(Req::Text(t, from_voice));
     }
 
     fn decide(&mut self, yes: bool) {
@@ -533,7 +545,8 @@ impl App {
                 // until the user presses Enter, and any plan still needs Do it.
                 self.input = r.text;
                 self.voice_preview = true;
-                self.push(false, "message", "Voice transcript is in the box below. Edit it if needed, then press Enter to send. Nothing runs until you confirm a plan.".into());
+                self.voice_origin = true;
+                self.push(false, "message", "Voice transcript is in the box below. Edit it if needed, then press Enter to send. Even then, nothing runs until you press Do it on the plan.".into());
             } else {
                 self.push(false, "error", r.text);
             }
@@ -616,6 +629,10 @@ impl App {
             }
             Keysym::BackSpace => {
                 self.input.pop();
+                if self.input.is_empty() {
+                    self.voice_origin = false;
+                    self.voice_preview = false;
+                }
                 self.draw();
             }
             Keysym::Page_Up | Keysym::Up => {
@@ -906,9 +923,9 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
                     Err(e) => bridge::reply("voice-fail", e.to_string()),
                 },
             },
-            Req::Text(t) => {
+            Req::Text(t, from_voice) => {
                 st.pending = None;
-                let r = bridge::handle_text(&mut st, &t);
+                let r = bridge::handle_text_from(&mut st, &t, from_voice);
                 bridge::with_notes(&mut st, r)
             }
             Req::Confirm => {
@@ -1010,6 +1027,8 @@ fn main() {
         cap: None,
         voice_status: String::new(),
         voice_preview: false,
+        voice_origin: false,
+        bottom: BOTTOM,
     };
     if std::env::var("PAWLINE_START_EXPANDED").is_ok() {
         app.expanded = true;

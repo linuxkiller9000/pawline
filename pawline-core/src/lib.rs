@@ -119,8 +119,30 @@ impl Engine {
         confirmed: bool,
         assist: Option<&dyn Assist>,
     ) -> Result<Response, PawError> {
+        self.handle_with_force(input, backend, confirmed, assist, None)
+    }
+
+    /// Like `handle_with`, but when `force_confirm_reason` is set every plan
+    /// that does anything (everything except a pure computed answer) needs a
+    /// fresh explicit confirmation, whatever the planner would normally say.
+    /// Used for text that came from speech recognition.
+    pub fn handle_with_force(
+        &mut self,
+        input: &str,
+        backend: &dyn ExecutionBackend,
+        confirmed: bool,
+        assist: Option<&dyn Assist>,
+        force_confirm_reason: Option<&str>,
+    ) -> Result<Response, PawError> {
         self.last_candidate = None;
-        let plan = self.plan_with(input, assist)?;
+        let mut plan = self.plan_with(input, assist)?;
+        if let Some(why) = force_confirm_reason {
+            let answer_only = !plan.ops.is_empty() && plan.ops.iter().all(|o| matches!(o, plan::Operation::Answer { .. }));
+            if !answer_only {
+                plan.needs_confirmation = true;
+                plan.confirmation_reasons.push(why.to_string());
+            }
+        }
         if plan.needs_confirmation && !confirmed {
             return Ok(Response::Confirm(plan));
         }
