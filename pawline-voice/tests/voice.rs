@@ -109,3 +109,17 @@ fn transcribes_with_fresh_transcriber_each_time() {
     assert!(a.to_lowercase().contains("best of times"), "{a}");
     assert_eq!(a, b);
 }
+
+// Compares the mirrored struct with the real header via a C compiler.
+// Set PAWLINE_VOICE_TEST_HEADER_DIR to the dir containing moonshine-c-api.h.
+#[test]
+fn line_layout_matches_pinned_header() {
+    let Ok(dir) = std::env::var("PAWLINE_VOICE_TEST_HEADER_DIR") else { eprintln!("SKIP: header dir not set"); return };
+    let src = "/tmp/pv_layout.c";
+    std::fs::write(src, "#include <stdio.h>\n#include <stdint.h>\n#include <stddef.h>\n#include \"moonshine-c-api.h\"\nint main(){printf(\"%zu %zu %zu %zu %zu\", sizeof(struct transcript_line_t), offsetof(struct transcript_line_t,id), offsetof(struct transcript_line_t,speaker_spans), offsetof(struct transcript_line_t,words), (size_t)MOONSHINE_HEADER_VERSION);}").unwrap();
+    let st = Command::new("gcc").args(["-I", &dir, src, "-o", "/tmp/pv_layout"]).status().unwrap();
+    assert!(st.success());
+    let o = Command::new("/tmp/pv_layout").output().unwrap();
+    let want = format!("{} {} {} {} {}", LINE_SIZE, 32, 48, 72, HEADER_VERSION);
+    assert_eq!(String::from_utf8_lossy(&o.stdout), want);
+}

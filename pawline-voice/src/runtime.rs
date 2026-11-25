@@ -63,16 +63,36 @@ fn load_one(l: &PinnedLib) -> Result<*mut c_void, VoiceError> {
     }
 }
 
+/// Mirror of `struct transcript_line_t` from moonshine-c-api.h (header version 30000,
+/// library v0.1.6). Layout is asserted at compile time and, in tests, against the
+/// pinned header with a real C compiler. The libs are also hash-pinned and the
+/// library's reported version is checked before use.
 #[repr(C)]
-struct Line {
-    text: *const c_char,
-    audio: *const f32,
-    audio_n: usize,
-    start: f32,
-    dur: f32,
-    id: u64,
-    _rest: [u8; 0],
+pub struct Line {
+    pub text: *const c_char,
+    pub audio: *const f32,
+    pub audio_n: usize,
+    pub start: f32,
+    pub dur: f32,
+    pub id: u64,
+    pub flags: [i8; 5],
+    pub speaker_spans: *const c_void,
+    pub speaker_span_count: u64,
+    pub latency_ms: u32,
+    pub words: *const c_void,
+    pub word_count: u64,
 }
+pub const LINE_SIZE: usize = std::mem::size_of::<Line>();
+const _: () = {
+    assert!(LINE_SIZE == 88);
+    assert!(std::mem::offset_of!(Line, id) == 32);
+    assert!(std::mem::offset_of!(Line, flags) == 40);
+    assert!(std::mem::offset_of!(Line, speaker_spans) == 48);
+    assert!(std::mem::offset_of!(Line, latency_ms) == 64);
+    assert!(std::mem::offset_of!(Line, words) == 72);
+};
+/// Header version this crate was written against (MOONSHINE_HEADER_VERSION).
+pub const HEADER_VERSION: i32 = 30000;
 #[repr(C)]
 struct Transcript {
     lines: *mut Line,
@@ -109,6 +129,14 @@ impl Runtime {
             if a.is_null() || b.is_null() {
                 return Err(VoiceError::LoaderUnavailable("moonshine entry points missing".into()));
             }
+            let ver = sym("moonshine_get_version");
+            if ver.is_null() {
+                return Err(VoiceError::LoaderUnavailable("moonshine version entry point missing".into()));
+            }
+            let v: extern "C" fn() -> i32 = std::mem::transmute(ver);
+            if v() != HEADER_VERSION {
+                return Err(VoiceError::LoaderUnavailable(format!("moonshine ABI version {} != {}", v(), HEADER_VERSION)));
+            }
             let f = sym("moonshine_free_transcriber");
             Ok(Runtime {
                 load: std::mem::transmute(a),
@@ -121,7 +149,7 @@ impl Runtime {
     /// Fresh transcriber per utterance (reusing a handle returned "Mm" in tests).
     pub fn transcribe(&self, model_dir: &str, samples: &[f32]) -> Result<String, VoiceError> {
         let cm = CString::new(model_dir).map_err(|_| VoiceError::Model("bad model path".into()))?;
-        let h = (self.load)(cm.as_ptr(), 2, std::ptr::null(), 0, 30000);
+        let h = (self.load)(cm.as_ptr(), 2, std::ptr::null(), 0, HEADER_VERSION);
         if h < 0 {
             return Err(VoiceError::Model(format!("model load failed ({h})")));
         }
@@ -138,7 +166,7 @@ impl Runtime {
                 for i in 0..(*t).line_count as usize {
                     // lines are laid out as an array of the C struct; stride is the full C size.
                     let base = (*t).lines as *const u8;
-                    let line = base.add(i * LINE_STRIDE) as *const Line;
+                    let line = base.add(i * LINE_SIZE) as *const Line;
                     if !s.is_empty() {
                         s.push(' ');
                     }
@@ -153,5 +181,3 @@ impl Runtime {
         out
     }
 }
-/// sizeof(struct transcript_line_t) in moonshine-c-api.h v0.1.6, measured with gcc (88).
-const LINE_STRIDE: usize = 88;
