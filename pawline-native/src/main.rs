@@ -5,6 +5,7 @@ mod bridge;
 mod edit;
 mod thumb;
 
+mod ctl;
 use bridge::UiReply;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -227,6 +228,10 @@ struct App {
     cache: HashMap<(char, u32), (fontdue::Metrics, Vec<u8>)>,
     tx: mpsc::Sender<Req>,
     exit: bool,
+    /// Panel-only: no orb. The surface is unmapped until a panel widget (or Pawline's own key) opens the card.
+    panel_only: bool,
+    hidden: bool,
+    state: ctl::Shared,
     layer_mode: bool,
     // hit rects (x, y, w, h), set by draw
     r_yes: (f32, f32, f32, f32),
@@ -401,6 +406,15 @@ impl App {
     }
 
     fn draw(&mut self) {
+        let st = if self.hidden { "hidden" } else if self.busy { "busy" } else if self.confirm.is_some() { "confirm" } else if self.expanded { "open" } else { "idle" };
+        if let Ok(mut g) = self.state.lock() {
+            *g = st;
+        }
+        if self.hidden {
+            self.surf.wl().attach(None, 0, 0);
+            self.surf.commit();
+            return;
+        }
         let (w, h) = (self.w, self.h);
         let mut pm = Pixmap::new(w, h).unwrap();
         if !self.expanded && self.bar {
@@ -608,8 +622,27 @@ impl App {
         self.confirm.is_some() && !self.busy && self.plan_scroll >= self.plan_max - 1.0
     }
 
+    fn on_ctl(&mut self, c: ctl::Ctl) {
+        match c {
+            ctl::Ctl::Show => self.set_expanded(true),
+            ctl::Ctl::Hide => {
+                self.hidden = true;
+                self.expanded = false;
+                self.draw();
+            }
+            ctl::Ctl::Toggle => {
+                if self.hidden || !self.expanded {
+                    self.set_expanded(true);
+                } else {
+                    self.set_expanded(false);
+                }
+            }
+        }
+    }
+
     fn set_expanded(&mut self, exp: bool) {
         self.expanded = exp;
+        self.hidden = !exp && self.panel_only;
         if exp {
             self.w = W;
             self.h = H;
@@ -968,6 +1001,19 @@ impl App {
         if self.confirm.is_none() {
             let (px, py) = self.ptr_pos;
             let w = self.w as f32;
+            // a click on a "/" menu row fills the input with that skill (same as Tab)
+            let rows = self.menu_rows();
+            if !rows.is_empty() {
+                let (rh, n) = (26.0, rows.len() as f32);
+                let top = self.input_box_top - 6.0 - n * rh - 8.0;
+                if inside((PAD - 2.0, top, w - 2.0 * PAD + 4.0, n * rh + 8.0), self.ptr_pos) {
+                    let k = (((py as f32 - top - 4.0) / rh).floor().max(0.0) as usize).min(rows.len() - 1);
+                    self.menu_sel = k;
+                    self.menu_pick();
+                    self.draw();
+                    return;
+                }
+            }
             if inside((PAD - 2.0, self.input_box_top, w - 2.0 * PAD + 4.0, 40.0 + self.input_extra), self.ptr_pos) {
                 let i = self.idx_at(px as f32, py as f32);
                 self.input.set_caret(i, self.shift);
@@ -1351,7 +1397,42 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("pawline [--no-ui]\n  (no flag)  floating orb and chat on Wayland\n  --no-ui    terminal mode, same commands and confirmations\nPAWLINE_NO_LAYER=1 uses a normal window. PAWLINE_ROOT sets the working folder (default: home).");
+        println!("pawline [--no-ui] [--panel-only]\n  (no flag)  floating orb and chat on Wayland\n  --no-ui    terminal mode, same commands and confirmations\n  --panel-only  no orb: Pawline stays hidden until a panel widget opens it\n  --ctl toggle|show|hide|status  talk to a running Pawline (toggle/show start it if it is not running)\n  --waybar | --polybar | --genmon  print the panel widget text (see integrations/)\nPAWLINE_NO_LAYER=1 uses a normal window. PAWLINE_ROOT sets the working folder (default: home).");
+        return;
+    }
+    if let Some(i) = args.iter().position(|a| a == "--ctl") {
+        let word = args.get(i + 1).map(|s| s.as_str()).unwrap_or("");
+        if !matches!(word, "toggle" | "show" | "hide" | "status") {
+            eprintln!("usage: pawline --ctl toggle|show|hide|status");
+            std::process::exit(2);
+        }
+        match ctl::ask(word) {
+            Ok(r) => println!("{r}"),
+            Err(_) if matches!(word, "toggle" | "show") => {
+                // not running yet: a panel click starts Pawline with its card open, in panel-only mode
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = std::process::Command::new(exe)
+                        .args(["--panel-only", "--open"])
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+            }
+            Err(_) => println!("off"),
+        }
+        return;
+    }
+    if let Some(fmt) = args.iter().find(|a| matches!(a.as_str(), "--waybar" | "--polybar" | "--genmon")) {
+        let st = ctl::ask("status").unwrap_or_else(|_| "off".into());
+        println!(
+            "{}",
+            match fmt.as_str() {
+                "--waybar" => ctl::waybar(&st),
+                "--polybar" => ctl::polybar(&st),
+                _ => ctl::genmon(&st),
+            }
+        );
         return;
     }
     if args.iter().any(|a| a == "--no-ui") {
@@ -1363,6 +1444,12 @@ fn main() {
         run_terminal();
         return;
     }
+    if ctl::running() {
+        eprintln!("Pawline is already running. Use: pawline --ctl show");
+        return;
+    }
+    let panel_only = args.iter().any(|a| a == "--panel-only");
+    let state: ctl::Shared = std::sync::Arc::new(std::sync::Mutex::new("idle"));
     let conn = Connection::connect_to_env().expect("no Wayland compositor found (WAYLAND_DISPLAY)");
     let (globals, queue) = registry_queue_init(&conn).unwrap();
     let qh = queue.handle();
@@ -1442,6 +1529,9 @@ fn main() {
         cache: HashMap::new(),
         tx: req_tx,
         exit: false,
+        panel_only,
+        hidden: panel_only,
+        state: state.clone(),
         layer_mode,
         r_yes: (0.0, 0.0, 0.0, 0.0),
         r_no: (0.0, 0.0, 0.0, 0.0),
@@ -1450,6 +1540,19 @@ fn main() {
         plan_max: 0.0,
         chat_max: 0.0,
     };
+    let (ctl_tx, ctl_rx) = channel::channel::<ctl::Ctl>();
+    if !ctl::serve(ctl_tx, state.clone()) {
+        eprintln!("(panel control socket not available; panel widgets will show Pawline as off)");
+    }
+    if args.iter().any(|a| a == "--open") {
+        app.expanded = true;
+        app.hidden = false;
+        app.w = W;
+        app.h = H;
+        if let Surf::Layer(l) = &app.surf {
+            l.set_size(W, H);
+        }
+    }
     if std::env::var("PAWLINE_START_EXPANDED").is_ok() {
         app.expanded = true;
         app.w = W;
@@ -1466,6 +1569,13 @@ fn main() {
         .insert_source(back_rx, |ev, _, app: &mut App| {
             if let channel::Event::Msg(r) = ev {
                 app.on_reply(r);
+            }
+        })
+        .unwrap();
+    handle
+        .insert_source(ctl_rx, |ev, _, app: &mut App| {
+            if let channel::Event::Msg(c) = ev {
+                app.on_ctl(c);
             }
         })
         .unwrap();

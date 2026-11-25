@@ -1,0 +1,8 @@
+// Add "custom/pawline" to modules-right (or left/center) in your Waybar config, and add this block.
+"custom/pawline": {
+    "exec": "pawline --waybar",
+    "return-type": "json",
+    "interval": 5,
+    "on-click": "pawline --ctl toggle",
+    "tooltip": true
+}

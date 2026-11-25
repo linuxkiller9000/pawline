@@ -1,0 +1,4 @@
+#custom-pawline { padding: 0 8px; }
+#custom-pawline.off { opacity: 0.5; }
+#custom-pawline.busy { color: #22d3ee; }
+#custom-pawline.confirm { color: #facc15; }

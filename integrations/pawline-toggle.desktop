@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Pawline (open/close)
+Comment=Open or close the Pawline card
+Exec=pawline --ctl toggle
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;
