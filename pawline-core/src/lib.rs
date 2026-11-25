@@ -116,6 +116,11 @@ impl Engine {
 
     /// Full pipeline with an optional assist; see `plan_with`.
     /// Folders (ranked, existing) that may be used to find a destination named in words. Replaced per request.
+    /// Next requests always wait for a yes (they came from a chooser pick).
+    pub fn set_force_confirm(&mut self, on: bool) {
+        self.validator.force_confirm.set(on);
+    }
+
     pub fn set_dir_hints(&mut self, hints: Vec<std::path::PathBuf>) {
         self.validator.dir_hints = hints;
     }

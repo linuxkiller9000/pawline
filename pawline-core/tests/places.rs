@@ -107,3 +107,29 @@ fn short_words_work_like_zoxide_keywords() {
     let t = confirm_text(e.handle("make a folder called x in co models-o", &bk, false));
     assert!(t.contains(&c.join("x").display().to_string()), "{t}");
 }
+
+#[test]
+fn a_full_path_pick_prepares_a_confirmation_with_that_path() {
+    let root = sandbox("pick");
+    let (a, b) = (root.join("a/models"), root.join("b/models"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let mut e = Engine::new(root.clone());
+    e.set_dir_hints(vec![a.clone(), b.clone()]);
+    let bk = DirectFsBackend::new(&root).unwrap();
+    match e.handle("make a folder called x in models", &bk, false) {
+        Err(PawError::Ambiguous { words, choices }) => {
+            assert_eq!(words, "models");
+            assert_eq!(choices.len(), 2);
+        }
+        _ => panic!("should ask which one"),
+    }
+    e.set_force_confirm(true);
+    for cmd in [format!("make a folder called x in {}", b.display()), format!("make a folder in {} called x", b.display())] {
+        let t = confirm_text(e.handle(&cmd, &bk, false));
+        assert!(t.contains(&b.join("x").display().to_string()), "{cmd}: {t}");
+    }
+    assert!(!b.join("x").exists());
+    // outside home: not usable
+    assert!(e.handle("make a folder called x in /etc", &bk, false).is_err());
+}

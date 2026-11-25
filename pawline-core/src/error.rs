@@ -16,6 +16,8 @@ pub enum PawError {
     ConfirmationRequired(String),
     /// The execution backend failed an operation.
     Exec(String),
+    /// Several folders fit the words naming a destination: the user picks one.
+    Ambiguous { words: String, choices: Vec<std::path::PathBuf> },
 }
 
 impl fmt::Display for PawError {
@@ -27,6 +29,11 @@ impl fmt::Display for PawError {
             PawError::Validation(m) => write!(f, "The plan doesn't check out: {m}"),
             PawError::ConfirmationRequired(m) => write!(f, "Needs confirmation: {m}"),
             PawError::Exec(m) => write!(f, "Execution failed: {m}"),
+            PawError::Ambiguous { words, choices } => write!(
+                f,
+                "Several folders match \"{words}\": {}. Say the full path, for example \"make a folder called x in <path>\".",
+                choices.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("; ")
+            ),
         }
     }
 }

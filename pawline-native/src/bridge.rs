@@ -140,6 +140,8 @@ pub struct UiState {
     pub notes: Vec<String>,
     /// Working time already spent on the pending plan (planning/validation), not counting any wait for the user.
     pub carried: std::time::Duration,
+    /// Commands a chooser pick may have filled in; the next input equal to one of them always shows a confirmation.
+    pub picks: Vec<String>,
 }
 
 pub fn startup_notes_from(root: &std::path::Path) -> Vec<String> {
@@ -285,6 +287,8 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
         Err(e) => return reply("error", format!("backend: {e}")),
     };
     state.notes.extend(backend.inner.recovery_notes().iter().cloned());
+    state.engine.set_force_confirm(state.picks.iter().any(|p| p == input));
+    state.picks.clear();
     // A destination named in words ("... in models") may be found among the user's frequent folders.
     {
         let low = input.to_lowercase();
@@ -308,6 +312,24 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
         }
         if let Some(a) = state.assist.as_ref() {
             r = state.engine.handle_with(input, &backend, false, Some(a as &dyn pawline_core::assist::Assist));
+        }
+    }
+    // Several folders fit the destination words: a normal question with the choices clickable.
+    // A pick only fills the input with the same request and the full path; Enter then shows the confirmation.
+    if let Err(PawError::Ambiguous { words, choices }) = &r {
+        let low = input.to_lowercase();
+        if let Some(at) = low.find(&words.to_lowercase()) {
+            if input.is_char_boundary(at) && input.is_char_boundary(at + words.len()) {
+                let rows: Vec<String> = choices
+                    .iter()
+                    .map(|c| format!("{}\t{}{}{}", c.display(), &input[..at], c.display(), &input[at + words.len()..]))
+                    .collect();
+                let list = choices.iter().enumerate().map(|(k, c)| format!("{}. {}", k + 1, c.display())).collect::<Vec<_>>().join("\n");
+                let mut out = reply("message", format!("Which folder do you mean by \"{words}\"?\n{list}\nPick one (click, or Up/Down then Tab), then press Enter. You will see the full path and can say yes or no. Nothing is made yet."));
+                state.picks = rows.iter().filter_map(|r| r.split_once('\t').map(|x| x.1.to_string())).collect();
+                out.plan = Some(rows.join("\n"));
+                return out;
+            }
         }
     }
     // Online answer for a plain question the parser and the assist could not handle.
@@ -474,6 +496,7 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
 pub fn new_state(root: std::path::PathBuf) -> UiState {
     let notes = startup_notes_from(&root);
     UiState {
+        picks: vec![],
         carried: std::time::Duration::ZERO,
         engine: Engine::new(root.clone()),
         root,

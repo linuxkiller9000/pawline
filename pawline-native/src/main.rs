@@ -763,7 +763,10 @@ impl App {
     fn zi_pick(&mut self) {
         if let Some(p) = self.zi_rows.get(self.zi_sel.min(self.zi_rows.len().saturating_sub(1))).cloned() {
             self.input.clear();
-            self.input.insert(&format!("list {p}"));
+            match p.split_once('\t') {
+                Some((_, cmd)) => self.input.insert(cmd),
+                None => self.input.insert(&format!("list {p}")),
+            }
         }
         self.zi_rows.clear();
         self.zi_sel = 0;
@@ -785,7 +788,7 @@ impl App {
         fill(pm, &rrect(PAD - 2.0, top, w - 2.0 * PAD + 4.0, total, 10.0), (36, 33, 58, 255));
         let sel = self.zi_sel.min(self.zi_rows.len() - 1);
         let rows = self.zi_rows.clone();
-        for (k, p) in rows.iter().enumerate() {
+        for (k, p) in rows.iter().map(|r| r.split('\t').next().unwrap_or("").to_string()).enumerate() {
             let y = top + 4.0 + k as f32 * rh;
             if k == sel {
                 fill(pm, &rrect(PAD + 2.0, y, w - 2.0 * PAD - 4.0, rh - 2.0, 6.0), (92, 80, 170, 255));

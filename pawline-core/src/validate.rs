@@ -18,6 +18,8 @@ pub struct Validator {
     pub dir_hints: Vec<PathBuf>,
     /// The request quoted its names: keep them literal ("lost in space" is one name).
     pub literal_names: std::cell::Cell<bool>,
+    /// The request came from a chooser pick: always show the full path and wait for a yes.
+    pub force_confirm: std::cell::Cell<bool>,
     hint_notes: std::cell::RefCell<Vec<String>>,
 }
 
@@ -25,7 +27,7 @@ impl Validator {
     pub fn new(root: PathBuf) -> Self {
         // The root itself may live behind a symlink; compare in canonical form.
         let root = std::fs::canonicalize(&root).unwrap_or(root);
-        Validator { root, app_env: None, dir_hints: vec![], literal_names: std::cell::Cell::new(false), hint_notes: std::cell::RefCell::new(vec![]) }
+        Validator { root, app_env: None, dir_hints: vec![], literal_names: std::cell::Cell::new(false), force_confirm: std::cell::Cell::new(false), hint_notes: std::cell::RefCell::new(vec![]) }
     }
 
     /// Words like "home container models" -> "models": drop a leading "home" and filler words.
@@ -77,6 +79,17 @@ impl Validator {
     /// its parent folders in that order (not necessarily adjacent). Ok(None): no folder has that name at all.
     /// Several matches, or a folder of that name that sits in other parents: ask, never choose.
     fn find_place(&self, words: &str, ctx: &ContextManager) -> Result<Option<PathBuf>, PawError> {
+        // A full path (what a pick from the chooser fills in) names its folder exactly.
+        let w = words.trim().trim_end_matches('.');
+        if w.starts_with('/') {
+            return Ok(match std::fs::canonicalize(w) {
+                Ok(c) if c.is_dir() && c.starts_with(&self.root) && !c.starts_with(self.root.join(crate::journal::STORE)) => {
+                    self.hint_notes.borrow_mut().push(format!("The destination is {}.", c.display()));
+                    Some(c)
+                }
+                _ => None,
+            });
+        }
         let parts = Self::place_parts(words);
         let Some((base, parents)) = parts.split_last() else { return Ok(None) };
         let mut all = self.place_candidates(base, ctx);
@@ -131,10 +144,7 @@ impl Validator {
                 self.hint_notes.borrow_mut().push(format!("I took \"{words}\" to mean the folder {}.", good[0].display()));
                 Ok(Some(good[0].clone()))
             }
-            _ => Err(PawError::Validation(format!(
-                "Several folders match \"{}\": {}. Say the full path, for example \"make a folder called x in <path>\".",
-                parts.join(" "), list(&good)
-            ))),
+            _ => Err(PawError::Ambiguous { words: words.trim().trim_end_matches('.').to_string(), choices: good }),
         }
     }
 
@@ -522,6 +532,9 @@ impl Validator {
             .collect();
         for n in self.hint_notes.borrow_mut().drain(..) {
             reasons.push(format!("{n} Check the path before saying yes."));
+        }
+        if self.force_confirm.get() && !ops.is_empty() {
+            reasons.push("You picked this folder from the chooser. Check the path before saying yes.".into());
         }
         let mut notes = Vec::new();
         if ops.iter().any(|o| matches!(o, Operation::SetWallpaper { no_backup_ok: true, .. })) {
