@@ -155,6 +155,38 @@ pub fn reply(kind: &str, text: String) -> UiReply {
 }
 
 
+/// Local task-step memory commands. None when the input is not one of them. Display/delete only.
+pub fn task_memory_command(input: &str, path: Option<&std::path::Path>) -> Option<String> {
+    use pawline_core::planmem as pm;
+    let low = input.trim().to_lowercase();
+    let low = low.trim_end_matches(['.', '!']);
+    let listing = matches!(low, "task steps" | "show task steps" | "task memory");
+    let forget = matches!(low, "forget task steps" | "clear task steps" | "forget task memory");
+    let ask = low.strip_prefix("what did you do for ");
+    if !listing && !forget && ask.is_none() {
+        return None;
+    }
+    let Some(p) = path else { return Some("No data folder.".into()) };
+    Some(if listing {
+        pm::describe_all(p)
+    } else if forget {
+        format!("Deleted {} saved task routine(s).", pm::forget_all(p))
+    } else {
+        pm::suggest(p, ask.unwrap_or("")).unwrap_or_else(|| "I have no saved steps for that request.".into())
+    })
+}
+
+/// Save completed steps as readable text, only when every step is a local file/app step.
+/// Answers, searches, online asks, pictures, undo and list are never remembered. Returns whether it saved.
+pub fn remember_steps(path: &std::path::Path, request: &str, ops: &[Operation], now: u64) -> bool {
+    use pawline_core::plan::Operation as O;
+    if ops.is_empty() || ops.iter().any(|o| matches!(o, O::Answer { .. } | O::Search { .. } | O::AskOnline { .. } | O::GenerateImage { .. } | O::Undo { .. } | O::List { .. })) {
+        return false;
+    }
+    let steps: Vec<String> = ops.iter().map(|o| o.describe()).collect();
+    pawline_core::planmem::record_success(path, request, &steps, now)
+}
+
 fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     // Local, offline controls for the search memory (Pawline's own file, nothing leaves the machine).
     {
@@ -174,29 +206,8 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             );
         }
     }
-    // Task-step memory controls (local file, suggestions only, nothing is ever replayed).
-    {
-        use pawline_core::planmem as pm;
-        let low = input.trim().to_lowercase();
-        let low = low.trim_end_matches(['.', '!']);
-        if matches!(low, "task steps" | "show task steps" | "task memory") {
-            return reply("message", pm::default_path().map_or("No data folder.".into(), |p| pm::describe_all(&p)));
-        }
-        if matches!(low, "forget task steps" | "clear task steps" | "forget task memory") {
-            return reply(
-                "message",
-                match pm::default_path() {
-                    Some(p) => format!("Deleted {} saved task routine(s).", pm::forget_all(&p)),
-                    None => "No data folder.".into(),
-                },
-            );
-        }
-        if let Some(rest) = low.strip_prefix("what did you do for ") {
-            return reply(
-                "message",
-                pm::default_path().and_then(|p| pm::suggest(&p, rest)).unwrap_or_else(|| "I have no saved steps for that request.".into()),
-            );
-        }
+    if let Some(m) = task_memory_command(input, pawline_core::planmem::default_path().as_deref()) {
+        return reply("message", m);
     }
     let refreshed;
     let input = if let Some(rest) = input.trim().strip_prefix("refresh:") {
@@ -261,11 +272,8 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     match r {
         Ok(Response::Executed(ops)) => {
             let done: Vec<String> = ops.iter().map(|o| o.op.describe()).collect();
-            // Remember only local, completed file/app steps as readable text (never answers, searches or online asks).
-            if ops.iter().all(|o| !matches!(o.op, pawline_core::plan::Operation::Answer { .. } | pawline_core::plan::Operation::Search { .. } | pawline_core::plan::Operation::AskOnline { .. } | pawline_core::plan::Operation::GenerateImage { .. } | pawline_core::plan::Operation::Undo { .. } | pawline_core::plan::Operation::List { .. })) {
-                if let Some(p) = pawline_core::planmem::default_path() {
-                    pawline_core::planmem::record_success(&p, input, &done, pawline_core::searchmem::now_secs());
-                }
+            if let Some(p) = pawline_core::planmem::default_path() {
+                remember_steps(&p, input, &ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>(), pawline_core::searchmem::now_secs());
             }
             let body = if ops.len() == 1
                 && matches!(ops[0].op, pawline_core::plan::Operation::Answer { .. })
@@ -433,6 +441,53 @@ fn finish(state: &mut UiState, r: UiReply, spent: std::time::Duration) -> UiRepl
     let total = state.carried + spent;
     state.carried = std::time::Duration::ZERO;
     timed(r, total)
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+    fn tdir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("pawline-bridge-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d.join("task-memory.json")
+    }
+
+    #[test]
+    fn only_local_file_steps_are_remembered() {
+        use pawline_core::plan::{Operation as O, SearchEngine};
+        let p = tdir("rem");
+        let dir = O::CreateDir { path: "/tmp/x".into() };
+        assert!(remember_steps(&p, "make x", &[dir.clone()], 1));
+        assert_eq!(pawline_core::planmem::load(&p).len(), 1);
+        for bad in [
+            O::Answer { text: "42".into() },
+            O::Search { engine: SearchEngine::Web, query: "q".into() },
+            O::AskOnline { text: "q".into() },
+            O::Undo { entry: 1, summary: "u".into() },
+            O::List { path: "/tmp".into() },
+        ] {
+            assert!(!remember_steps(&p, "other", &[bad.clone()], 1));
+            assert!(!remember_steps(&p, "mixed", &[dir.clone(), bad], 1));
+        }
+        assert!(!remember_steps(&p, "empty", &[], 1));
+        assert_eq!(pawline_core::planmem::load(&p).len(), 1);
+        assert!(!remember_steps(&p, "my password is abc make x", &[dir], 1));
+    }
+
+    #[test]
+    fn task_memory_commands_list_suggest_forget() {
+        let p = tdir("cmd");
+        assert!(task_memory_command("make a folder", Some(&p)).is_none());
+        assert_eq!(task_memory_command("Task steps.", Some(&p)).unwrap(), "No task steps saved.");
+        assert!(task_memory_command("what did you do for zzz", Some(&p)).unwrap().contains("no saved steps"));
+        remember_steps(&p, "make x", &[pawline_core::plan::Operation::CreateDir { path: "/tmp/x".into() }], 1);
+        assert!(task_memory_command("task steps", Some(&p)).unwrap().contains("make x"));
+        let s = task_memory_command("what did you do for make x", Some(&p)).unwrap();
+        assert!(s.contains("suggestion only") && s.contains("Create folder /tmp/x"));
+        assert!(task_memory_command("forget task steps", Some(&p)).unwrap().contains("Deleted 1"));
+        assert!(!p.exists());
+        assert_eq!(task_memory_command("task steps", None).unwrap(), "No data folder.");
+    }
 }
 
 #[cfg(test)]
