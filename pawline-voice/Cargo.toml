@@ -8,3 +8,4 @@ license = "GPL-3.0-only"
 [dependencies]
 pulseaudio = "0.3.2"
 sha2 = "0.10"
+ureq = "3.5.2"

@@ -12,6 +12,7 @@
 //!   matches a pinned value, and the load fails closed with `VoiceError`
 //!   (no extract-to-disk fallback).
 pub mod capture;
+pub mod download;
 pub mod runtime;
 
 #[derive(Debug)]
