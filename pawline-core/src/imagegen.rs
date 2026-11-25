@@ -113,8 +113,9 @@ pub fn clean_prompt(p: &str) -> Result<String, PawError> {
     if s.is_empty() {
         return Err(PawError::Validation("What should the picture show?".into()));
     }
-    if s.chars().count() > MAX_PROMPT_CHARS {
-        return Err(PawError::Validation(format!("That description is too long (limit {MAX_PROMPT_CHARS} characters).")));
+    let n = s.chars().count();
+    if n > MAX_PROMPT_CHARS {
+        return Err(PawError::Validation(format!("That description is {n} characters; the limit is {MAX_PROMPT_CHARS}. I won't cut it for you. Shorten it and ask again. Nothing was sent.")));
     }
     Ok(s)
 }
@@ -174,11 +175,16 @@ pub fn generate(
     dir: &Path,
     poll_every: Duration,
     give_up: Duration,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<PathBuf, PawError> {
     let prompt = clean_prompt(prompt)?;
+    let stop = || PawError::Exec("Cancelled. Nothing was saved.".into());
     match provider {
         ImageProvider::Pollinations => {
             let r = http.get(&pollinations_url(&prompt), &[])?;
+            if cancelled() {
+                return Err(stop());
+            }
             match r.status {
                 200 => save(dir, provider, &r.body),
                 402 | 429 => Err(limit_failure(provider, &r)),
@@ -209,6 +215,9 @@ pub fn generate(
                 .ok_or_else(|| PawError::Exec("AI Horde did not return a request id.".into()))?;
             let start = Instant::now();
             loop {
+                if cancelled() {
+                    return Err(stop());
+                }
                 let s = http.get(&format!("{HORDE_BASE}/generate/status/{}", enc(&id)), &[])?;
                 if s.status == 200 {
                     let v: serde_json::Value = serde_json::from_slice(&s.body).map_err(|_| PawError::Exec("AI Horde status was unreadable.".into()))?;
@@ -226,6 +235,9 @@ pub fn generate(
                         let img = http.get(url, &[])?;
                         if img.status != 200 {
                             return Err(PawError::Exec(format!("Could not download the finished image (HTTP {}).", img.status)));
+                        }
+                        if cancelled() {
+                            return Err(stop());
                         }
                         return save(dir, provider, &img.body);
                     }
@@ -293,7 +305,7 @@ mod tests {
     fn pollinations_saves_png() {
         let d = tmp("p1");
         let h = fake(vec![rep(200, "image/png", PNG)]);
-        let p = generate(&h, ImageProvider::Pollinations, "a red kite", &d, D0, D0).unwrap();
+        let p = generate(&h, ImageProvider::Pollinations, "a red kite", &d, D0, D0, &|| false).unwrap();
         assert!(p.extension().unwrap() == "png" && std::fs::read(&p).unwrap() == PNG);
         assert!(h.seen.borrow()[0].starts_with("GET https://image.pollinations.ai/prompt/a%20red%20kite"));
     }
@@ -303,7 +315,7 @@ mod tests {
         let mut r = rep(402, "application/json", b"{}");
         r.retry_after = Some(45);
         let h = fake(vec![r]);
-        let e = generate(&h, ImageProvider::Pollinations, "x", &d, D0, D0).unwrap_err().to_string();
+        let e = generate(&h, ImageProvider::Pollinations, "x", &d, D0, D0, &|| false).unwrap_err().to_string();
         assert!(e.contains("45 seconds") && e.contains("never pay"), "{e}");
         assert_eq!(h.seen.borrow().len(), 1);
         assert!(!d.exists());
@@ -312,7 +324,7 @@ mod tests {
     fn non_image_body_is_refused() {
         let d = tmp("p3");
         let h = fake(vec![rep(200, "image/png", b"<html>nope</html>")]);
-        assert!(generate(&h, ImageProvider::Pollinations, "x", &d, D0, D0).is_err());
+        assert!(generate(&h, ImageProvider::Pollinations, "x", &d, D0, D0, &|| false).is_err());
         assert!(!d.exists());
     }
     #[test]
@@ -324,7 +336,7 @@ mod tests {
             rep(200, "application/json", br#"{"done":true,"generations":[{"img":"https://r2.example/x.webp"}]}"#),
             rep(200, "image/webp", b"RIFF\x00\x00\x00\x00WEBPxx"),
         ]);
-        let p = generate(&h, ImageProvider::Horde, "a lighthouse", &d, D0, Duration::from_secs(5)).unwrap();
+        let p = generate(&h, ImageProvider::Horde, "a lighthouse", &d, D0, Duration::from_secs(5), &|| false).unwrap();
         assert!(p.extension().unwrap() == "webp");
         let seen = h.seen.borrow();
         assert!(seen[0].contains("key=0000000000") && seen[0].contains("\"prompt\":\"a lighthouse\"") && seen[0].contains("censor_nsfw"));
@@ -336,16 +348,32 @@ mod tests {
         let mut v = vec![rep(202, "application/json", br#"{"id":"q"}"#)];
         for _ in 0..200 { v.push(rep(200, "application/json", br#"{"done":false}"#)); }
         let h = fake(v);
-        let e = generate(&h, ImageProvider::Horde, "x", &d, Duration::from_millis(2), Duration::from_millis(20)).unwrap_err().to_string();
+        let e = generate(&h, ImageProvider::Horde, "x", &d, Duration::from_millis(2), Duration::from_millis(20), &|| false).unwrap_err().to_string();
         assert!(e.contains("had not finished") && !d.exists(), "{e}");
     }
     #[test]
     fn horde_refuses_http_image_link_and_censored() {
         let d = tmp("h3");
         let h = fake(vec![rep(202, "", br#"{"id":"q"}"#), rep(200, "", br#"{"done":true,"generations":[{"img":"http://x/y.png"}]}"#)]);
-        assert!(generate(&h, ImageProvider::Horde, "x", &d, D0, Duration::from_secs(1)).unwrap_err().to_string().contains("non-https"));
+        assert!(generate(&h, ImageProvider::Horde, "x", &d, D0, Duration::from_secs(1), &|| false).unwrap_err().to_string().contains("non-https"));
         let h = fake(vec![rep(202, "", br#"{"id":"q"}"#), rep(200, "", br#"{"done":true,"generations":[{"img":"https://x/y.png","censored":true}]}"#)]);
-        assert!(generate(&h, ImageProvider::Horde, "x", &d, D0, Duration::from_secs(1)).unwrap_err().to_string().contains("filtered"));
+        assert!(generate(&h, ImageProvider::Horde, "x", &d, D0, Duration::from_secs(1), &|| false).unwrap_err().to_string().contains("filtered"));
+    }
+
+    #[test]
+    fn cancel_discards_late_result_and_saves_nothing() {
+        let d = tmp("c1");
+        let h = fake(vec![rep(200, "image/png", PNG)]);
+        let e = generate(&h, ImageProvider::Pollinations, "x", &d, D0, D0, &|| true).unwrap_err().to_string();
+        assert!(e.contains("Cancelled") && !d.exists(), "{e}");
+        let h = fake(vec![rep(202, "", br#"{"id":"q"}"#)]);
+        let e = generate(&h, ImageProvider::Horde, "x", &d, D0, Duration::from_secs(1), &|| true).unwrap_err().to_string();
+        assert!(e.contains("Cancelled") && !d.exists());
+    }
+    #[test]
+    fn long_prompt_is_refused_not_truncated() {
+        let e = clean_prompt(&"y".repeat(450)).unwrap_err().to_string();
+        assert!(e.contains("450") && e.contains("won't cut it"), "{e}");
     }
 
     /// Live smoke, run by hand only: cargo test -p pawline-core live_ -- --ignored --nocapture
@@ -354,7 +382,7 @@ mod tests {
     fn live_pollinations() {
         let d = tmp("live-p");
         let h = UreqHttp::new(Duration::from_secs(90));
-        let p = generate(&h, ImageProvider::Pollinations, "a small red kite over a green hill", &d, D0, D0);
+        let p = generate(&h, ImageProvider::Pollinations, "a small red kite over a green hill", &d, D0, D0, &|| false);
         println!("RESULT {:?} {:?}", p, p.as_ref().ok().map(|p| std::fs::metadata(p).map(|m| m.len())));
     }
     #[test]
@@ -362,7 +390,7 @@ mod tests {
     fn live_horde() {
         let d = tmp("live-h");
         let h = UreqHttp::new(Duration::from_secs(90));
-        let p = generate(&h, ImageProvider::Horde, "a small red kite over a green hill", &d, Duration::from_secs(4), Duration::from_secs(100));
+        let p = generate(&h, ImageProvider::Horde, "a small red kite over a green hill", &d, Duration::from_secs(4), Duration::from_secs(100), &|| false);
         println!("RESULT {:?} {:?}", p, p.as_ref().ok().map(|p| std::fs::metadata(p).map(|m| m.len())));
     }
 }

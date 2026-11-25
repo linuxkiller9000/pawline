@@ -8,6 +8,15 @@ use pawline_core::plan::{Operation, SearchEngine};
 use pawline_needle::assist::NeedleAssist;
 /// UI backend: confined fs execution plus the explicit online search the
 /// user asked for by name.
+static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CANCEL_UPTO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Esc while a picture is being made: the wait ends at once and a late result is thrown away.
+pub fn request_cancel() {
+    use std::sync::atomic::Ordering::SeqCst;
+    CANCEL_UPTO.store(GEN.load(SeqCst), SeqCst);
+}
+
 struct UiBackend {
     inner: DirectFsBackend,
 }
@@ -28,15 +37,35 @@ impl ExecutionBackend for UiBackend {
                 .ok_or_else(|| PawError::Exec("HOME is not set; can't pick the Pictures folder".into()))?
                 .join("Pictures")
                 .join("Pawline");
-            let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(120));
-            let path = pawline_core::imagegen::generate(
-                &http,
-                *provider,
-                prompt,
-                &dir,
-                std::time::Duration::from_secs(4),
-                std::time::Duration::from_secs(240),
-            )?;
+            use std::sync::atomic::Ordering::SeqCst;
+            let my = GEN.fetch_add(1, SeqCst) + 1;
+            let (provider, prompt) = (*provider, prompt.clone());
+            let (tx, rx) = std::sync::mpsc::channel();
+            // The request runs on its own thread so Esc can end the wait now; a late
+            // answer from that thread is dropped before anything is written.
+            std::thread::spawn(move || {
+                let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(120));
+                let r = pawline_core::imagegen::generate(
+                    &http,
+                    provider,
+                    &prompt,
+                    &dir,
+                    std::time::Duration::from_secs(4),
+                    std::time::Duration::from_secs(240),
+                    &|| CANCEL_UPTO.load(SeqCst) >= my,
+                );
+                let _ = tx.send(r);
+            });
+            let path = loop {
+                if CANCEL_UPTO.load(SeqCst) >= my {
+                    return Err(PawError::Exec("Cancelled. Nothing was saved, and a late answer will be discarded.".into()));
+                }
+                match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                    Ok(r) => break r?,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(_) => return Err(PawError::Exec("The picture request stopped unexpectedly; nothing was saved.".into())),
+                }
+            };
             return Ok(OpOutcome { op: op.clone(), detail: format!("Saved {}", path.display()) });
         }
         if let Operation::OpenApp { argv, .. } = op {
@@ -139,15 +168,18 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             r
         }
         Ok(Response::Message(m)) => reply("message", m),
-        Ok(Response::Failed { completed, failed, error, remaining }) => reply(
-            "failed",
-            format!(
-                "Stopped partway. Completed {} step(s). Failed: {failed} ({error}). Not attempted: {remaining}.",
-                completed.len()
-            ),
-        ),
+        Ok(Response::Failed { completed, failed, error, remaining }) => reply("failed", fail_text(completed.len(), &failed.to_string(), &error.to_string(), remaining.to_string())),
         Err(e) => reply("error", e.to_string()),
     }
+}
+
+/// A single step that failed with nothing else done reads as one plain sentence.
+fn fail_text(done: usize, failed: &str, error: &str, remaining: String) -> String {
+    let plain = error.strip_prefix("Execution failed: ").unwrap_or(error);
+    if done == 0 && remaining == "0" {
+        return plain.to_string();
+    }
+    format!("Stopped partway. Completed {done} step(s). Failed: {failed} ({error}). Not attempted: {remaining}.")
 }
 
 /// Put any journal recovery findings in front of the reply, once.
@@ -192,10 +224,7 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
             };
             reply("executed", body)
         }
-        Ok(Response::Failed { completed, failed, error, remaining }) => reply(
-            "failed",
-            format!("Stopped partway. Completed {}. Failed: {failed} ({error}). Not attempted: {remaining}.", completed.len()),
-        ),
+        Ok(Response::Failed { completed, failed, error, remaining }) => reply("failed", fail_text(completed.len(), &failed.to_string(), &error.to_string(), remaining.to_string())),
         _ => reply("error", "unexpected state".into()),
     }
 }

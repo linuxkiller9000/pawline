@@ -313,7 +313,7 @@ impl App {
         let (w, h) = (self.w as f32, self.h as f32);
         fill(pm, &rrect(0.0, 0.0, w, h, 18.0), (30, 28, 40, 245));
         self.orb(pm, 34.0, 32.0, 17.0, self.busy);
-        let title = if self.busy { "Pawline  (thinking...)" } else { "Pawline" };
+        let title = if self.busy { "Pawline  (working, Esc cancels)" } else { "Pawline" };
         self.text(pm, title, 62.0, 38.0, 18.0, (235, 230, 250), (0.0, h));
         // collapse button
         self.r_collapse = (w - 44.0, 14.0, 30.0, 30.0);
@@ -557,6 +557,9 @@ impl App {
             return;
         }
         match e.keysym {
+            Keysym::Escape if self.busy => {
+                bridge::request_cancel();
+            }
             Keysym::Escape => self.set_expanded(false),
             Keysym::Return | Keysym::KP_Enter => {
                 self.submit();
