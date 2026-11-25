@@ -1232,7 +1232,14 @@ fn main() {
         run_terminal();
         return;
     }
-    let conn = Connection::connect_to_env().expect("no Wayland compositor found (WAYLAND_DISPLAY)");
+    let conn = match Connection::connect_to_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Could not connect to the Wayland compositor ({e}). Starting terminal mode (same commands, same confirmations).");
+            run_terminal();
+            return;
+        }
+    };
     let (globals, queue) = registry_queue_init(&conn).unwrap();
     let qh = queue.handle();
     let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor missing");
