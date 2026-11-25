@@ -236,6 +236,10 @@ struct App {
     input_box_top: f32,
     input_lines: Vec<(usize, usize)>,
     dragging: bool,
+    /// Orb drag: (pointer x, y at the last step, moved at all?). Compact orb on a layer surface only.
+    orb_drag: Option<(f64, f64, bool, (i32, i32))>,
+    /// Orb position as layer margins (top, right), kept in memory only.
+    margin: (i32, i32),
     bubbles: Vec<((f32, f32, f32, f32), String)>,
     toast: Option<&'static str>,
     /// Message being replied to: (full text without the Took line, short preview). Local only.
@@ -608,7 +612,12 @@ impl App {
             self.h = COMPACT;
         }
         match &self.surf {
-            Surf::Layer(l) => l.set_size(self.w, self.h),
+            Surf::Layer(l) => {
+                // The open card docks in the corner so it always fits the screen; the orb returns to where it was left.
+                let m = if exp { (12, 12) } else { self.margin };
+                l.set_margin(m.0, m.1, 0, 0);
+                l.set_size(self.w, self.h)
+            }
             Surf::Win(win) => {
                 win.set_min_size(Some((self.w, self.h)));
                 win.set_max_size(Some((self.w, self.h)));
@@ -1033,13 +1042,45 @@ impl KeyboardHandler for App {
     }
 }
 impl PointerHandler for App {
-    fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_pointer::WlPointer, evs: &[PointerEvent]) {
+    fn pointer_frame(&mut self, conn: &Connection, _: &QueueHandle<Self>, _: &wl_pointer::WlPointer, evs: &[PointerEvent]) {
         for e in evs {
             self.ptr_pos = e.position;
             match e.kind {
+                PointerEventKind::Press { button: 274, .. } if !self.expanded => {
+                    // middle click on the orb: back to the corner
+                    self.margin = (12, 12);
+                    if let Surf::Layer(l) = &self.surf {
+                        l.set_margin(12, 12, 0, 0);
+                    }
+                    self.draw();
+                }
                 PointerEventKind::Press { button: 273, .. } => self.right_click(),
+                PointerEventKind::Press { .. } if !self.expanded && matches!(self.surf, Surf::Layer(_)) => {
+                    self.orb_drag = Some((e.position.0, e.position.1, false, self.margin));
+                }
                 PointerEventKind::Press { .. } => self.click(),
+                PointerEventKind::Release { .. } if self.orb_drag.is_some() => {
+                    let moved = self.orb_drag.take().is_some_and(|d| d.2);
+                    if !moved {
+                        self.set_expanded(true);
+                    }
+                }
                 PointerEventKind::Release { .. } => self.dragging = false,
+                PointerEventKind::Motion { .. } if self.orb_drag.is_some() => {
+                    // sway keeps reporting positions relative to the surface's place at the press, so the
+                    // total move is (position - press position) from the margins at the press.
+                    let (px, py, moved, m0) = self.orb_drag.unwrap();
+                    let (dx, dy) = (e.position.0 - px, e.position.1 - py);
+                    if moved || dx.abs() + dy.abs() >= 6.0 {
+                        self.margin = ((m0.0 + dy.round() as i32).max(0), (m0.1 - dx.round() as i32).max(0));
+                        if let Surf::Layer(l) = &self.surf {
+                            l.set_margin(self.margin.0, self.margin.1, 0, 0);
+                        }
+                        self.draw();
+                        let _ = conn.flush();
+                        self.orb_drag = Some((px, py, true, m0));
+                    }
+                }
                 PointerEventKind::Motion { .. } if self.dragging => {
                     let i = self.idx_at(e.position.0 as f32, e.position.1 as f32);
                     self.input.set_caret(i, true);
@@ -1334,6 +1375,8 @@ fn main() {
         input_box_top: 0.0,
         input_lines: vec![(0, 0)],
         dragging: false,
+        orb_drag: None,
+        margin: (12, 12),
         bubbles: Vec::new(),
         toast: None,
         reply: None,
