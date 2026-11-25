@@ -126,3 +126,43 @@ fn undo_of_an_untouched_copy_moves_it_to_the_trash() {
     assert!(std::fs::read_dir(trash).unwrap().flatten().any(|f| f.path().join("a.txt").exists()));
     assert_eq!(std::fs::read(root.join("docs/a.txt")).unwrap(), b"one");
 }
+
+fn copied_tree(tag: &str) -> (PathBuf, Engine, DirectFsBackend) {
+    let (root, mut e, be) = setup(tag);
+    std::fs::create_dir_all(root.join("docs/deep/er")).unwrap();
+    std::fs::create_dir(root.join("backup")).unwrap();
+    std::fs::write(root.join("docs/deep/er/f.txt"), b"one").unwrap();
+    assert!(matches!(run(&mut e, &be, "copy docs to backup"), Response::Executed(_)));
+    (root, e, be)
+}
+
+#[test]
+fn undo_of_a_copy_refuses_nested_edit_and_nested_replacement_and_keeps_everything() {
+    let (root, mut e, be) = copied_tree("nested1");
+    // edit deep inside the copy (same folder, size changes)
+    std::fs::write(root.join("backup/docs/deep/er/f.txt"), b"one and more").unwrap();
+    assert!(matches!(run(&mut e, &be, "undo"), Response::Failed { .. }));
+    assert_eq!(std::fs::read(root.join("backup/docs/deep/er/f.txt")).unwrap(), b"one and more");
+    let (root, mut e, be) = copied_tree("nested2");
+    // same-size replacement by a different file deep inside the copy
+    let f = root.join("backup/docs/deep/er/f.txt");
+    std::fs::write(root.join("backup/docs/deep/er/g.tmp"), b"two").unwrap();
+    std::fs::rename(root.join("backup/docs/deep/er/g.tmp"), &f).unwrap();
+    assert!(matches!(run(&mut e, &be, "undo"), Response::Failed { .. }));
+    assert_eq!(std::fs::read(&f).unwrap(), b"two");
+}
+
+#[test]
+fn undo_of_a_legacy_copy_entry_without_fingerprint_fails_closed() {
+    let (root, mut e, be) = setup("legacycopy");
+    std::fs::write(root.join("a.txt"), b"x").unwrap();
+    std::fs::create_dir_all(root.join(".local/share/pawline")).unwrap();
+    std::fs::write(root.join("b.txt"), b"replacement data").unwrap();
+    let j = r#"{"id":1,"kind":"copy","a":"b.txt"}"#;
+    let _ = j;
+    let entry = pawline_core::journal::Entry { id: 1, kind: "copy".into(), a: "b.txt".into(), b: None, meta: None };
+    let text = format!("{}\n{}\n", entry.intent_line(), pawline_core::journal::commit_line(1, None));
+    std::fs::write(root.join(".local/share/pawline/journal.jsonl"), text).unwrap();
+    assert!(matches!(run(&mut e, &be, "undo"), Response::Failed { .. }));
+    assert_eq!(std::fs::read(root.join("b.txt")).unwrap(), b"replacement data");
+}
