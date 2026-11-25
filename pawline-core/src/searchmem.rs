@@ -174,6 +174,53 @@ pub fn describe_all(path: &Path) -> String {
     out
 }
 
+/// Questions whose answer changes (prices, stock, hours, news, policies...). A saved answer is never shown
+/// as current for these: they are always fetched again, and a saved copy is only a labelled fallback.
+pub fn time_sensitive(query: &str) -> bool {
+    let q = format!(" {} ", normalize(query));
+    const WORDS: &[&str] = &[
+        "price", "prices", "cost", "costs", "cheap", "cheapest", "how much", "in stock", "stock", "available", "availability",
+        "open now", "opening hours", "hours", "weather", "forecast", "score", "scores", "news", "today", "tonight", "tomorrow",
+        "latest", "current", "currently", "now", "policy", "policies", "deadline", "schedule", "flight", "flights", "rate",
+        "rates", "exchange", "deal", "deals", "sale", "discount", "release date", "version", "ticket", "tickets", "booking",
+    ];
+    WORDS.iter().any(|w| q.contains(&format!(" {w} ")))
+}
+
+/// Answer a search from memory or the network. `fetch` is only called when needed.
+/// Fresh saved answers are shown with their date and source (never for time-sensitive questions).
+/// If the fetch fails, a saved copy is shown labelled as possibly out of date.
+pub fn answer<E>(path: &Path, engine: SearchEngine, query: &str, now: u64, force: bool, fetch: impl FnOnce() -> Result<String, E>) -> Result<String, E> {
+    let saved = lookup(path, engine, query, now);
+    let sensitive = time_sensitive(query);
+    if let (Some((e, true)), false, false) = (&saved, force, sensitive) {
+        bump(path, engine, query);
+        return Ok(format!(
+            "From memory (saved {} from {}):\n{}\n(From memory, saved {}.) To fetch it again, type: refresh: <the same request>",
+            date_of(e.fetched),
+            e.source,
+            e.text,
+            date_of(e.fetched)
+        ));
+    }
+    match fetch() {
+        Ok(t) => {
+            store(path, engine, query, &t, now);
+            Ok(t)
+        }
+        Err(err) => match saved {
+            Some((e, _)) => Ok(format!(
+                "Couldn't reach the source, so this is the saved answer from {} ({}), it may be out of date:\n{}\n(Saved {}. Don't rely on it for prices, availability, policies or anything that changes.)",
+                date_of(e.fetched),
+                e.source,
+                e.text,
+                date_of(e.fetched)
+            )),
+            None => Err(err),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +284,42 @@ mod tests {
         assert_eq!(date_of(0), "1970-01-01");
         assert_eq!(date_of(1_700_000_000), "2023-11-14");
         assert_eq!(date_of(1_788_000_000), "2026-08-29");
+    }
+
+    #[test]
+    fn answer_paths_are_deterministic() {
+        let p = tmp("ans");
+        let boom = || -> Result<String, String> { panic!("must not fetch") };
+        let down = || -> Result<String, String> { Err("offline".into()) };
+        // nothing saved + offline = the error, nothing invented
+        assert_eq!(answer(&p, SearchEngine::Wiki, "cats", 1000, false, down), Err("offline".into()));
+        // fetch stores
+        assert_eq!(answer(&p, SearchEngine::Wiki, "cats", 1000, false, || Ok::<_, String>("Cats text".into())).unwrap(), "Cats text");
+        // fresh: from memory, no fetch, dated header and trailing label
+        let r = answer(&p, SearchEngine::Wiki, "cats", 2000, false, boom).unwrap();
+        assert!(r.starts_with("From memory (saved ") && r.contains("(From memory, saved ") && r.contains("refresh:"));
+        // refresh forces a fetch
+        assert_eq!(answer(&p, SearchEngine::Wiki, "cats", 2000, true, || Ok::<_, String>("New".into())).unwrap(), "New");
+        // expired + offline = labelled stale copy
+        let r = answer(&p, SearchEngine::Wiki, "cats", 2000 + 30 * 86_400, false, down).unwrap();
+        assert!(r.contains("may be out of date") && r.contains("Don't rely on it") && r.contains("New"));
+    }
+
+    #[test]
+    fn time_sensitive_questions_are_never_served_as_current() {
+        let p = tmp("ts");
+        for q in ["price of rtx 3060", "is the shop open now", "weather in cairo", "latest news on arch linux", "return policy for dell", "flight to paris"] {
+            assert!(time_sensitive(q), "{q}");
+        }
+        for q in ["cats", "capital of france", "who wrote hamlet"] {
+            assert!(!time_sensitive(q), "{q}");
+        }
+        store(&p, SearchEngine::Web, "price of milk", "Milk is 2.50", 1000);
+        // fresh entry, but the question is time-sensitive: fetch again
+        let r = answer(&p, SearchEngine::Web, "price of milk", 1001, false, || Ok::<_, String>("Milk is 3.10".into())).unwrap();
+        assert_eq!(r, "Milk is 3.10");
+        // offline: the old copy is shown only with the warning
+        let r = answer(&p, SearchEngine::Web, "price of milk", 1002, false, || Err::<String, String>("offline".into())).unwrap();
+        assert!(r.contains("may be out of date") && r.contains("prices, availability"));
     }
 }

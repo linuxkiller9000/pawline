@@ -70,31 +70,7 @@ fn cached_search(engine: SearchEngine, query: &str) -> Result<String, PawError> 
     let Some(path) = sm::default_path() else { return pawline_core::search::run(engine, query) };
     let now = sm::now_secs();
     let force = FORCE_REFRESH.swap(false, std::sync::atomic::Ordering::SeqCst);
-    let saved = sm::lookup(&path, engine, query, now);
-    if let (Some((e, true)), false) = (&saved, force) {
-        sm::bump(&path, engine, query);
-        return Ok(format!(
-            "From memory (saved {} from {}):\n{}\nTo fetch it again, type: refresh: <the same request>",
-            sm::date_of(e.fetched),
-            e.source,
-            e.text
-        ));
-    }
-    match pawline_core::search::run(engine, query) {
-        Ok(t) => {
-            sm::store(&path, engine, query, &t, now);
-            Ok(t)
-        }
-        Err(err) => match saved {
-            Some((e, _)) => Ok(format!(
-                "Couldn't reach the source, so this is the saved answer from {} ({}), it may be out of date:\n{}",
-                sm::date_of(e.fetched),
-                e.source,
-                e.text
-            )),
-            None => Err(err),
-        },
-    }
+    sm::answer(&path, engine, query, now, force, || pawline_core::search::run(engine, query))
 }
 
 struct UiBackend {
