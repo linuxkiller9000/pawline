@@ -63,3 +63,7 @@ Nothing is corrected or guessed. This does not prove the assist understood you: 
 ### Saved actions: what "fixed template" means
 
 A saved action stores the command text and the planned steps. On every run the steps are re-validated against the current disk, the assist is never used, and you get a fresh confirmation card. If the disk no longer matches the saved plan, the run is refused and both plans are shown. This does NOT freeze content: if the file at the same path has changed since you saved the action, a copy runs with the new content. Names are case-sensitive and exact. Status: source only, not part of any released binary.
+
+### Copy destination
+
+The destination of "copy X to Y" must be an existing folder. If Y does not exist it is treated as a folder name and the copy fails without changing anything. Copying to a new file name is not supported yet.
