@@ -80,6 +80,8 @@ mod menu_tests {
 const W: u32 = 440;
 const H: u32 = 470;
 const COMPACT: u32 = 68;
+const BAR_W: u32 = 300;
+const BAR_H: u32 = 40;
 const PX: f32 = 15.0;
 const LH: f32 = 20.0;
 const PAD: f32 = 14.0;
@@ -236,6 +238,8 @@ struct App {
     input_box_top: f32,
     input_lines: Vec<(usize, usize)>,
     dragging: bool,
+    /// Closed form is a slim talk-to-it strip instead of the orb (right-click toggles). In memory only.
+    bar: bool,
     /// Orb drag: (pointer x, y at the last step, moved at all?). Compact orb on a layer surface only.
     orb_drag: Option<(f64, f64, bool, (i32, i32))>,
     /// Orb position as layer margins (top, right), kept in memory only.
@@ -399,7 +403,9 @@ impl App {
     fn draw(&mut self) {
         let (w, h) = (self.w, self.h);
         let mut pm = Pixmap::new(w, h).unwrap();
-        if !self.expanded {
+        if !self.expanded && self.bar {
+            self.draw_bar(&mut pm);
+        } else if !self.expanded {
             self.orb(&mut pm, w as f32 / 2.0, h as f32 / 2.0, 24.0, self.busy);
         } else {
             self.draw_card(&mut pm);
@@ -608,8 +614,7 @@ impl App {
             self.w = W;
             self.h = H;
         } else {
-            self.w = COMPACT;
-            self.h = COMPACT;
+            (self.w, self.h) = if self.bar { (BAR_W, BAR_H) } else { (COMPACT, COMPACT) };
         }
         match &self.surf {
             Surf::Layer(l) => {
@@ -624,6 +629,43 @@ impl App {
             }
         }
         self.draw();
+    }
+
+    /// Closed form: orb <-> slim strip you can type into.
+    fn toggle_bar(&mut self) {
+        if self.expanded {
+            return;
+        }
+        self.bar = !self.bar;
+        self.set_expanded(false);
+    }
+
+    fn draw_bar(&mut self, pm: &mut Pixmap) {
+        let (w, h) = (self.w as f32, self.h as f32);
+        fill(pm, &rrect(0.0, 0.0, w, h, 14.0), (30, 28, 40, 245));
+        self.orb(pm, 20.0, h / 2.0, 11.0, self.busy);
+        let chars: Vec<char> = self.input.text().chars().collect();
+        if chars.is_empty() {
+            self.text(pm, "Ask Pawline...", 40.0, h / 2.0 + 5.0, PX, (150, 145, 175), (0.0, w));
+            return;
+        }
+        let widths: Vec<f32> = chars.iter().map(|c| self.adv(*c, PX)).collect();
+        let avail = w - 40.0 - 12.0;
+        let caret = self.input.caret().min(chars.len());
+        let mut start = 0;
+        while start < caret && widths[start..caret].iter().sum::<f32>() > avail - 4.0 {
+            start += 1;
+        }
+        let mut end = start;
+        let mut used = 0.0;
+        while end < chars.len() && used + widths[end] <= avail {
+            used += widths[end];
+            end += 1;
+        }
+        let shown: String = chars[start..end].iter().collect();
+        self.text(pm, &shown, 40.0, h / 2.0 + 5.0, PX, (255, 255, 255), (0.0, w));
+        let cx: f32 = widths[start..caret.min(end)].iter().sum();
+        fill(pm, &rrect(40.0 + cx, h / 2.0 - 9.0, 2.0, 18.0, 1.0), (255, 255, 255, 255));
     }
 
     fn push(&mut self, user: bool, kind: &str, text: String, quote: Option<String>) {
@@ -735,7 +777,7 @@ impl App {
 
     fn key(&mut self, e: KeyEvent) {
         self.toast = None;
-        if !self.expanded {
+        if !self.expanded && !self.bar {
             if matches!(e.keysym, Keysym::Return | Keysym::KP_Enter | Keysym::space) {
                 self.set_expanded(true);
             }
@@ -799,8 +841,14 @@ impl App {
                 // a complete "/skills" runs; a partial "/fi" is completed from the highlighted row first
                 let complete = SKILL_MENU.iter().any(|m| m.0 == "/skills" && self.input.text().eq_ignore_ascii_case(m.0));
                 if !complete && self.menu_pick() {
+                } else if !self.expanded && self.input.text().trim().is_empty() {
+                    self.set_expanded(true);
                 } else {
                     self.submit();
+                    if !self.expanded {
+                        // asked from the strip: open the card so the answer and any confirm card are seen
+                        self.set_expanded(true);
+                    }
                 }
                 self.draw();
             }
@@ -1054,6 +1102,7 @@ impl PointerHandler for App {
                     }
                     self.draw();
                 }
+                PointerEventKind::Press { button: 273, .. } if !self.expanded => self.toggle_bar(),
                 PointerEventKind::Press { button: 273, .. } => self.right_click(),
                 PointerEventKind::Press { .. } if !self.expanded && matches!(self.surf, Surf::Layer(_)) => {
                     self.orb_drag = Some((e.position.0, e.position.1, false, self.margin));
@@ -1061,7 +1110,8 @@ impl PointerHandler for App {
                 PointerEventKind::Press { .. } => self.click(),
                 PointerEventKind::Release { .. } if self.orb_drag.is_some() => {
                     let moved = self.orb_drag.take().is_some_and(|d| d.2);
-                    if !moved {
+                    // in the strip only the orb end opens the card; the rest just takes typing
+                    if !moved && (!self.bar || self.ptr_pos.0 < 40.0) {
                         self.set_expanded(true);
                     }
                 }
@@ -1375,6 +1425,7 @@ fn main() {
         input_box_top: 0.0,
         input_lines: vec![(0, 0)],
         dragging: false,
+        bar: false,
         orb_drag: None,
         margin: (12, 12),
         bubbles: Vec::new(),
