@@ -128,6 +128,11 @@ struct App {
     voice_preview: bool,
     /// True while the text in the input box came from speech (stays set while edited).
     voice_origin: bool,
+    /// Edit cursor as a char index into `input`, first visible wrapped line, and layout memo.
+    cursor: usize,
+    input_top: usize,
+    input_follow: bool,
+    input_lines_n: usize,
     /// Height reserved under the chat for the (wrapping) input box.
     bottom: f32,
 }
@@ -319,12 +324,27 @@ impl App {
         if self.confirm.is_some() {
             self.draw_confirm(pm, w, h, inner_w);
         } else {
-            // wrapping input box: the whole text stays readable (last 6 lines if longer)
-            let shown = format!("{}|", self.input);
-            let mut lines = self.wrap(&shown, PX, inner_w - 20.0);
-            if lines.len() > 6 {
-                lines.drain(..lines.len() - 6);
+            // wrapping input box. Up to 6 lines are visible; longer text scrolls
+            // (Up/Down/PageUp/PageDown) and the cursor line is kept in view when editing.
+            let cur = self.cursor.min(self.input.chars().count());
+            let mut shown: String = self.input.chars().take(cur).collect();
+            shown.push('\u{1}');
+            shown.extend(self.input.chars().skip(cur));
+            let all = self.wrap(&shown, PX, inner_w - 20.0);
+            self.input_lines_n = all.len();
+            let cur_line = all.iter().position(|l| l.contains('\u{1}')).unwrap_or(0);
+            let max_top = all.len().saturating_sub(6);
+            if self.input_follow {
+                if cur_line < self.input_top {
+                    self.input_top = cur_line;
+                } else if cur_line >= self.input_top + 6 {
+                    self.input_top = cur_line + 1 - 6;
+                }
             }
+            self.input_top = self.input_top.min(max_top);
+            let mut lines: Vec<String> = all[self.input_top..(self.input_top + 6).min(all.len())].iter().map(|l| l.replace('\u{1}', "|")).collect();
+            let more_above = self.input_top > 0;
+            let more_below = self.input_top + 6 < all.len();
             let n = lines.len().max(1) as f32;
             let box_h = 20.0 + n * LH;
             self.bottom = (box_h + 24.0).max(BOTTOM);
@@ -334,8 +354,15 @@ impl App {
             for (i, l) in lines.iter().enumerate() {
                 self.text(pm, l, PAD + 8.0, h - 12.0 - box_h + 8.0 + (i as f32 + 1.0) * LH - 5.0, PX, col, (0.0, h));
             }
+            let mut hint = String::new();
             if self.voice_origin {
-                self.text(pm, "from voice: check the words, Enter sends", PAD + 8.0, h - 14.0 - box_h, 12.0, (170, 165, 195), (0.0, h));
+                hint.push_str("from voice: check the words, Enter sends. ");
+            }
+            if more_above || more_below {
+                hint.push_str(if more_above && more_below { "more above and below (Up/Down)" } else if more_above { "more above (Up)" } else { "more below (Down)" });
+            }
+            if !hint.is_empty() {
+                self.text(pm, &hint, PAD + 8.0, h - 14.0 - box_h, 12.0, (190, 185, 215), (0.0, h));
             }
         }
     }
@@ -508,6 +535,8 @@ impl App {
             return;
         }
         self.input.clear();
+        self.cursor = 0;
+        self.input_top = 0;
         self.voice_preview = false;
         self.push(true, "user", t.clone());
         self.busy = true;
@@ -543,7 +572,10 @@ impl App {
             if r.kind == "voice-text" {
                 // Preview only: the text goes into the input box. Nothing is sent
                 // until the user presses Enter, and any plan still needs Do it.
+                self.cursor = r.text.chars().count();
                 self.input = r.text;
+                self.input_top = 0;
+                self.input_follow = true;
                 self.voice_preview = true;
                 self.voice_origin = true;
                 self.push(false, "message", "Voice transcript is in the box below. Edit it if needed, then press Enter to send. Even then, nothing runs until you press Do it on the plan.".into());
@@ -627,27 +659,55 @@ impl App {
                 self.submit();
                 self.draw();
             }
-            Keysym::BackSpace => {
-                self.input.pop();
+            Keysym::BackSpace | Keysym::Delete if !self.busy => {
+                let n = self.input.chars().count();
+                let cur = self.cursor.min(n);
+                let at = if e.keysym == Keysym::BackSpace { cur.checked_sub(1) } else if cur < n { Some(cur) } else { None };
+                if let Some(i) = at {
+                    let bi = self.input.char_indices().nth(i).map(|(b, _)| b).unwrap();
+                    self.input.remove(bi);
+                    self.cursor = i;
+                }
+                self.input_follow = true;
                 if self.input.is_empty() {
                     self.voice_origin = false;
                     self.voice_preview = false;
                 }
                 self.draw();
             }
-            Keysym::Page_Up | Keysym::Up => {
-                self.scroll = (self.scroll + page).min(self.chat_max);
+            Keysym::Left | Keysym::Right | Keysym::Home | Keysym::End if !self.busy => {
+                let n = self.input.chars().count();
+                self.cursor = match e.keysym {
+                    Keysym::Left => self.cursor.min(n).saturating_sub(1),
+                    Keysym::Right => (self.cursor + 1).min(n),
+                    Keysym::Home => 0,
+                    _ => n,
+                };
+                self.input_follow = true;
                 self.draw();
             }
-            Keysym::Page_Down | Keysym::Down => {
-                self.scroll = (self.scroll - page).max(0.0);
+            Keysym::Page_Up | Keysym::Up | Keysym::Page_Down | Keysym::Down => {
+                let up = matches!(e.keysym, Keysym::Page_Up | Keysym::Up);
+                if self.input_lines_n > 6 {
+                    self.input_follow = false;
+                    self.input_top = if up { self.input_top.saturating_sub(1) } else { (self.input_top + 1).min(self.input_lines_n - 6) };
+                } else if up {
+                    self.scroll = (self.scroll + page).min(self.chat_max);
+                } else {
+                    self.scroll = (self.scroll - page).max(0.0);
+                }
                 self.draw();
             }
             _ => {
                 if !self.busy {
                     if let Some(t) = e.utf8 {
                         if !t.is_empty() && !t.chars().any(|c| c.is_control()) {
-                            self.input.push_str(&t);
+                            let n = self.input.chars().count();
+                            let cur = self.cursor.min(n);
+                            let bi = self.input.char_indices().nth(cur).map(|(b, _)| b).unwrap_or(self.input.len());
+                            self.input.insert_str(bi, &t);
+                            self.cursor = cur + t.chars().count();
+                            self.input_follow = true;
                             self.draw();
                         }
                     }
@@ -1028,6 +1088,10 @@ fn main() {
         voice_status: String::new(),
         voice_preview: false,
         voice_origin: false,
+        cursor: 0,
+        input_top: 0,
+        input_follow: true,
+        input_lines_n: 0,
         bottom: BOTTOM,
     };
     if std::env::var("PAWLINE_START_EXPANDED").is_ok() {

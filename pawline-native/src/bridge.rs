@@ -116,6 +116,8 @@ pub fn handle_text_from(state: &mut UiState, input: &str, from_voice: bool) -> U
             let summary = plan.summary();
             let why = if plan.assist_derived {
                 "The AI assist proposed this. It only runs if you say so:"
+            } else if from_voice {
+                "This came from speech recognition, so check the words in the step below. It only runs if you say so:"
             } else {
                 "This needs your confirmation:"
             };
