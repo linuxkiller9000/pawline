@@ -65,8 +65,8 @@ impl Adapter {
             Adapter::Plasma => "plasmashell",
             Adapter::Awww => "awww-daemon",
             Adapter::Swaybg => "swaybg",
-            // feh has no daemon: an X server (not XWayland) running means an X11 session
-            Adapter::Feh => "Xorg",
+            // feh has no daemon: the sentinel means "this process is in a local X11 session" (see x11_session)
+            Adapter::Feh => X11_SESSION,
         }
     }
 }
@@ -159,7 +159,36 @@ pub fn current_swaybg_image() -> Option<PathBuf> {
 
 /// True when a process with this exact name (from /proc/<pid>/comm) runs
 /// under the current user. comm is truncated to 15 chars by the kernel.
+pub const X11_SESSION: &str = "x11-session";
+
+/// True only for a plain local X11 session as seen by this process: DISPLAY names a local display
+/// (":N" or ":N.S", never "host:N"), WAYLAND_DISPLAY is unset or empty (so XWayland on a Wayland desktop
+/// does not count), and the display's unix socket exists. A running Xorg process elsewhere is not enough.
+pub fn x11_session(display: Option<&str>, wayland: Option<&str>, socket_exists: &dyn Fn(&str) -> bool) -> bool {
+    if wayland.map(|w| !w.is_empty()).unwrap_or(false) {
+        return false;
+    }
+    let Some(d) = display.and_then(|d| d.strip_prefix(':')) else { return false };
+    let num = d.split('.').next().unwrap_or("");
+    if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    if let Some(screen) = d.split('.').nth(1) {
+        if screen.is_empty() || !screen.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+    }
+    socket_exists(&format!("/tmp/.X11-unix/X{num}"))
+}
+
 fn process_running(name: &str) -> bool {
+    if name == X11_SESSION {
+        return x11_session(
+            std::env::var("DISPLAY").ok().as_deref(),
+            std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+            &|p| std::path::Path::new(p).exists(),
+        );
+    }
     let want: String = name.chars().take(15).collect();
     let me = std::fs::metadata("/proc/self").map(|m| { use std::os::unix::fs::MetadataExt; m.uid() }).ok();
     let Ok(rd) = std::fs::read_dir("/proc") else { return false };
@@ -368,11 +397,32 @@ mod tests {
         assert_eq!(Adapter::Feh.args(Path::new("-x.png")).last().unwrap(), "-x.png");
         let have = |l: &'static [&'static str]| move |n: &str| l.contains(&n);
         // X server running and only feh installed: feh
-        assert_eq!(choose_active(&have(&["feh"]), &have(&["Xorg"]), None), Ok(Adapter::Feh));
+        assert_eq!(choose_active(&have(&["feh"]), &have(&[X11_SESSION]), None), Ok(Adapter::Feh));
         // feh installed but no X server and no explicit choice: refuse with the reason
         assert!(choose_active(&have(&["feh"]), &have(&[]), None).is_err());
         // feh and swaybg both installed, nothing decisive: ask
-        assert!(choose_active(&have(&["feh", "swaybg"]), &have(&["Xorg", "swaybg"]), None).is_err());
+        assert!(choose_active(&have(&["feh", "swaybg"]), &have(&[X11_SESSION, "swaybg"]), None).is_err());
         assert_eq!(choose_active(&have(&["feh", "swaybg"]), &have(&[]), Some(Adapter::Feh)), Ok(Adapter::Feh));
+    }
+
+    #[test]
+    fn x11_session_detection_is_tied_to_this_process() {
+        let yes = |_: &str| true;
+        let no = |_: &str| false;
+        assert!(x11_session(Some(":0"), None, &yes));
+        assert!(x11_session(Some(":1.0"), Some(""), &yes));
+        // XWayland on a Wayland desktop does not count
+        assert!(!x11_session(Some(":0"), Some("wayland-1"), &yes));
+        // remote or odd display strings do not count
+        assert!(!x11_session(Some("host:0"), None, &yes));
+        assert!(!x11_session(Some(":0.x"), None, &yes));
+        assert!(!x11_session(Some(":"), None, &yes));
+        assert!(!x11_session(None, None, &yes));
+        // socket must exist
+        assert!(!x11_session(Some(":0"), None, &no));
+        let seen = std::cell::RefCell::new(String::new());
+        let rec = |p: &str| { *seen.borrow_mut() = p.to_string(); true };
+        x11_session(Some(":7.0"), None, &rec);
+        assert_eq!(&*seen.borrow(), "/tmp/.X11-unix/X7");
     }
 }
