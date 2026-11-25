@@ -6,6 +6,7 @@ mod edit;
 mod shape;
 mod theme;
 mod fsearch;
+mod voice;
 mod md;
 mod thumb;
 
