@@ -59,3 +59,7 @@ Nothing is corrected or guessed. This does not prove the assist understood you: 
 - `run saved action NAME`, `list saved actions`, `show saved action NAME`, `delete saved action NAME`. A name is 1 to 40 letters, digits, spaces, - or _. Saving never overwrites; delete first to replace.
 - What is stored: your original typed command and the steps it produced. A run re-reads the command with the fixed parser only (the assist is never used), re-checks it against the disk as it is now, and compares the steps with the saved ones. If anything differs, it is refused and both plans are shown. If they match, you still get the usual confirmation card every time.
 - Nothing runs automatically, on a schedule, or from history. Saved actions live in `~/.local/share/pawline/actions.tsv` (owner-only).
+
+### Saved actions: what "fixed template" means
+
+A saved action stores the command text and the planned steps. On every run the steps are re-validated against the current disk, the assist is never used, and you get a fresh confirmation card. If the disk no longer matches the saved plan, the run is refused and both plans are shown. This does NOT freeze content: if the file at the same path has changed since you saved the action, a copy runs with the new content. Names are case-sensitive and exact. Status: source only, not part of any released binary.
