@@ -161,15 +161,24 @@ pub fn reply(kind: &str, text: String) -> UiReply {
 pub fn dirs_command(
     input: &str,
     own: Option<&std::path::Path>,
+    home: &std::path::Path,
     now: u64,
     zoxide: impl FnOnce() -> Option<Vec<pawline_core::dirs::Ranked>>,
 ) -> Option<String> {
     let t = input.trim().trim_end_matches(['.', '!']);
     let low = t.to_lowercase();
+    if matches!(low.as_str(), "folders memory" | "show folders memory" | "folder memory" | "forget folders" | "clear folders") {
+        let Some(own) = own else { return Some("No data folder.".into()) };
+        return Some(if low.starts_with("forget") || low.starts_with("clear") {
+            format!("Deleted {} folder(s) from Pawline's own list. zoxide was not touched.", pawline_core::dirs::forget_own(own))
+        } else {
+            pawline_core::dirs::describe_own(own)
+        });
+    }
     let query = if low == "zi" { "" } else { low.strip_prefix("zi ")? };
     let Some(own) = own else { return Some("No data folder.".into()) };
     let (src, list) = pawline_core::dirs::ranked(zoxide(), own, now, query);
-    Some(pawline_core::dirs::render(src, &list))
+    Some(pawline_core::dirs::render(src, &list, home))
 }
 
 /// Folders worth remembering from completed steps: where files were made, moved, copied or renamed to, or listed.
@@ -238,7 +247,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             );
         }
     }
-    if let Some(m) = dirs_command(input, pawline_core::dirs::own_path().as_deref(), pawline_core::searchmem::now_secs(), pawline_core::dirs::zoxide_ranked) {
+    if let Some(m) = dirs_command(input, pawline_core::dirs::own_path().as_deref(), &state.root, pawline_core::searchmem::now_secs(), pawline_core::dirs::zoxide_ranked) {
         return reply("message", m);
     }
     if let Some(m) = task_memory_command(input, pawline_core::planmem::default_path().as_deref()) {
@@ -504,15 +513,18 @@ mod memory_tests {
         let proj = d.join("projects");
         std::fs::create_dir_all(&proj).unwrap();
         let own = d.join("ff.json");
-        assert!(dirs_command("make a folder zi", Some(&own), 1, || panic!("must not run")).is_none());
-        assert!(dirs_command("ziggy", Some(&own), 1, || panic!("must not run")).is_none());
-        let z = dirs_command("zi", Some(&own), 1, || Some(vec![Ranked { score: 5.0, path: proj.clone() }])).unwrap();
+        assert!(dirs_command("make a folder zi", Some(&own), &d, 1, || panic!("must not run")).is_none());
+        assert!(dirs_command("ziggy", Some(&own), &d, 1, || panic!("must not run")).is_none());
+        let z = dirs_command("zi", Some(&own), &d, 1, || Some(vec![Ranked { score: 5.0, path: proj.clone() }])).unwrap();
         assert!(z.contains("source: zoxide") && z.contains("projects"));
-        let none = dirs_command("zi proj", Some(&own), 1, || None).unwrap();
+        let none = dirs_command("zi proj", Some(&own), &d, 1, || None).unwrap();
         assert!(none.contains("No frequent folders") && none.contains("Pawline's own list"));
         pawline_core::dirs::record_own(&own, &folders_of(&[pawline_core::plan::Operation::CreateFile { path: proj.join("a.txt") }]), 1);
-        let o = dirs_command("ZI proj", Some(&own), 1, || None).unwrap();
+        let o = dirs_command("ZI proj", Some(&own), &d, 1, || None).unwrap();
         assert!(o.contains("Pawline's own list") && o.contains("projects"));
+        assert!(dirs_command("folders memory", Some(&own), &d, 1, || panic!("no zoxide")).unwrap().contains("1 folder(s)"));
+        assert!(dirs_command("forget folders", Some(&own), &d, 1, || panic!("no zoxide")).unwrap().contains("Deleted 1"));
+        assert!(!own.exists());
         assert!(folders_of(&[pawline_core::plan::Operation::Answer { text: "x".into() }]).is_empty());
     }
 

@@ -37,18 +37,45 @@ pub fn parse_zoxide(out: &str) -> Vec<Ranked> {
         .collect()
 }
 
-/// zoxide's ranking, or None when it is not installed or fails.
+const ZOXIDE_WAIT_MS: u64 = 2000;
+const ZOXIDE_MAX_BYTES: u64 = 256 * 1024;
+
+/// zoxide's ranking, or None when it is not installed, fails or takes longer than 2 seconds.
+/// Output is capped at 256 KB. Read only: no db access, no `zoxide add`.
 pub fn zoxide_ranked() -> Option<Vec<Ranked>> {
-    let out = std::process::Command::new("zoxide")
+    use std::io::Read;
+    let mut child = std::process::Command::new("zoxide")
         .args(["query", "--list", "--score"])
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .output()
+        .spawn()
         .ok()?;
-    if !out.status.success() {
-        return None;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = (&mut stdout).take(ZOXIDE_MAX_BYTES).read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+    let start = std::time::Instant::now();
+    let ok = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st.success(),
+            Ok(None) if start.elapsed().as_millis() as u64 > ZOXIDE_WAIT_MS => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break false;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(_) => break false,
+        }
+    };
+    if !ok {
+        return None; // the reader thread is left to finish on its own; we never wait for it
     }
-    Some(parse_zoxide(&String::from_utf8_lossy(&out.stdout)))
+    let buf = rx.recv_timeout(std::time::Duration::from_millis(500)).ok()?;
+    Some(parse_zoxide(&String::from_utf8_lossy(&buf)))
 }
 
 fn load_own(path: &Path) -> Vec<(PathBuf, u32, u64)> {
@@ -118,15 +145,33 @@ pub fn ranked(zoxide: Option<Vec<Ranked>>, own: &Path, now: u64, query: &str) ->
     (src, list)
 }
 
-pub fn render(src: &str, list: &[Ranked]) -> String {
+/// `home` is the area Pawline may act in; folders outside it are listed but marked non-actionable.
+pub fn render(src: &str, list: &[Ranked], home: &Path) -> String {
     if list.is_empty() {
         return format!("No frequent folders found (source: {src}).");
     }
     let mut out = format!("Frequent folders (source: {src}, read only):\n");
     for (i, r) in list.iter().take(SHOWN).enumerate() {
-        out.push_str(&format!("{}. {}  ({:.1})\n", i + 1, r.path.display(), r.score));
+        let note = if r.path.starts_with(home) { "" } else { "  [outside your home area: Pawline can't act on it]" };
+        out.push_str(&format!("{}. {}  ({:.1}){}\n", i + 1, r.path.display(), r.score, note));
     }
-    out.push_str("This only lists them. Say what to do with one by its path, for example: list <path>.");
+    out.push_str("This only lists them. Folders inside your home area can be used by typing their path, for example: list <path>.");
+    out
+}
+
+pub fn describe_own(path: &Path) -> String {
+    let all = load_own(path);
+    if all.is_empty() {
+        return "No folders saved in Pawline's own list.".into();
+    }
+    let mut out = format!("{} folder(s) in Pawline's own list ({}; local, private, max {MAX_OWN}; paths, use counts and last-used time only):\n", all.len(), path.display());
+    for (p, u, l) in all.iter().take(SHOWN) {
+        out.push_str(&format!("- {} (used {u}x, last {})\n", p.display(), crate::searchmem::date_of(*l)));
+    }
+    if all.len() > SHOWN {
+        out.push_str(&format!("...and {} more.\n", all.len() - SHOWN));
+    }
+    out.push_str("Say \"forget folders\" to delete it. zoxide's own data is never changed by Pawline.");
     out
 }
 
@@ -195,8 +240,12 @@ mod tests {
         let many: Vec<PathBuf> = (0..250).map(|i| PathBuf::from(format!("/tmp/pawline-x{i}"))).collect();
         record_own(&own, &many, 5);
         assert_eq!(load_own(&own).len(), MAX_OWN);
-        assert!(render("zoxide", &[]).contains("source: zoxide"));
-        let t = render("zoxide", &[Ranked { score: 2.0, path: "/tmp".into() }]);
-        assert!(t.contains("read only") && t.contains("1. /tmp"));
+        assert!(render("zoxide", &[], Path::new("/home/u")).contains("source: zoxide"));
+        let t = render("zoxide", &[Ranked { score: 2.0, path: "/tmp".into() }], Path::new("/home/u"));
+        assert!(t.contains("read only") && t.contains("1. /tmp") && t.contains("outside your home area"));
+        let h = render("zoxide", &[Ranked { score: 2.0, path: "/home/u/x".into() }], Path::new("/home/u"));
+        assert!(!h.contains("outside"));
+        assert!(describe_own(&d.join("nofile.json")).contains("No folders"));
+        assert!(describe_own(&own).contains("forget folders"));
     }
 }
