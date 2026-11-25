@@ -29,7 +29,7 @@ fn in_a_hinted_folder_asks_and_shows_the_path() {
     let mut e = Engine::new(root.clone());
     e.set_dir_hints(vec![models.clone()]);
     let b = DirectFsBackend::new(&root).unwrap();
-    for cmd in ["make a folder called gguf in models", "make a folder in home container models called gguf", "make a folder called gguf in home models"] {
+    for cmd in ["make a folder called gguf in models", "make a folder called gguf in home models"] {
         let t = confirm_text(e.handle(cmd, &b, false));
         assert!(t.contains(&models.join("gguf").display().to_string()), "{cmd}: {t}");
         assert!(t.contains("Check the path"), "{cmd}: {t}");
@@ -46,22 +46,64 @@ fn several_matches_ask_instead_of_choosing() {
     let mut e = Engine::new(root.clone());
     e.set_dir_hints(vec![a.clone(), b.clone()]);
     let err = e.handle("make a folder called x in models", &DirectFsBackend::new(&root).unwrap(), false).err().expect("should ask").to_string();
-    assert!(err.contains("several folders") && err.contains(&a.display().to_string()) && err.contains(&b.display().to_string()), "{err}");
+    assert!(err.contains("Several folders") && err.contains(&a.display().to_string()) && err.contains(&b.display().to_string()), "{err}");
 }
 
 #[test]
-fn nothing_found_keeps_old_behaviour_and_outside_home_is_never_used() {
+fn container_words_must_be_honored() {
+    let root = sandbox("hier");
+    let (a, b) = (root.join("container/models"), root.join("Projects/models"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let mut e = Engine::new(root.clone());
+    e.set_dir_hints(vec![a.clone(), b.clone()]);
+    let bk = DirectFsBackend::new(&root).unwrap();
+    // "container" is a real parent of only one of them: that one, after a confirm card
+    let t = confirm_text(e.handle("make a folder called x in home container models", &bk, false));
+    assert!(t.contains(&a.join("x").display().to_string()), "{t}");
+    // a parent that no models folder has: ask, listing the choices, never drop the word
+    let err = e.handle("make a folder called x in home cages models", &bk, false).err().expect("ask").to_string();
+    assert!(err.contains("cages") && err.contains(&a.display().to_string()) && err.contains(&b.display().to_string()), "{err}");
+    assert!(!root.join("x").exists());
+}
+
+#[test]
+fn unmatched_destination_asks_and_quotes_keep_names_literal() {
     let root = sandbox("none");
     let outside = sandbox("outside").join("models");
     std::fs::create_dir_all(&outside).unwrap();
     let mut e = Engine::new(root.clone());
     e.set_dir_hints(vec![outside]);
     let b = DirectFsBackend::new(&root).unwrap();
-    // no match inside home: the whole text stays the name, as before ("lost in space")
-    let r = e.handle("make a folder called lost in space", &b, false).unwrap();
+    let err = e.handle("make a folder called lost in space", &b, false).err().expect("ask").to_string();
+    assert!(err.contains("quotes"), "{err}");
+    assert!(!root.join("lost in space").exists());
+    // a hint outside home is never used
+    assert!(e.handle("make a folder called a in models", &b, false).is_err());
+    assert!(!root.join("a in models").exists());
+    // quoted: literal, as the user said
+    let r = e.handle("make a folder called \"lost in space\"", &b, false).unwrap();
     assert!(matches!(r, Response::Executed(_)));
     assert!(root.join("lost in space").is_dir());
-    let r = e.handle("make a folder called a in models", &b, false).unwrap();
-    assert!(matches!(r, Response::Executed(_)));
-    assert!(root.join("a in models").is_dir(), "a hint outside home is ignored");
+}
+
+#[test]
+fn short_words_work_like_zoxide_keywords() {
+    let root = sandbox("short");
+    let (a, b) = (root.join("container/models"), root.join("Projects/models"));
+    let c = root.join("container/models-old");
+    for d in [&a, &b, &c] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let mut e = Engine::new(root.clone());
+    e.set_dir_hints(vec![b.clone(), c.clone(), a.clone()]);
+    let bk = DirectFsBackend::new(&root).unwrap();
+    // "ho co models": "ho" is dropped as home, "co" is part of "container", the exact "models" beats "models-old"
+    let t = confirm_text(e.handle("make a folder called x in ho co models", &bk, false));
+    assert!(t.contains(&a.join("x").display().to_string()), "{t}");
+    let t = confirm_text(e.handle("make a folder called x in co models", &bk, false));
+    assert!(t.contains(&a.join("x").display().to_string()), "{t}");
+    // a part-of-name last word with a single match
+    let t = confirm_text(e.handle("make a folder called x in co models-o", &bk, false));
+    assert!(t.contains(&c.join("x").display().to_string()), "{t}");
 }

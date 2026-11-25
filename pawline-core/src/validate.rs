@@ -16,6 +16,8 @@ pub struct Validator {
     /// Ranked folders (zoxide or Pawline's own list) the bridge supplies per request. Used ONLY to find
     /// a destination folder by name; every result is still confined to the home area and shown for confirmation.
     pub dir_hints: Vec<PathBuf>,
+    /// The request quoted its names: keep them literal ("lost in space" is one name).
+    pub literal_names: std::cell::Cell<bool>,
     hint_notes: std::cell::RefCell<Vec<String>>,
 }
 
@@ -23,7 +25,7 @@ impl Validator {
     pub fn new(root: PathBuf) -> Self {
         // The root itself may live behind a symlink; compare in canonical form.
         let root = std::fs::canonicalize(&root).unwrap_or(root);
-        Validator { root, app_env: None, dir_hints: vec![], hint_notes: std::cell::RefCell::new(vec![]) }
+        Validator { root, app_env: None, dir_hints: vec![], literal_names: std::cell::Cell::new(false), hint_notes: std::cell::RefCell::new(vec![]) }
     }
 
     /// Words like "home container models" -> "models": drop a leading "home" and filler words.
@@ -39,7 +41,7 @@ impl Validator {
     /// Existing folders inside the home area called `place`: a direct child of home, the session's, or a hinted one.
     fn place_candidates(&self, place: &str, ctx: &ContextManager) -> Vec<PathBuf> {
         let mut out: Vec<PathBuf> = vec![];
-        let mut add = |p: PathBuf, out: &mut Vec<PathBuf>| {
+        let add = |p: PathBuf, out: &mut Vec<PathBuf>| {
             if let Ok(c) = std::fs::canonicalize(&p) {
                 if c.is_dir() && c.starts_with(&self.root) && !c.starts_with(self.root.join(crate::journal::STORE)) && !out.contains(&c) {
                     out.push(c);
@@ -61,33 +63,95 @@ impl Validator {
         out
     }
 
-    /// A destination named in words. Ok(None): nothing found. Several: ask. One: use it, and the plan will ask for a yes.
+    /// Words naming a place, as path parts: a leading "home" and filler words go, every other word must be a folder name.
+    fn place_parts(words: &str) -> Vec<String> {
+        let mut w: Vec<&str> = words.trim().trim_end_matches('.').split_whitespace().collect();
+        if w.len() > 1 && w[0].eq_ignore_ascii_case("home") {
+            w.remove(0);
+        }
+        w.retain(|x| !matches!(x.to_lowercase().as_str(), "folder" | "directory" | "the" | "my" | "called" | "named" | "containing" | "contains"));
+        w.into_iter().map(|x| x.to_string()).collect()
+    }
+
+    /// A destination named in words. Every word must be honored: the last is the folder, the earlier ones must be
+    /// its parent folders in that order (not necessarily adjacent). Ok(None): no folder has that name at all.
+    /// Several matches, or a folder of that name that sits in other parents: ask, never choose.
     fn find_place(&self, words: &str, ctx: &ContextManager) -> Result<Option<PathBuf>, PawError> {
-        let place = Self::place_words(words);
-        let c = self.place_candidates(&place, ctx);
-        match c.len() {
-            0 => Ok(None),
-            1 => {
-                self.hint_notes.borrow_mut().push(format!("I took \"{words}\" to mean the folder {}.", c[0].display()));
-                Ok(Some(c[0].clone()))
+        let parts = Self::place_parts(words);
+        let Some((base, parents)) = parts.split_last() else { return Ok(None) };
+        let mut all = self.place_candidates(base, ctx);
+        // Like zoxide's keywords: a word may be part of a folder name ("co" finds "container"), and the last word names the folder itself.
+        let bl = base.to_lowercase();
+        for h in &self.dir_hints {
+            let Ok(c) = std::fs::canonicalize(h) else { continue };
+            let name_ok = c.file_name().is_some_and(|f| f.to_string_lossy().to_lowercase().contains(&bl));
+            if name_ok && c.is_dir() && c.starts_with(&self.root) && !c.starts_with(self.root.join(crate::journal::STORE)) && c != self.root && !all.contains(&c) {
+                all.push(c);
             }
-            _ => Err(PawError::UnknownReference(format!(
-                "{place}\" (several folders have that name: {}. Say the full path, for example \"make a folder called x in <path>\"",
-                c.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("; ")
+        }
+        let direct = self.root.join(parts.join("/"));
+        if parts.len() > 1 {
+            if let Ok(c) = std::fs::canonicalize(&direct) {
+                if c.is_dir() && c.starts_with(&self.root) && !c.starts_with(self.root.join(crate::journal::STORE)) && !all.contains(&c) {
+                    all.push(c);
+                }
+            }
+        }
+        if all.is_empty() {
+            return Ok(None);
+        }
+        let ok = |p: &PathBuf| -> bool {
+            let rel = p.strip_prefix(&self.root).unwrap_or(p);
+            let comps: Vec<String> = rel.parent().map(|q| q.components().map(|c| c.as_os_str().to_string_lossy().to_lowercase()).collect()).unwrap_or_default();
+            let mut i = 0;
+            for (n, want) in parents.iter().enumerate() {
+                // "ho" for "home": the home folder is where we start, so a short first word for it is satisfied
+                if n == 0 && want.len() >= 2 && "home".starts_with(&want.to_lowercase()) && !comps.iter().any(|c| c.contains(&want.to_lowercase())) {
+                    continue;
+                }
+                match comps[i..].iter().position(|c| c.contains(&want.to_lowercase())) {
+                    Some(k) => i += k + 1,
+                    None => return false,
+                }
+            }
+            true
+        };
+        let list = |v: &[PathBuf]| v.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("; ");
+        let mut good: Vec<PathBuf> = all.iter().filter(|p| ok(p)).cloned().collect();
+        // A folder named exactly as the last word beats ones that merely contain it.
+        if good.iter().any(|p| p.file_name().is_some_and(|f| f.to_string_lossy().to_lowercase() == bl)) {
+            good.retain(|p| p.file_name().is_some_and(|f| f.to_string_lossy().to_lowercase() == bl));
+        }
+        match good.len() {
+            0 => Err(PawError::Validation(format!(
+                "I found no folder \"{}\" with {} above {base}. Folders called {base}: {}. Say the full path.",
+                parts.join(" "), parents.join(" > "), list(&all)
+            ))),
+            1 => {
+                self.hint_notes.borrow_mut().push(format!("I took \"{words}\" to mean the folder {}.", good[0].display()));
+                Ok(Some(good[0].clone()))
+            }
+            _ => Err(PawError::Validation(format!(
+                "Several folders match \"{}\": {}. Say the full path, for example \"make a folder called x in <path>\".",
+                parts.join(" "), list(&good)
             ))),
         }
     }
 
     fn split_in_destination(&self, names: &[String], parent: &LocationRef, ctx: &ContextManager) -> Result<(Vec<String>, Option<PathBuf>), PawError> {
-        if !matches!(parent, LocationRef::CurrentDir) || names.len() != 1 {
+        if self.literal_names.get() || !matches!(parent, LocationRef::CurrentDir) || names.len() != 1 {
             return Ok((names.to_vec(), None));
         }
         let n = &names[0];
         if let Some((head, tail)) = n.rsplit_once(" in ") {
-            if !head.trim().is_empty() && !tail.trim().is_empty() && tail.split_whitespace().count() <= 4 {
-                if let Some(dest) = self.find_place(tail, ctx)? {
-                    return Ok((vec![head.trim().to_string()], Some(dest)));
-                }
+            if !head.trim().is_empty() && !tail.trim().is_empty() && tail.split_whitespace().count() <= 5 {
+                return match self.find_place(tail, ctx)? {
+                    Some(dest) => Ok((vec![head.trim().to_string()], Some(dest))),
+                    None => Err(PawError::Validation(format!(
+                        "I found no folder for \"{}\". If \"{n}\" is the whole name, put it in quotes. Otherwise say the full path.",
+                        tail.trim()
+                    ))),
+                };
             }
         }
         Ok((names.to_vec(), None))

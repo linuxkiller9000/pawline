@@ -90,6 +90,7 @@ impl Engine {
                 None => return Err(parse_err),
             },
         };
+        self.validator.literal_names.set(input.contains(['"', '\u{201c}', '\u{201d}', '`']));
         let mut plan = self.validator.build_plan(&directives, &self.ctx)?;
         if from_assist {
             // Anything the model proposed is shown to the user and waits for
