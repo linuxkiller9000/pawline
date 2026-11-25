@@ -181,7 +181,7 @@ fn line_mode(l: &str) -> shape::Mode {
 }
 
 enum Req {
-    Text(String),
+    Text(String, Option<std::path::PathBuf>),
     Confirm,
     Cancel,
 }
@@ -257,6 +257,14 @@ struct App {
     zi_rows: Vec<String>,
     zi_sel: usize,
     shaper: shape::Shaper,
+    /// Folder chip: full path of the folder requests mean when they name no place. Removable.
+    pill: Option<std::path::PathBuf>,
+    root: std::path::PathBuf,
+    pill_off: bool,
+    /// Rows (full paths) of the open /in folder chooser.
+    pill_rows: Vec<std::path::PathBuf>,
+    pill_sel: usize,
+    r_pill_x: (f32, f32, f32, f32),
     settings: theme::Settings,
     settings_open: bool,
     settings_sel: usize,
@@ -664,7 +672,10 @@ impl App {
                 self.text(pm, t, w - PAD - 60.0, top - 6.0, 12.0, (170, 165, 195), (0.0, h));
             }
             self.draw_menu(pm, w, h);
+            self.pill_refresh();
             self.draw_zi(pm, w, h);
+            self.draw_pill_rows(pm, w, h);
+            self.draw_pill(pm, h);
         }
     }
 
@@ -982,6 +993,109 @@ impl App {
         true
     }
 
+    /// True when the word at the end of the draft is exactly "/in" (at a word boundary).
+    fn in_token(&self) -> bool {
+        let t = self.input.text();
+        t == "/in" || t.ends_with(" /in")
+    }
+
+    fn pill_active(&self) -> bool {
+        !self.pill_rows.is_empty() && self.in_token() && !self.busy && self.confirm.is_none() && self.expanded
+    }
+
+    /// Folders to choose from: the working folder's sub-folders, two levels deep, hidden ones left out.
+    fn pill_scan(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = vec![];
+        let mut first: Vec<_> = std::fs::read_dir(root).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+        first.sort();
+        for p in first {
+            let hidden = p.file_name().map(|n| n.to_string_lossy().starts_with('.')).unwrap_or(true);
+            if hidden || p.is_symlink() || !p.is_dir() {
+                continue;
+            }
+            out.push(p.clone());
+            let mut sub: Vec<_> = std::fs::read_dir(&p).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+            sub.sort();
+            for q in sub {
+                let h = q.file_name().map(|n| n.to_string_lossy().starts_with('.')).unwrap_or(true);
+                if !h && !q.is_symlink() && q.is_dir() {
+                    out.push(q);
+                }
+            }
+        }
+        out.truncate(8);
+        out
+    }
+
+    /// Typing "/in" opens the chooser; called after every edit.
+    fn pill_refresh(&mut self) {
+        if !self.in_token() {
+            self.pill_off = false;
+        }
+        if self.in_token() && !self.pill_off && !self.busy && self.confirm.is_none() {
+            if self.pill_rows.is_empty() {
+                self.pill_rows = Self::pill_scan(&self.root);
+                self.pill_sel = 0;
+            }
+        } else {
+            self.pill_rows.clear();
+        }
+    }
+
+    /// Pick the highlighted folder: the "/in" word leaves the draft, the rest of the draft stays, a chip appears.
+    fn pill_pick(&mut self) {
+        if let Some(p) = self.pill_rows.get(self.pill_sel.min(self.pill_rows.len().saturating_sub(1))).cloned() {
+            let t = self.input.text();
+            let rest = t.strip_suffix("/in").unwrap_or(&t).to_string();
+            self.input.clear();
+            self.input.insert(&rest);
+            self.pill = Some(p);
+        }
+        self.pill_rows.clear();
+    }
+
+    fn pill_geom(&self) -> (f32, f32) {
+        let rows_h = self.pill_rows.len() as f32 * 26.0;
+        (self.input_box_top - 6.0 - rows_h - 30.0, rows_h)
+    }
+
+    fn draw_pill_rows(&mut self, pm: &mut Pixmap, w: f32, h: f32) {
+        if !self.pill_active() {
+            return;
+        }
+        let (top, rows_h) = self.pill_geom();
+        fill(pm, &rrect(PAD - 2.0, top, w - 2.0 * PAD + 4.0, rows_h + 26.0, 10.0), (36, 33, 58, 255));
+        let sel = self.pill_sel.min(self.pill_rows.len() - 1);
+        let rows = self.pill_rows.clone();
+        for (k, p) in rows.iter().enumerate() {
+            let y = top + 4.0 + k as f32 * 26.0;
+            if k == sel {
+                fill(pm, &rrect(PAD + 2.0, y, w - 2.0 * PAD - 4.0, 24.0, 6.0), self.th().accent.rgba());
+            }
+            let full = p.to_string_lossy().to_string();
+            let shown = if full.chars().count() > 44 { format!("...{}", full.chars().rev().take(41).collect::<Vec<_>>().into_iter().rev().collect::<String>()) } else { full };
+            self.text_m(pm, &shown, PAD + 10.0, y + 18.0, 13.0, (255, 255, 255), (0.0, h), shape::Mode::Strict);
+        }
+        self.text(pm, "Up/Down choose, Enter or click picks, Esc closes", PAD + 10.0, top + 4.0 + rows_h + 15.0, 11.0, (190, 185, 215), (0.0, h));
+    }
+
+    /// The chip above the input: last folder name only, a small x removes it. The full path is on the confirm card.
+    fn draw_pill(&mut self, pm: &mut Pixmap, h: f32) {
+        let Some(p) = self.pill.clone() else {
+            self.r_pill_x = (0.0, 0.0, 0.0, 0.0);
+            return;
+        };
+        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "/".into());
+        let shown = if name.chars().count() > 24 { format!("{}...", name.chars().take(21).collect::<String>()) } else { name };
+        let tw = self.measure(&shown, 13.0, shape::Mode::Strict);
+        let (x, y, ph) = (PAD - 2.0, self.input_box_top - 30.0, 24.0);
+        let pw = tw + 14.0 + 26.0;
+        fill(pm, &rrect(x, y, pw, ph, 12.0), self.th().accent.rgba());
+        self.text_m(pm, &shown, x + 12.0, y + 17.0, 13.0, (255, 255, 255), (0.0, h), shape::Mode::Strict);
+        self.text(pm, "x", x + pw - 18.0, y + 17.0, 13.0, (235, 230, 250), (0.0, h));
+        self.r_pill_x = (x + pw - 26.0, y, 26.0, ph);
+    }
+
     /// The "zi" chooser is on screen: rows from the last zi reply, nothing typed, nothing else open.
     fn zi_active(&self) -> bool {
         !self.zi_rows.is_empty() && self.input.text().is_empty() && !self.busy && self.confirm.is_none() && self.expanded
@@ -1068,7 +1182,7 @@ impl App {
         }
         self.push(true, "user", t.clone(), quote);
         self.busy = true;
-        let _ = self.tx.send(Req::Text(t));
+        let _ = self.tx.send(Req::Text(t, self.pill.clone()));
     }
 
     fn set_reply(&mut self, text: &str) {
@@ -1164,6 +1278,24 @@ impl App {
                 if let Some(t) = self.msgs.last().map(|m| m.text.clone()) {
                     self.set_reply(&t);
                 }
+            }
+            Keysym::Escape if self.pill_active() => {
+                self.pill_rows.clear();
+                self.pill_off = true;
+                self.draw();
+            }
+            Keysym::Return | Keysym::KP_Enter | Keysym::Tab if self.pill_active() => {
+                self.pill_pick();
+                self.draw();
+            }
+            Keysym::Up | Keysym::Down if self.pill_active() => {
+                let n = self.pill_rows.len();
+                self.pill_sel = if e.keysym == Keysym::Up { (self.pill_sel + n - 1) % n } else { (self.pill_sel + 1) % n };
+                self.draw();
+            }
+            Keysym::BackSpace if self.pill.is_some() && self.input.caret() == 0 && self.input.sel().is_none() && !self.busy => {
+                self.pill = None;
+                self.draw();
             }
             Keysym::Escape if self.zi_active() => {
                 self.zi_rows.clear();
@@ -1375,6 +1507,20 @@ impl App {
         if self.confirm.is_none() {
             let (px, py) = self.ptr_pos;
             let w = self.w as f32;
+            if self.pill.is_some() && !self.busy && inside(self.r_pill_x, self.ptr_pos) {
+                self.pill = None;
+                self.draw();
+                return;
+            }
+            if self.pill_active() {
+                let (top, rows_h) = self.pill_geom();
+                if inside((PAD - 2.0, top, w - 2.0 * PAD + 4.0, rows_h + 8.0), self.ptr_pos) {
+                    self.pill_sel = (((py as f32 - top - 4.0) / 26.0).floor().max(0.0) as usize).min(self.pill_rows.len() - 1);
+                    self.pill_pick();
+                    self.draw();
+                    return;
+                }
+            }
             if self.zi_active() {
                 let rh = 26.0;
                 let (top, rows_h, _) = self.zi_geom();
@@ -1849,9 +1995,9 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
     }
     while let Ok(req) = rx.recv() {
         let r = match req {
-            Req::Text(t) => {
+            Req::Text(t, dir) => {
                 st.pending = None;
-                let r = bridge::handle_text(&mut st, &t);
+                let r = bridge::handle_text_in(&mut st, &t, dir.as_deref());
                 bridge::with_notes(&mut st, r)
             }
             Req::Confirm => {
@@ -2034,6 +2180,12 @@ fn main() {
         zi_rows: vec![],
         zi_sel: 0,
         shaper: shape::Shaper::new(),
+        pill: None,
+        root: work_root(),
+        pill_off: false,
+        pill_rows: vec![],
+        pill_sel: 0,
+        r_pill_x: (0.0, 0.0, 0.0, 0.0),
         settings: settings_path().map(|p| theme::load(&p)).unwrap_or_default(),
         settings_open: false,
         settings_sel: 0,

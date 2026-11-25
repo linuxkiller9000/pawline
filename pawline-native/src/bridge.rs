@@ -750,6 +750,15 @@ pub fn handle_text(state: &mut UiState, input: &str) -> UiReply {
     finish(state, r, t.elapsed())
 }
 
+/// A request typed with (or without) a folder pill. The pill folder is applied to the engine first; a folder that is
+/// outside the home area or gone is refused and the request is NOT run (so it can never act on some other folder).
+pub fn handle_text_in(state: &mut UiState, input: &str, dir: Option<&std::path::Path>) -> UiReply {
+    if let Err(e) = state.engine.set_working_dir(dir) {
+        return reply("error", format!("The folder chip was not used, so nothing was run: {e}"));
+    }
+    handle_text(state, input)
+}
+
 /// Confirmation received -> result ready: carried planning time plus execution.
 pub fn confirm_inner(state: &mut UiState) -> UiReply {
     let t = std::time::Instant::now();
@@ -1167,6 +1176,27 @@ mod memory_tests {
         let r = handle_text(&mut st, "make a presentation from bad.txt");
         assert!(r.kind == "failed" && r.text.contains("heading") && st.pending.is_none(), "{}", r.text);
         assert!(handle_text(&mut st, "make a presentation from a.png").kind == "message");
+    }
+
+    #[test]
+    fn folder_chip_sets_the_create_folder_and_a_bad_chip_runs_nothing() {
+        let root = std::env::temp_dir().join(format!("pawline-chip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sub = root.join("proj");
+        std::fs::create_dir_all(&sub).unwrap();
+        let mut st = new_state(root.canonicalize().unwrap());
+        let r = handle_text_in(&mut st, "make a folder called chipdir", Some(&sub.canonicalize().unwrap()));
+        assert_ne!(r.kind, "error", "{}", r.text);
+        assert!(sub.join("chipdir").is_dir() && !root.join("chipdir").exists());
+        // chip removed: back to the home folder
+        let r = handle_text_in(&mut st, "make a folder called plain", None);
+        assert_ne!(r.kind, "error", "{}", r.text);
+        assert!(root.join("plain").is_dir());
+        // a chip outside the home area is refused and nothing runs
+        let r = handle_text_in(&mut st, "make a folder called nope", Some(std::path::Path::new("/tmp")));
+        assert_eq!(r.kind, "error");
+        assert!(!std::path::Path::new("/tmp/nope").exists() && !root.join("nope").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
