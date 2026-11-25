@@ -101,6 +101,39 @@ impl DirectFsBackend {
         Ok(())
     }
 
+    /// Read a small text file inside the private store (empty if missing).
+    pub fn read_store_text(&self, rel: &str) -> Result<String, PawError> {
+        use std::io::Read;
+        let mut s = String::new();
+        match self.root.open(rel) {
+            Ok(mut f) => {
+                f.take(1 << 20).read_to_string(&mut s)?;
+                Ok(s)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(s),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Replace a small text file in the private store atomically
+    /// (write a temp file, sync, rename), owner-only permissions.
+    pub fn write_store_text(&self, rel: &str, text: &str) -> Result<(), PawError> {
+        use cap_std::fs::OpenOptionsExt;
+        use std::io::Write;
+        self.private_dir(crate::journal::STORE)?;
+        let tmp = format!("{rel}.tmp");
+        let _ = self.root.remove_file(&tmp);
+        let mut f = self.root.open_with(
+            &tmp,
+            cap_std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600),
+        )?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        self.root.rename(&tmp, &self.root, rel)?;
+        Ok(())
+    }
+
     fn rel_str(&self, p: &Path) -> Result<String, PawError> {
         Ok(self.rel(p)?.to_string_lossy().to_string())
     }

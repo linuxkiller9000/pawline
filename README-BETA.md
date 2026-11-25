@@ -52,3 +52,10 @@ The optional model assist can clip or change what you wrote (seen: "pets" came b
 - for move, copy and rename, the source and target cannot be confirmed in the order you wrote them.
 
 Nothing is corrected or guessed. This does not prove the assist understood you: it removes known mismatches only. Plain commands ("make a folder called pets") do not use the assist. Every assist plan still needs your explicit confirmation. Sentences with several operations are refused by the assist.
+
+## Saved actions (next build, not in v0.2.0-beta)
+
+- `save that as NAME` saves the last command that fully ran, if it was a plain make-folder, make-file or copy command with a full path (not "it", "that folder" or a bare folder name). Delete, move, wallpaper and assist-derived plans cannot be saved yet.
+- `run saved action NAME`, `list saved actions`, `show saved action NAME`, `delete saved action NAME`. A name is 1 to 40 letters, digits, spaces, - or _. Saving never overwrites; delete first to replace.
+- What is stored: your original typed command and the steps it produced. A run re-reads the command with the fixed parser only (the assist is never used), re-checks it against the disk as it is now, and compares the steps with the saved ones. If anything differs, it is refused and both plans are shown. If they match, you still get the usual confirmation card every time.
+- Nothing runs automatically, on a schedule, or from history. Saved actions live in `~/.local/share/pawline/actions.tsv` (owner-only).

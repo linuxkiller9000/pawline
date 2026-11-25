@@ -6,6 +6,7 @@
 //! this parser cannot handle; those proposals re-enter at validation and never
 //! bypass it.
 
+pub mod actions;
 pub mod assist;
 pub mod context;
 pub mod error;
@@ -28,6 +29,7 @@ use validate::Validator;
 pub struct Engine {
     validator: Validator,
     ctx: ContextManager,
+    last_candidate: Option<actions::Candidate>,
 }
 
 /// What the UI shows after handling one message.
@@ -53,6 +55,7 @@ impl Engine {
         Engine {
             validator: Validator::new(root),
             ctx: ContextManager::new(),
+            last_candidate: None,
         }
     }
 
@@ -116,11 +119,72 @@ impl Engine {
         confirmed: bool,
         assist: Option<&dyn Assist>,
     ) -> Result<Response, PawError> {
+        self.last_candidate = None;
         let plan = self.plan_with(input, assist)?;
         if plan.needs_confirmation && !confirmed {
             return Ok(Response::Confirm(plan));
         }
-        self.execute_plan(plan, backend)
+        let candidate = self.candidate_for(input, &plan);
+        let r = self.execute_plan(plan, backend)?;
+        // "save that as NAME" refers to the last command that fully ran.
+        // Anything else (failed, assist-derived, not saveable) clears it, so
+        // it can never save an older command by mistake.
+        self.last_candidate = match &r {
+            Response::Executed(_) => candidate,
+            _ => None,
+        };
+        Ok(r)
+    }
+
+    fn candidate_for(&self, input: &str, plan: &Plan) -> Option<actions::Candidate> {
+        if plan.assist_derived {
+            return None;
+        }
+        let directives = intent::parse(input).ok()?;
+        actions::saveable(&directives, &plan.ops).ok()?;
+        Some(actions::Candidate { command: input.trim().to_string(), steps: self.step_lines(plan) })
+    }
+
+    fn step_lines(&self, plan: &Plan) -> Vec<String> {
+        plan.ops.iter().map(|o| o.describe()).collect()
+    }
+
+    /// The command "save that as NAME" would save, if there is one.
+    pub fn save_candidate(&self) -> Option<&actions::Candidate> {
+        self.last_candidate.as_ref()
+    }
+
+    /// Why the last command cannot be saved (for a helpful message).
+    pub fn why_not_saveable(&self, input: &str) -> String {
+        match intent::parse(input) {
+            Ok(d) => match self.validator.build_plan(&d, &self.ctx) {
+                Ok(p) => actions::saveable(&d, &p.ops).err().unwrap_or_else(|| "it has not run".into()),
+                Err(_) => "it does not currently check out".into(),
+            },
+            Err(_) => "it was not a command Pawline's fixed parser understands".into(),
+        }
+    }
+
+    /// Re-plan a saved action. The AI assist is never used. Any difference
+    /// from the saved steps refuses the run and shows both. A matching plan
+    /// always needs the user's explicit confirmation, every run.
+    pub fn plan_saved(&self, saved: &actions::Saved) -> Result<Plan, PawError> {
+        let mut plan = self.plan_with(&saved.command, None)?;
+        let now = self.step_lines(&plan);
+        if now != saved.steps {
+            return Err(PawError::Validation(format!(
+                "saved action \"{}\" would now do something different from when you saved it, so it was not run.\nSaved:\n{}\nNow:\n{}\nIf the new plan is what you want, run the command by hand and save it under a new name.",
+                saved.name,
+                saved.steps.iter().map(|s| format!("  {s}")).collect::<Vec<_>>().join("\n"),
+                now.iter().map(|s| format!("  {s}")).collect::<Vec<_>>().join("\n"),
+            )));
+        }
+        plan.needs_confirmation = true;
+        plan.confirmation_reasons.push(format!(
+            "saved action \"{}\": re-checked just now against the disk, same steps as when saved",
+            saved.name
+        ));
+        Ok(plan)
     }
 
     /// Execute a previously shown plan after the user confirmed.
@@ -129,6 +193,7 @@ impl Engine {
         plan: Plan,
         backend: &dyn ExecutionBackend,
     ) -> Result<Response, PawError> {
+        self.last_candidate = None;
         let total = plan.ops.len();
         let mut outcomes = Vec::new();
         for op in &plan.ops {

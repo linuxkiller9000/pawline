@@ -63,6 +63,9 @@ pub fn handle_text(state: &mut UiState, input: &str) -> UiReply {
         Err(e) => return reply("error", format!("backend: {e}")),
     };
     state.notes.extend(backend.inner.recovery_notes().iter().cloned());
+    if let Some(m) = pawline_core::actions::parse_meta(input) {
+        return handle_meta(state, &backend.inner, m);
+    }
     // Parser first. The 35 MB model is loaded only when the parser has a
     // gap, so ordinary commands never wait for it.
     let mut r = state.engine.handle_with(input, &backend, false, None);
@@ -189,4 +192,82 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
 pub fn cancel(state: &mut UiState) -> UiReply {
     state.pending = None;
     reply("message", "Cancelled. Nothing was done.".into())
+}
+
+/// Saved-action commands. Same engine and same confirmation as everything
+/// else; the assist is never used here.
+fn handle_meta(state: &mut UiState, b: &DirectFsBackend, m: pawline_core::actions::Meta) -> UiReply {
+    use pawline_core::actions::{self, Meta};
+    let mut all = match b.read_store_text(actions::ACTIONS) {
+        Ok(t) => actions::parse_file(&t),
+        Err(e) => return reply("error", format!("could not read saved actions: {e}")),
+    };
+    let write = |all: &Vec<actions::Saved>| b.write_store_text(actions::ACTIONS, &actions::render_file(all));
+    match m {
+        Meta::Save(name) => {
+            let c = match state.engine.save_candidate() {
+                Some(c) => c.clone(),
+                None => {
+                    return reply(
+                        "error",
+                        "Nothing to save. \"save that as NAME\" saves the last command that ran, and for now only plain make-folder, make-file and copy commands with full paths can be saved. Run one of those, then save it right away.".into(),
+                    )
+                }
+            };
+            if let Err(e) = actions::add(&mut all, &name, &c) {
+                return reply("error", e.to_string());
+            }
+            match write(&all) {
+                Ok(()) => reply(
+                    "message",
+                    format!(
+                        "Saved \"{name}\":\n{}\nRun it with: run saved action {name}. It will be re-checked and ask for your confirmation every time.",
+                        actions::describe_saved(all.last().unwrap())
+                    ),
+                ),
+                Err(e) => reply("error", format!("could not save: {e}")),
+            }
+        }
+        Meta::List => {
+            if all.is_empty() {
+                reply("message", "No saved actions.".into())
+            } else {
+                let names: Vec<String> = all.iter().map(|a| format!("{}: {}", a.name, a.command)).collect();
+                reply("message", format!("Saved actions:\n{}", names.join("\n")))
+            }
+        }
+        Meta::Show(name) => match actions::find(&all, &name) {
+            Some(a) => reply("message", actions::describe_saved(a)),
+            None => reply("error", format!("no saved action named \"{name}\"")),
+        },
+        Meta::Delete(name) => match actions::remove(&mut all, &name) {
+            Ok(()) => match write(&all) {
+                Ok(()) => reply("message", format!("Deleted the saved action \"{name}\". Files it made are untouched.")),
+                Err(e) => reply("error", format!("could not update saved actions: {e}")),
+            },
+            Err(e) => reply("error", e.to_string()),
+        },
+        Meta::Run(name) => {
+            let saved = match actions::find(&all, &name) {
+                Some(a) => a.clone(),
+                None => return reply("error", format!("no saved action named \"{name}\"")),
+            };
+            match state.engine.plan_saved(&saved) {
+                Ok(plan) => {
+                    let summary = plan.summary();
+                    let r = UiReply {
+                        kind: "confirm".into(),
+                        text: format!(
+                            "Saved action \"{}\" was re-checked just now and gives the same steps as when you saved it. It only runs if you say so:\n{summary}",
+                            saved.name
+                        ),
+                        plan: Some(summary),
+                    };
+                    state.pending = Some(plan);
+                    r
+                }
+                Err(e) => reply("error", e.to_string()),
+            }
+        }
+    }
 }
