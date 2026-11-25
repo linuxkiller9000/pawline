@@ -93,7 +93,8 @@ fn parse_sentence(s: &str, out: &mut Vec<Directive>) -> Result<(), PawError> {
         base = Some(loc);
         rest = remainder;
         if rest.is_empty() {
-            return Err(PawError::Parse(nothing_after_location(&loc_words)));
+            out.push(Directive::Answer { text: nothing_after_location(&loc_words) });
+            return Ok(());
         }
     }
 
@@ -298,14 +299,9 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
     if matches!(first, "generate" | "draw" | "paint" | "imagine" | "render")
         || ((lower.contains("image of") || lower.contains("picture of")) && !lower.contains("wallpaper"))
     {
-        return Err(PawError::Parse(
-            "I can't generate images yet. What I can do: make, delete, rename, move, copy, open and list files and folders, open an installed app, set a wallpaper, search the web or Wikipedia, simple math, and undo."
-                .into(),
-        ));
+        return Ok(Directive::Answer { text: "I can't generate images yet.".into() });
     }
-    Err(PawError::Parse(format!(
-        "I don't know how to \"{first}\" yet. I can make, delete, rename, move, copy, open and list files and folders, open an installed app, set a wallpaper, search the web (say \"search for ...\"), do simple math, and undo. Say \"help\" for examples."
-    )))
+    Err(PawError::Parse(format!("I don't know how to \"{first}\" yet. Say \"help\" to see what I can do.")))
 }
 
 /// Plain replies for greetings, thanks and help. Pure text; touches nothing.
@@ -318,7 +314,7 @@ fn small_talk(lower: &str) -> Option<String> {
     const HELP: &[&str] = &["help", "what can you do", "what do you do", "how do i use this", "how does this work", "commands", "examples"];
     const HELP_TEXT: &str = "I can:\n- make files and folders: make a folder called kitten paws\n- delete, rename, move, copy and list them (deleting and moving ask first)\n- open an installed app: open mpv (I show the exact command and ask first)\n- set a wallpaper: set wallpaper to ~/Pictures/a.png\n- search: search for what is a cat, or search wikipedia for cats\n- simple math: what is 12 * 7\n- undo the last change: undo\nI can't generate images or chat in depth yet.";
     if HELLO.contains(&t.as_str()) {
-        return Some(format!("Hi! {HELP_TEXT}"));
+        return Some("Hi! I can work with files and folders, open apps, search and do math. Say \"help\" for examples.".into());
     }
     if THANKS.contains(&t.as_str()) {
         return Some("You're welcome.".into());
@@ -410,9 +406,9 @@ fn parse_create_bare(cmd: &str, base: Option<LocationRef>) -> Result<Directive, 
         Some(LocationRef::LastCreated) => " inside that folder".to_string(),
         _ => String::new(),
     };
-    Err(PawError::Parse(format!(
+    Ok(Directive::Answer { text: format!(
         "What should the file be called? Give me the exact name, e.g. \"make a file called notes.txt{place}\". For several: \"make files a.py, b.py{place}\"."
-    )))
+    ) })
 }
 
 /// Parse a create clause: "<verb> [a] [kind] [in <loc>] called|named <names>"
@@ -685,7 +681,7 @@ mod case_tests {
 #[cfg(test)]
 mod file_request_tests {
     use super::*;
-    fn q(s: &str) -> String { match parse(s) { Err(PawError::Parse(m)) => m, o => panic!("{o:?}") } }
+    fn q(s: &str) -> String { match parse(s) { Ok(v) => match &v[..] { [Directive::Answer { text }] => text.clone(), o => panic!("{o:?}") }, o => panic!("{o:?}") } }
 
     #[test]
     fn explicit_names_inside_a_folder() {
