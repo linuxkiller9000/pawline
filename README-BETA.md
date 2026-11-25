@@ -52,3 +52,10 @@ The optional model assist can clip or change what you wrote (seen: "pets" came b
 - for move, copy and rename, the source and target cannot be confirmed in the order you wrote them.
 
 Nothing is corrected or guessed. This does not prove the assist understood you: it removes known mismatches only. Plain commands ("make a folder called pets") do not use the assist. Every assist plan still needs your explicit confirmation. Sentences with several operations are refused by the assist.
+
+## 0.2.1-beta fixes (read this if you used 0.2.0-beta)
+
+- Names and paths are case-sensitive and exact. In 0.2.0-beta the copy, move, rename, delete and list commands lowercased what you typed, and make-folder lowercased the new name, so "Pets" and "pets" could be mixed up. Now "Pets" and "pets" are different items, a name that is not an exact match is refused (with a hint if a differently-cased item exists), and there is no nearest match.
+- Non-ASCII names (for example "ÉCOLE") no longer crash the parser.
+- Rename, move and copy refuse a source that does not exist, when the plan is made, before any confirmation card.
+- Still true: the words Desktop, Documents and Downloads mean the standard folders with those capitalised names under your home.

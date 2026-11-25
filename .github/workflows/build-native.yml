@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to attach to when publish=true (e.g. v0.2.0-beta)"
+        description: "Release tag to attach to when publish=true (e.g. v0.2.1-beta)"
         required: false
-        default: "v0.2.0-beta"
+        default: "v0.2.1-beta"
       publish:
         description: "Attach the binary to the existing release"
         type: boolean
@@ -53,13 +53,13 @@ jobs:
           if grep -vE 'libm\.so|libc\.so|ld-linux|libgcc_s|libdl|libpthread|librt' needed.txt; then echo "unexpected shared library requirement"; exit 1; fi
           readelf -V "$B" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 | tee glibc.txt
           mkdir -p out
-          cp "$B" out/pawline-0.2.0-beta-linux-x86_64
-          (cd out && sha256sum pawline-0.2.0-beta-linux-x86_64 > SHA256SUMS.txt && cat SHA256SUMS.txt && ls -l)
+          cp "$B" out/pawline-0.2.1-beta-linux-x86_64
+          (cd out && sha256sum pawline-0.2.1-beta-linux-x86_64 > SHA256SUMS.txt && cat SHA256SUMS.txt && ls -l)
       - uses: actions/upload-artifact@v4
         with:
-          name: pawline-0.2.0-beta
+          name: pawline-0.2.1-beta
           path: |
-            out/pawline-0.2.0-beta-linux-x86_64
+            out/pawline-0.2.1-beta-linux-x86_64
             out/SHA256SUMS.txt
             needed.txt
             glibc.txt
@@ -68,4 +68,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ inputs.tag }}" out/pawline-0.2.0-beta-linux-x86_64 out/SHA256SUMS.txt --clobber
+          gh release upload "${{ inputs.tag }}" out/pawline-0.2.1-beta-linux-x86_64 out/SHA256SUMS.txt --clobber
