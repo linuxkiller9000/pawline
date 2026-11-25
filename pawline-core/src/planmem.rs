@@ -82,7 +82,7 @@ pub fn record_success(path: &Path, request: &str, steps: &[String], now: u64) ->
         return false;
     }
     let steps: Vec<String> = steps.iter().take(MAX_STEPS).map(|s| s.chars().take(MAX_LEN).collect()).collect();
-    if crate::textfallback::looks_like_secret(request) || steps.iter().any(|s| crate::textfallback::looks_like_secret(s)) {
+    if crate::textfallback::looks_like_secret(request) || steps.iter().any(|s| crate::textfallback::looks_like_secret(&s.replace('/', " "))) {
         return false;
     }
     let key = lookup_key(request);
@@ -148,6 +148,17 @@ pub fn forget_all(path: &Path) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn long_paths_with_digits_are_not_mistaken_for_secrets() {
+        let p = std::env::temp_dir().join(format!("pawline-pm-path-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        assert!(record_success(&p, "make a folder called c3 in ho co models", &["Create folder /tmp/xh/container/models/c3".to_string()], 1));
+        let _ = std::fs::remove_file(&p);
+        // a real key inside a path is still refused
+        assert!(!record_success(&p, "make x", &["Create folder /tmp/sk-abcdefghijklmnopqrstuvwxyz0123456789".to_string()], 1));
+        let _ = std::fs::remove_file(&p);
+    }
+
     use super::*;
     fn tmp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("pawline-planmem-{tag}-{}", std::process::id()));
