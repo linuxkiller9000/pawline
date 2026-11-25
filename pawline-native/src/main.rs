@@ -85,16 +85,74 @@ impl Surf {
     }
 }
 
+/// Where finished pixels go and how the surface is resized. One implementation per windowing backend.
+trait Out {
+    fn present(&mut self, w: u32, h: u32, pm: &Pixmap);
+    fn resize(&mut self, w: u32, h: u32);
+}
+
+/// A key press, independent of the windowing backend.
+struct Ke {
+    keysym: Keysym,
+    utf8: Option<String>,
+}
+
+/// Wayland-only state.
 struct App {
     registry: RegistryState,
     seat: SeatState,
     output: OutputState,
     shm: Shm,
-    pool: SlotPool,
-    surf: Surf,
     qh: QueueHandle<App>,
     kb: Option<wl_keyboard::WlKeyboard>,
     ptr: Option<wl_pointer::WlPointer>,
+    ui: Ui,
+}
+impl std::ops::Deref for App {
+    type Target = Ui;
+    fn deref(&self) -> &Ui {
+        &self.ui
+    }
+}
+impl std::ops::DerefMut for App {
+    fn deref_mut(&mut self) -> &mut Ui {
+        &mut self.ui
+    }
+}
+
+struct WlOut {
+    pool: SlotPool,
+    surf: Surf,
+}
+impl Out for WlOut {
+    fn present(&mut self, w: u32, h: u32, pm: &Pixmap) {
+        let stride = w as i32 * 4;
+        let (buffer, canvas) = self.pool.create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888).unwrap();
+        // tiny-skia: premultiplied RGBA; wl_shm Argb8888 (LE): B,G,R,A premultiplied
+        for (d, s) in canvas.chunks_exact_mut(4).zip(pm.data().chunks_exact(4)) {
+            d[0] = s[2];
+            d[1] = s[1];
+            d[2] = s[0];
+            d[3] = s[3];
+        }
+        self.surf.wl().damage_buffer(0, 0, w as i32, h as i32);
+        buffer.attach_to(self.surf.wl()).unwrap();
+        self.surf.commit();
+    }
+    fn resize(&mut self, w: u32, h: u32) {
+        match &self.surf {
+            Surf::Layer(l) => l.set_size(w, h),
+            Surf::Win(win) => {
+                win.set_min_size(Some((w, h)));
+                win.set_max_size(Some((w, h)));
+            }
+        }
+    }
+}
+
+/// All UI state and input handling (shared by every backend).
+struct Ui {
+    out: Box<dyn Out>,
     w: u32,
     h: u32,
     expanded: bool,
@@ -112,7 +170,6 @@ struct App {
     cache: HashMap<(char, u32), (fontdue::Metrics, Vec<u8>)>,
     tx: mpsc::Sender<Req>,
     exit: bool,
-    layer_mode: bool,
     // hit rects (x, y, w, h), set by draw
     r_yes: (f32, f32, f32, f32),
     r_no: (f32, f32, f32, f32),
@@ -178,7 +235,7 @@ fn stroke(pm: &mut Pixmap, path: &Path, c: (u8, u8, u8, u8), w: f32) {
     pm.stroke_path(path, &p, &s, Transform::identity(), None);
 }
 
-impl App {
+impl Ui {
     fn glyph(&mut self, ch: char, px: f32) -> &(fontdue::Metrics, Vec<u8>) {
         let key = (ch, px.to_bits());
         if !self.cache.contains_key(&key) {
@@ -297,21 +354,7 @@ impl App {
         } else {
             self.draw_card(&mut pm);
         }
-        let stride = w as i32 * 4;
-        let (buffer, canvas) = self
-            .pool
-            .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
-            .unwrap();
-        // tiny-skia: premultiplied RGBA; wl_shm Argb8888 (LE): B,G,R,A premultiplied
-        for (d, s) in canvas.chunks_exact_mut(4).zip(pm.data().chunks_exact(4)) {
-            d[0] = s[2];
-            d[1] = s[1];
-            d[2] = s[0];
-            d[3] = s[3];
-        }
-        self.surf.wl().damage_buffer(0, 0, w as i32, h as i32);
-        buffer.attach_to(self.surf.wl()).unwrap();
-        self.surf.commit();
+        self.out.present(w, h, &pm);
     }
 
     fn draw_card(&mut self, pm: &mut Pixmap) {
@@ -482,13 +525,7 @@ impl App {
             self.w = COMPACT;
             self.h = COMPACT;
         }
-        match &self.surf {
-            Surf::Layer(l) => l.set_size(self.w, self.h),
-            Surf::Win(win) => {
-                win.set_min_size(Some((self.w, self.h)));
-                win.set_max_size(Some((self.w, self.h)));
-            }
-        }
+        self.out.resize(self.w, self.h);
         self.draw();
     }
 
@@ -640,7 +677,7 @@ impl App {
         self.draw();
     }
 
-    fn key(&mut self, e: KeyEvent) {
+    fn key(&mut self, e: Ke) {
         if !self.expanded {
             if matches!(e.keysym, Keysym::Return | Keysym::KP_Enter | Keysym::space) {
                 self.set_expanded(true);
@@ -869,7 +906,7 @@ impl KeyboardHandler for App {
         self.draw();
     }
     fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, e: KeyEvent) {
-        self.key(e);
+        self.key(Ke { keysym: e.keysym, utf8: e.utf8 });
     }
     fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, e: KeyEvent) {
         if e.keysym == Keysym::F9 {
@@ -1105,6 +1142,55 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
     }
 }
 
+impl Ui {
+    fn new(out: Box<dyn Out>, tx: mpsc::Sender<Req>) -> Ui {
+        let font = fontdue::Font::from_bytes(FONT, fontdue::FontSettings::default()).unwrap();
+        let mut ui = Ui {
+            out,
+        w: COMPACT,
+        h: COMPACT,
+        expanded: false,
+        input: String::new(),
+        msgs: vec![Msg { user: false, kind: "message".into(), text: "Hi, I am Pawline. Try: make a folder called kitten paws".into() }],
+        confirm: None,
+        dl_ask: false,
+        dl_cancel: None,
+        focus: Btn::No,
+        scroll: 0.0,
+        plan_scroll: 0.0,
+        busy: false,
+        font,
+        cache: HashMap::new(),
+        tx,
+        exit: false,
+        r_yes: (0.0, 0.0, 0.0, 0.0),
+        r_no: (0.0, 0.0, 0.0, 0.0),
+        r_collapse: (0.0, 0.0, 0.0, 0.0),
+        ptr_pos: (0.0, 0.0),
+        plan_max: 0.0,
+        chat_max: 0.0,
+        voice_on: false,
+        voice_pending: false,
+        cap: None,
+        voice_status: String::new(),
+        voice_preview: false,
+        voice_origin: false,
+        cursor: 0,
+        input_top: 0,
+        input_follow: true,
+        input_lines_n: 0,
+        bottom: BOTTOM,
+        };
+        if std::env::var("PAWLINE_START_EXPANDED").is_ok() {
+            ui.expanded = true;
+            ui.w = W;
+            ui.h = H;
+            ui.out.resize(W, H);
+        }
+        ui
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -1135,7 +1221,7 @@ fn main() {
     let force_window = std::env::var("PAWLINE_NO_LAYER").is_ok();
     let layer_shell = if force_window { None } else { LayerShell::bind(&globals, &qh).ok() };
     let surface = compositor.create_surface(&qh);
-    let (surf, layer_mode) = match layer_shell {
+    let surf = match layer_shell {
         Some(ls) => {
             let l = ls.create_layer_surface(&qh, surface, Layer::Top, Some("pawline"), None);
             l.set_anchor(Anchor::TOP | Anchor::RIGHT);
@@ -1143,7 +1229,7 @@ fn main() {
             l.set_size(COMPACT, COMPACT);
             l.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
             l.commit();
-            (Surf::Layer(l), true)
+            Surf::Layer(l)
         }
         None => {
             let xdg = XdgShell::bind(&globals, &qh).expect("neither wlr-layer-shell nor xdg-shell is available");
@@ -1153,70 +1239,26 @@ fn main() {
             win.set_min_size(Some((COMPACT, COMPACT)));
             win.set_max_size(Some((COMPACT, COMPACT)));
             win.commit();
-            (Surf::Win(win), false)
+            Surf::Win(win)
         }
     };
     let pool = SlotPool::new((W * H * 4) as usize, &shm).unwrap();
-    let font = fontdue::Font::from_bytes(FONT, fontdue::FontSettings::default()).unwrap();
 
     let (req_tx, req_rx) = mpsc::channel::<Req>();
     let (back_tx, back_rx) = channel::channel::<UiReply>();
     std::thread::spawn(move || worker(req_rx, back_tx));
 
+    let ui = Ui::new(Box::new(WlOut { pool, surf }), req_tx);
     let mut app = App {
         registry: RegistryState::new(&globals),
         seat: SeatState::new(&globals, &qh),
         output: OutputState::new(&globals, &qh),
         shm,
-        pool,
-        surf,
         qh: qh.clone(),
         kb: None,
         ptr: None,
-        w: COMPACT,
-        h: COMPACT,
-        expanded: false,
-        input: String::new(),
-        msgs: vec![Msg { user: false, kind: "message".into(), text: "Hi, I am Pawline. Try: make a folder called kitten paws".into() }],
-        confirm: None,
-        dl_ask: false,
-        dl_cancel: None,
-        focus: Btn::No,
-        scroll: 0.0,
-        plan_scroll: 0.0,
-        busy: false,
-        font,
-        cache: HashMap::new(),
-        tx: req_tx,
-        exit: false,
-        layer_mode,
-        r_yes: (0.0, 0.0, 0.0, 0.0),
-        r_no: (0.0, 0.0, 0.0, 0.0),
-        r_collapse: (0.0, 0.0, 0.0, 0.0),
-        ptr_pos: (0.0, 0.0),
-        plan_max: 0.0,
-        chat_max: 0.0,
-        voice_on: false,
-        voice_pending: false,
-        cap: None,
-        voice_status: String::new(),
-        voice_preview: false,
-        voice_origin: false,
-        cursor: 0,
-        input_top: 0,
-        input_follow: true,
-        input_lines_n: 0,
-        bottom: BOTTOM,
+        ui,
     };
-    if std::env::var("PAWLINE_START_EXPANDED").is_ok() {
-        app.expanded = true;
-        app.w = W;
-        app.h = H;
-        if let Surf::Layer(l) = &app.surf {
-            l.set_size(W, H);
-        }
-    }
-
     let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
     let handle = event_loop.handle();
     WaylandSource::new(conn.clone(), queue).insert(handle.clone()).unwrap();
