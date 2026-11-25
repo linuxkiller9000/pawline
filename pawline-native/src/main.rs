@@ -3,6 +3,7 @@
 //! OpenGL, EGL, GTK or WebKit is loaded.
 mod bridge;
 mod edit;
+mod md;
 mod thumb;
 
 mod ctl;
