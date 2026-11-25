@@ -128,6 +128,10 @@ struct App {
     r_no: (f32, f32, f32, f32),
     r_collapse: (f32, f32, f32, f32),
     ptr_pos: (f64, f64),
+    input_off: usize,
+    dragging: bool,
+    bubbles: Vec<((f32, f32, f32, f32), String)>,
+    toast: Option<&'static str>,
     /// Max plan_scroll for the current plan panel, set by draw.
     plan_max: f32,
     chat_max: f32,
@@ -324,17 +328,37 @@ impl App {
             // input box
             fill(pm, &rrect(PAD - 2.0, h - 52.0, w - 2.0 * PAD + 4.0, 40.0, 12.0), (52, 48, 70, 255));
             let (mut before, mut after) = self.input.split();
+            let mut trimmed = 0usize;
             // keep the caret visible: trim from the left first, then from the right
             while before.chars().chain(after.chars()).map(|c| self.adv(c, PX)).sum::<f32>() > inner_w - 20.0 {
                 if !before.is_empty() {
                     before.remove(0);
+                    trimmed += 1;
                 } else if !after.is_empty() {
                     after.pop();
                 } else {
                     break;
                 }
             }
+            self.input_off = trimmed;
+            if let Some((a, b)) = self.input.sel() {
+                let chars: Vec<char> = self.input.text().chars().collect();
+                let (a, b) = (a.max(trimmed), b.max(trimmed));
+                let x0: f32 = chars[trimmed..a.min(chars.len())].iter().map(|c| self.adv(*c, PX)).sum();
+                let x1: f32 = chars[trimmed..b.min(chars.len())].iter().map(|c| self.adv(*c, PX)).sum();
+                let bar = self.adv('|', PX);
+                let c = self.input.caret();
+                let x0 = if a > c { x0 + bar } else { x0 };
+                let x1 = if b > c { x1 + bar } else { x1 };
+                if x1 > x0 {
+                    // the caret bar takes one glyph of width in the drawn string; selection sits before/after it
+                    fill(pm, &rrect(PAD + 8.0 + x0, h - 46.0, x1 - x0, 28.0, 4.0), (92, 80, 170, 255));
+                }
+            }
             let shown = format!("{before}|{after}");
+            if let Some(t) = self.toast {
+                self.text(pm, t, w - PAD - 60.0, h - 58.0, 12.0, (170, 165, 195), (0.0, h));
+            }
             let col = if self.busy { (150, 145, 165) } else { (255, 255, 255) };
             self.text(pm, &shown, PAD + 8.0, h - 26.0, PX, col, (0.0, h));
         }
@@ -351,12 +375,15 @@ impl App {
         // layout all messages
         let bub_w = inner_w - 40.0;
         let mut items: Vec<(bool, String, Vec<String>, f32)> = Vec::new();
+        let mut texts: Vec<String> = Vec::new();
+        self.bubbles.clear();
         let mut total = 0.0;
         let msgs: Vec<(bool, String, String)> = self.msgs.iter().map(|m| (m.user, m.kind.clone(), m.text.clone())).collect();
         for (user, kind, text) in msgs {
             let lines = self.wrap(&text, PX, bub_w - 20.0);
             let bh = lines.len() as f32 * LH + 14.0;
             total += bh + 8.0;
+            texts.push(text.clone());
             items.push((user, kind, lines, bh));
         }
         let view = bot - top;
@@ -367,10 +394,11 @@ impl App {
         // y of content start so that the bottom aligns with `bot` + scroll
         let mut cp = Pixmap::new(w as u32, view as u32).unwrap();
         let mut y = view - total + self.scroll;
-        for (user, kind, lines, bh) in items {
+        for (idx, (user, kind, lines, bh)) in items.into_iter().enumerate() {
             let bw = lines.iter().map(|l| l.chars().map(|c| self.adv(c, PX)).sum::<f32>()).fold(0.0, f32::max) + 20.0;
             let bx = if user { w - PAD - bw } else { PAD };
             if y + bh > 0.0 && y < view {
+                self.bubbles.push(((bx, top + y.max(0.0), bw, (bh).min(view - y.max(0.0)).min(y + bh)), texts[idx].clone()));
                 let col = if user {
                     (62, 54, 112, 255)
                 } else if kind == "error" || kind == "failed" {
@@ -495,6 +523,7 @@ impl App {
     }
 
     fn key(&mut self, e: KeyEvent) {
+        self.toast = None;
         if !self.expanded {
             if matches!(e.keysym, Keysym::Return | Keysym::KP_Enter | Keysym::space) {
                 self.set_expanded(true);
@@ -605,6 +634,23 @@ impl App {
         }
     }
 
+    /// Character index in the input for a pointer x position.
+    fn idx_at(&mut self, x: f32) -> usize {
+        let target = x - (PAD + 8.0);
+        let chars: Vec<char> = self.input.text().chars().collect();
+        let mut acc = 0.0;
+        let mut i = self.input_off.min(chars.len());
+        while i < chars.len() {
+            let a = self.adv(chars[i], PX);
+            if acc + a / 2.0 > target {
+                break;
+            }
+            acc += a;
+            i += 1;
+        }
+        i
+    }
+
     fn click(&mut self) {
         if !self.expanded {
             self.set_expanded(true);
@@ -613,6 +659,26 @@ impl App {
         if inside(self.r_collapse, self.ptr_pos) {
             self.set_expanded(false);
             return;
+        }
+        if self.confirm.is_none() {
+            let (px, py) = self.ptr_pos;
+            let (w, h) = (self.w as f32, self.h as f32);
+            if inside((PAD - 2.0, h - 52.0, w - 2.0 * PAD + 4.0, 40.0), self.ptr_pos) {
+                let i = self.idx_at(px as f32);
+                self.input.set_caret(i, self.shift);
+                self.dragging = true;
+                self.toast = None;
+                self.draw();
+                return;
+            }
+            // click a message bubble to copy its text (without the "Took" line)
+            let hit = self.bubbles.iter().find(|(r, _)| inside(*r, (px, py))).map(|(_, t)| t.clone());
+            if let Some(t) = hit {
+                let t = strip_took(&t);
+                self.toast = Some(if self.clip_copy(t) { "Copied" } else { "No clipboard" });
+                self.draw();
+                return;
+            }
         }
         if self.confirm.is_some() {
             if inside(self.r_yes, self.ptr_pos) {
@@ -719,6 +785,12 @@ impl PointerHandler for App {
             self.ptr_pos = e.position;
             match e.kind {
                 PointerEventKind::Press { .. } => self.click(),
+                PointerEventKind::Release { .. } => self.dragging = false,
+                PointerEventKind::Motion { .. } if self.dragging => {
+                    let i = self.idx_at(e.position.0 as f32);
+                    self.input.set_caret(i, true);
+                    self.draw();
+                }
                 PointerEventKind::Axis { vertical, .. } => {
                     let d = if vertical.discrete != 0 { vertical.discrete as f32 * 40.0 } else { vertical.absolute as f32 };
                     self.wheel(d);
@@ -726,6 +798,12 @@ impl PointerHandler for App {
                 _ => {}
             }
         }
+    }
+}
+fn strip_took(t: &str) -> String {
+    match t.rsplit_once("\nTook ") {
+        Some((a, b)) if b.ends_with('s') && b.len() < 8 => a.to_string(),
+        _ => t.to_string(),
     }
 }
 const CLIP_MIMES: [&str; 5] = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "TEXT", "STRING"];
@@ -997,6 +1075,10 @@ fn main() {
         input: edit::Edit::default(),
         ctrl: false,
         shift: false,
+        input_off: 0,
+        dragging: false,
+        bubbles: Vec::new(),
+        toast: None,
         msgs: vec![Msg { user: false, kind: "message".into(), text: "Hi, I am Pawline. Try: make a folder called kitten paws".into() }],
         confirm: None,
         focus: Btn::No,

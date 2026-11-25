@@ -40,6 +40,7 @@ impl Edit {
         if extend { if self.anchor.is_none() { self.anchor = Some(self.caret); } } else { self.anchor = None; }
     }
     fn fix_anchor(&mut self) { if self.anchor == Some(self.caret) { self.anchor = None; } }
+    pub fn sel(&self) -> Option<(usize, usize)> { self.range() }
     fn range(&self) -> Option<(usize, usize)> {
         self.anchor.map(|a| (a.min(self.caret), a.max(self.caret)))
     }
