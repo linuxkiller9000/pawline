@@ -50,6 +50,9 @@ streaming English, MIT, from https://download.moonshine.ai, verified against a f
 SHA-256 for every file. The legacy non-streaming Arabic models are non-commercial;
 the Arabic streaming model is listed as MIT by Moonshine but Pawline does not use it.
 
+HOST FLOOR WHEN VOICE IS ON: the executable needs glibc 2.34; the embedded libgcc_s.so.1 needs GLIBC_2.35
+symbols, libstdc++ 2.34, libmoonshine 2.34 and libonnxruntime 2.27 (checked with objdump -T).
+
 3. RUST DEPENDENCIES OF THE pawline-native BUILD (name, version, SPDX licence)
 Full licence texts for each crate are in THIRD-PARTY-RUST.txt (also printed by --licenses).
 The cargo registry copy of each crate was used; the vendored C/C++ parts (cactus, LLVM libc++,
@@ -3516,7 +3519,7 @@ none of this has been published. Verified so far (sandbox download, hashes match
  from http://archive.ubuntu.com/ubuntu/pool/main/g/gcc-12/
 
  Moonshine v0.1.6 source tree (includes the Eigen MPL-2.0 sources and scripts/ort-build-common.sh):
- git archive of https://github.com/moonshine-ai/moonshine tag v0.1.6, commit d8d8fa29d05ca67441a7719e70099f9f48917a93.
+ git archive of https://github.com/moonshine-ai/moonshine tag v0.1.6 (tag object a0ea0d091df875025db8818ab4cf7e0f36b75ff0, commit d8d8fa29d05ca67441a7719e70099f9f48917a93; `git describe` on the audited clone says v0.1.6-0).
  PENDING: the archive is not created yet and the exact build inputs of the delivered
  libmoonshine.so / libonnxruntime.so.1 are not proven to equal that tree.
 
