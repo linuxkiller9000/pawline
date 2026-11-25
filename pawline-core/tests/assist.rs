@@ -132,8 +132,10 @@ fn both_fail_reports_both() {
         .plan_with("zqx wvut", Some(&mock))
         .unwrap_err()
         .to_string();
-    assert!(e.contains("assist also failed"), "got: {e}");
-    assert!(e.contains("model offline"), "got: {e}");
+    // The user gets the parser's plain explanation; the assist's own failure text stays internal.
+    assert!(e.contains("don't know how to"), "got: {e}");
+    assert!(!e.contains("assist"), "got: {e}");
+    assert!(!e.contains("model offline"), "got: {e}");
 }
 
 /// A confirmation-gated assist proposal (delete) still needs the user's yes.

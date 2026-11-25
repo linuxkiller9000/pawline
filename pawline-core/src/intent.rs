@@ -172,7 +172,20 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
     // ASCII lowercase keeps byte offsets identical to `cmd`, so slices of
     // `lower` can be mapped back to the user's exact letters.
     let lower = cmd.to_ascii_lowercase();
+    // Greetings, thanks and "what can you do" get a plain reply, never a refusal.
+    if let Some(text) = small_talk(&lower) {
+        return Ok(Directive::Answer { text });
+    }
     for (pre, engine) in [
+        ("search wikipedia for ", crate::plan::SearchEngine::Wiki),
+        ("search wikipedia ", crate::plan::SearchEngine::Wiki),
+        ("search the web for ", crate::plan::SearchEngine::Web),
+        ("search the web ", crate::plan::SearchEngine::Web),
+        ("search online ", crate::plan::SearchEngine::Web),
+        ("search for ", crate::plan::SearchEngine::Web),
+        ("search up ", crate::plan::SearchEngine::Web),
+        ("look up ", crate::plan::SearchEngine::Web),
+        ("lookup ", crate::plan::SearchEngine::Web),
         ("search the web for ", crate::plan::SearchEngine::Web),
         ("search online for ", crate::plan::SearchEngine::Web),
         ("web search ", crate::plan::SearchEngine::Web),
@@ -267,9 +280,38 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
         };
         return Ok(Directive::List { target });
     }
+    if matches!(first, "generate" | "draw" | "paint" | "imagine" | "render")
+        || ((lower.contains("image of") || lower.contains("picture of")) && !lower.contains("wallpaper"))
+    {
+        return Err(PawError::Parse(
+            "I can't generate images yet. What I can do: make, delete, rename, move, copy, open and list files and folders, open an installed app, set a wallpaper, search the web or Wikipedia, simple math, and undo."
+                .into(),
+        ));
+    }
     Err(PawError::Parse(format!(
-        "\"{first}\" isn't an action I know. I can make, delete, rename, move, copy, open and list."
+        "I don't know how to \"{first}\" yet. I can make, delete, rename, move, copy, open and list files and folders, open an installed app, set a wallpaper, search the web (say \"search for ...\"), do simple math, and undo. Say \"help\" for examples."
     )))
+}
+
+/// Plain replies for greetings, thanks and help. Pure text; touches nothing.
+fn small_talk(lower: &str) -> Option<String> {
+    let t: String = lower.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    let t = t.strip_suffix(" pawline").unwrap_or(&t).to_string();
+    const HELLO: &[&str] = &["hello", "hi", "hey", "hiya", "yo", "good morning", "good evening", "good afternoon", "hello there", "hi there", "hey there", "salam", "assalamu alaikum"];
+    const THANKS: &[&str] = &["thanks", "thank you", "thx", "ty"];
+    const HELP: &[&str] = &["help", "what can you do", "what do you do", "how do i use this", "how does this work", "commands", "examples"];
+    const HELP_TEXT: &str = "I can:\n- make files and folders: make a folder called kitten paws\n- delete, rename, move, copy and list them (deleting and moving ask first)\n- open an installed app: open mpv (I show the exact command and ask first)\n- set a wallpaper: set wallpaper to ~/Pictures/a.png\n- search: search for what is a cat, or search wikipedia for cats\n- simple math: what is 12 * 7\n- undo the last change: undo\nI can't generate images or chat in depth yet.";
+    if HELLO.contains(&t.as_str()) {
+        return Some(format!("Hi! {HELP_TEXT}"));
+    }
+    if THANKS.contains(&t.as_str()) {
+        return Some("You're welcome.".into());
+    }
+    if HELP.contains(&t.as_str()) {
+        return Some(HELP_TEXT.into());
+    }
+    None
 }
 
 /// Parse a create clause: "<verb> [a] [kind] [in <loc>] called|named <names>"

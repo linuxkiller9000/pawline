@@ -74,12 +74,11 @@ impl Engine {
             Ok(d) => (d, false),
             Err(parse_err) => match assist {
                 Some(a) => (
-                    a.propose(input).map_err(|assist_err| {
-                        let inner = match &parse_err {
-                            PawError::Parse(m) => m.clone(),
-                            other => other.to_string(),
-                        };
-                        PawError::Parse(format!("{inner} (assist also failed: {assist_err})"))
+                    // The assist's own failure text (confidence numbers, empty proposals) is
+                    // internal detail; the user sees the parser's plain explanation only.
+                    a.propose(input).map_err(|_assist_err| match &parse_err {
+                        PawError::Parse(m) => PawError::Parse(m.clone()),
+                        other => PawError::Parse(other.to_string()),
                     })?,
                     true,
                 ),

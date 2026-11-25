@@ -62,7 +62,7 @@ pub fn reply(kind: &str, text: String) -> UiReply {
 }
 
 
-pub fn handle_text(state: &mut UiState, input: &str) -> UiReply {
+fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     let backend = match DirectFsBackend::new(&state.root).map(|inner| UiBackend { inner }) {
         Ok(b) => b,
         Err(e) => return reply("error", format!("backend: {e}")),
@@ -138,7 +138,7 @@ pub fn with_notes(state: &mut UiState, mut r: UiReply) -> UiReply {
     r
 }
 
-pub fn confirm_inner(state: &mut UiState) -> UiReply {
+fn confirm_exec(state: &mut UiState) -> UiReply {
     let plan = match state.pending.take() {
         Some(p) => p,
         None => return reply("error", "Nothing waiting for confirmation.".into()),
@@ -194,4 +194,55 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
 pub fn cancel(state: &mut UiState) -> UiReply {
     state.pending = None;
     reply("message", "Cancelled. Nothing was done.".into())
+}
+
+/// Seconds shown to the user: rounded UP to one decimal ("1.21" -> "1.3"), at least 0.1.
+pub fn took(d: std::time::Duration) -> String {
+    let tenths = ((d.as_micros() + 99_999) / 100_000).max(1);
+    format!("{}.{}s", tenths / 10, tenths % 10)
+}
+
+/// Add "Took N.Ns" to a finished result. A plan waiting for confirmation is not a result, and the
+/// time the user spends deciding is never included (the timer for a confirmed run starts at confirm).
+fn timed(mut r: UiReply, d: std::time::Duration) -> UiReply {
+    if matches!(r.kind.as_str(), "executed" | "failed" | "message" | "error") {
+        r.text = format!("{}\nTook {}", r.text, took(d));
+    }
+    r
+}
+
+/// Request received -> result ready (parsing, planning, any online lookup, and execution when no confirmation is needed).
+pub fn handle_text(state: &mut UiState, input: &str) -> UiReply {
+    let t = std::time::Instant::now();
+    let r = handle_text_inner(state, input);
+    timed(r, t.elapsed())
+}
+
+/// Confirmation received -> result ready (execution only).
+pub fn confirm_inner(state: &mut UiState) -> UiReply {
+    let t = std::time::Instant::now();
+    let r = confirm_exec(state);
+    timed(r, t.elapsed())
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+    use std::time::Duration as D;
+    #[test]
+    fn rounds_up_to_one_decimal() {
+        assert_eq!(took(D::from_millis(1210)), "1.3s");
+        assert_eq!(took(D::from_millis(1200)), "1.2s");
+        assert_eq!(took(D::from_millis(1)), "0.1s");
+        assert_eq!(took(D::from_millis(0)), "0.1s");
+        assert_eq!(took(D::from_millis(9951)), "10.0s");
+        assert_eq!(took(D::from_secs(61)), "61.0s");
+    }
+    #[test]
+    fn confirm_wait_is_not_counted_and_plans_carry_no_time() {
+        let plan = reply("confirm", "p".into());
+        assert_eq!(timed(plan, D::from_secs(3)).text, "p");
+        let done = timed(reply("executed", "Done".into()), D::from_millis(50));
+        assert_eq!(done.text, "Done\nTook 0.1s");
+    }
 }
