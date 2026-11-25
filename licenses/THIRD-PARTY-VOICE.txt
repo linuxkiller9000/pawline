@@ -1,8 +1,8 @@
 PAWLINE: THIRD-PARTY NOTICES FOR THE OPTIONAL VOICE FEATURE
 (this text is built into the program: run `pawline --licenses` to print it offline)
 
-STATUS: DRAFT, NOT YET RELEASE-REVIEWED. Items marked PENDING are not complete.
-Nothing in this file has been bundled into a release.
+STATUS: audited text for the optional voice feature; no voice build has been released with it. It records
+what was checked and its limits. It is not legal advice and does not claim legal clearance.
 
 1. WHAT THE VOICE FEATURE LOADS
 Voice is off by default. When enabled, Pawline loads four shared libraries from
@@ -28,11 +28,15 @@ libmoonshine.so and libonnxruntime.so.1 (Moonshine Voice v0.1.6 linux-x86_64 rel
   that the source of covered files stays available: this is that offer, see section 5).
   libonnxruntime.so.1 is built by Moonshine from Microsoft ONNX Runtime v1.23.2
   (https://github.com/microsoft/onnxruntime, MIT) with a reduced operator set using
-  scripts/ort-build-common.sh from the repository above. The build script and the hash of the delivered file were checked;
-  the binary was not rebuilt from source.
+  scripts/ort-build-common.sh from the repository above. The delivered libonnxruntime.so.1 is byte-identical to the one in the Moonshine v0.1.6 tree
+  (sha256 above). The binary reports its own build string git-commit-id=a83fc4d58c; Pawline has not
+  verified that commit against upstream (the ONNX Runtime repository could not be fetched on 2026-11-25).
+  ONNX Runtime is MIT: this file carries its copyright and permission notice. The ONNX Runtime source and
+  an exact rebuild were not verified and are not part of this distribution.
+  The libmoonshine.so and libonnxruntime.so.1 files were not rebuilt bit-for-bit from source.
   ONNX Runtime ThirdPartyNotices for v1.23.2: see THIRD-PARTY-ORT.txt (also printed by --licenses),
   taken from the official PyPI wheel of the same version (hash checked against PyPI).
-  Not yet matched against Moonshine's actual build inputs; it is a superset.
+  It is Microsoft's notice list for the whole ORT project, so it is a superset of what the reduced build contains.
 
 libgcc_s.so.1 and libstdc++.so.6 (GCC 12.3.0 runtime, Ubuntu 22.04)
   Binary: Ubuntu packages libgcc-s1 and libstdc++6 version 12.3.0-1ubuntu1~22.04.3 (amd64);
@@ -43,6 +47,18 @@ libgcc_s.so.1 and libstdc++.so.6 (GCC 12.3.0 runtime, Ubuntu 22.04)
   Corresponding source: Ubuntu source package gcc-12 12.3.0-1ubuntu1~22.04.3 and
   gcc-12_12.3.0.orig.tar.gz at
   http://archive.ubuntu.com/ubuntu/pool/main/g/gcc-12/ (see section 5).
+
+Embedded speech clips in libmoonshine.so (text to speech reference voices, not used by Pawline):
+  The vendor libmoonshine.so contains built-in ZipVoice reference voice clips taken from the CSTR VCTK Corpus
+  (version 0.92), Copyright (c) 2019 Junichi Yamagishi, The Centre for Speech Technology Research, University
+  of Edinburgh, licensed under Creative Commons Attribution 4.0 International
+  (https://creativecommons.org/licenses/by/4.0/legalcode). Per Moonshine's own documentation the clips are
+  4-second, 24 kHz, mono, 16-bit excerpts, one masculine and one feminine speaker per accent, exported by
+  scripts/export_zipvoice_voices_for_cpp.py (changes: selection, trimming and resampling).
+  Corpus: https://datashare.ed.ac.uk/ . Pawline does not call any text-to-speech function. These clips are
+  inside the unchanged vendor library and cannot be removed without rebuilding it.
+  Other text-to-speech and grapheme-to-phoneme data directories of the Moonshine repository carry their own
+  terms (see core/moonshine-tts/data/README.md there); they are not included in Pawline's source archive.
 
 Needle3 / cactus runtime: see the NOTICE file shipped with Pawline.
 Speech model files (downloaded only if you agree; never bundled): Moonshine tiny
@@ -3509,24 +3525,31 @@ contrib/unicode/from_glibc:
 
 
 CORRESPONDING SOURCE TO DISTRIBUTE WITH ANY BINARY THAT CONTAINS THESE LIBS (section 5)
-Chosen route (draft): ship the corresponding source as release assets next to the binary, with
-this manifest, instead of relying on a written offer or on URLs alone. No release exists yet;
-none of this has been published. Verified so far (sandbox download, hashes match the Ubuntu .dsc):
+Route: ship the source archives below as downloadable assets next to any binary that embeds these
+libraries, with this manifest. Required: the GCC archives (GPL runtime libraries) and the Moonshine
+source archive (it carries the MPL-2.0 Eigen sources, which must stay available). Nothing has been
+published yet. Verified (sandbox download, hashes match the Ubuntu .dsc):
 
  gcc-12_12.3.0.orig.tar.gz                           91,555,468 B  62b0fc89b6d41f9df2470d0fb4995f6ff5885f910518a2c6a44a6888ea5a9ea1
  gcc-12_12.3.0-1ubuntu1~22.04.3.debian.tar.xz           587,456 B  44074c3d5e7d97365f1f7b45291ade2ee40ed6300176530d912e7cc0ceba77ab  (Ubuntu patches and build scripts)
  gcc-12_12.3.0-1ubuntu1~22.04.3.dsc                      27,845 B  ec040a1fa94186bd53535f7156e086e67863bb55836ae7fd7fef64f1ab66b04d
  from http://archive.ubuntu.com/ubuntu/pool/main/g/gcc-12/
 
- Moonshine v0.1.6 source tree (includes the Eigen MPL-2.0 sources and scripts/ort-build-common.sh):
- git archive of https://github.com/moonshine-ai/moonshine tag v0.1.6 (tag object a0ea0d091df875025db8818ab4cf7e0f36b75ff0, commit d8d8fa29d05ca67441a7719e70099f9f48917a93; `git describe` on the audited clone says v0.1.6-0).
- PENDING: the archive is not created yet and the exact build inputs of the delivered
- libmoonshine.so / libonnxruntime.so.1 are not proven to equal that tree.
+ Moonshine v0.1.6 source-only archive (scripts/collect-voice-sources.sh, step moonshine): git archive of
+ https://github.com/moonshine-ai/moonshine tag v0.1.6 (commit d8d8fa29d05ca67441a7719e70099f9f48917a93).
+ Test audio, other test assets, docs audio/images, the microcontroller port, language bindings, examples,
+ the prebuilt ONNX Runtime binaries and the text-to-speech data directories are left out; the script writes
+ a manifest of every excluded file (blob id, size, path). Kept: core/ (all sources, CMake files and the
+ licences of third-party code, including Eigen), scripts/, LICENSE and docs/license.md.
+ Archive built 2026-11-25: 8983293 B, sha256 a31541ba37575436f0d681e29eebe812371d11734ba3d33aae332fd412502655.
+ Limits: the exact build inputs of the delivered libmoonshine.so are not proven to equal that tree (no bit-for-bit
+ rebuild); a configure of the archive succeeds once an ONNX Runtime library is supplied, and a compile attempt
+ used a different compiler and flags from the vendor. The embedded TTS reference clips are still in the
+ vendor binary and their source (core/moonshine-tts/src/zipvoice-voices-data.cpp) stays in the archive.
 
- Microsoft ONNX Runtime v1.23.2 source (MIT) with any Moonshine patches or config
- (core/third-party/onnxruntime/moonshine-required-operators.config in the tree above).
- PENDING: github.com/microsoft/onnxruntime is not reachable from the sandbox, so the exact source
- archive and its hash are not collected. Needs a CI or network-capable route.
+ ONNX Runtime v1.23.2 source: not part of this distribution. ONNX Runtime is MIT, which requires its notice,
+ included above. An optional source sidecar needs a verified upstream commit; scripts/collect-voice-sources.sh
+ refuses to produce one without it.
 
 Who the recipient contacts, and any promise with a time limit, is an owner/legal decision
 and is not made in this file. Pawline itself is GPL-3.0: https://github.com/linuxkiller9000/pawline
