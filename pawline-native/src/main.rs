@@ -671,9 +671,73 @@ impl ProvidesRegistryState for App {
     registry_handlers![OutputState, SeatState];
 }
 
-fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
-    let root = std::env::temp_dir().join("pawline-ui-home");
+/// The folder Pawline works inside: PAWLINE_ROOT if set, else the home folder.
+fn work_root() -> std::path::PathBuf {
+    let root = std::env::var_os("PAWLINE_ROOT")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("pawline-home"));
     let _ = std::fs::create_dir_all(&root);
+    root
+}
+
+/// Terminal mode (--no-ui). Same engine, same validation, same confirmation
+/// rules. Only a typed "yes" at a real terminal approves a plan; piped or
+/// closed input never approves anything.
+fn run_terminal() {
+    use std::io::{BufRead, IsTerminal, Write};
+    let tty = std::io::stdin().is_terminal();
+    let mut st = bridge::new_state(work_root());
+    println!("Pawline (terminal mode). Type a command, or 'quit' to leave.");
+    if !st.notes.is_empty() {
+        let n = st.notes.drain(..).collect::<Vec<_>>().join("\n");
+        println!("After an interrupted run I checked the undo journal:\n{n}");
+    }
+    let stdin = std::io::stdin();
+    let mut lines = stdin.lock().lines();
+    loop {
+        print!("> ");
+        let _ = std::io::stdout().flush();
+        let line = match lines.next() {
+            Some(Ok(l)) => l,
+            _ => break,
+        };
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t == "quit" || t == "exit" {
+            break;
+        }
+        st.pending = None;
+        let r = bridge::handle_text(&mut st, t);
+        let r = bridge::with_notes(&mut st, r);
+        println!("{}", r.text);
+        if r.kind == "confirm" {
+            if !tty {
+                let _ = bridge::cancel(&mut st);
+                println!("Not approved: confirmation needs a person typing at a terminal. Nothing was done.");
+                continue;
+            }
+            print!("Type yes to do this, anything else cancels: ");
+            let _ = std::io::stdout().flush();
+            let ans = match lines.next() {
+                Some(Ok(l)) => l,
+                _ => String::new(),
+            };
+            let r2 = if ans.trim() == "yes" {
+                let r = bridge::confirm_inner(&mut st);
+                bridge::with_notes(&mut st, r)
+            } else {
+                bridge::cancel(&mut st)
+            };
+            println!("{}", r2.text);
+        }
+    }
+}
+
+fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
+    let root = work_root();
     let mut st = bridge::new_state(root);
     // Recovery notes from the previous run are shown first.
     if !st.notes.is_empty() {
@@ -700,6 +764,20 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("pawline [--no-ui]\n  (no flag)  floating orb and chat on Wayland\n  --no-ui    terminal mode, same commands and confirmations\nPAWLINE_NO_LAYER=1 uses a normal window. PAWLINE_ROOT sets the working folder (default: home).");
+        return;
+    }
+    if args.iter().any(|a| a == "--no-ui") {
+        run_terminal();
+        return;
+    }
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        eprintln!("No Wayland display found, so the window can't open. Starting terminal mode (same commands, same confirmations). Use --no-ui to choose this directly.");
+        run_terminal();
+        return;
+    }
     let conn = Connection::connect_to_env().expect("no Wayland compositor found (WAYLAND_DISPLAY)");
     let (globals, queue) = registry_queue_init(&conn).unwrap();
     let qh = queue.handle();
