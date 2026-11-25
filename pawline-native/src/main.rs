@@ -49,6 +49,7 @@ const BOTTOM: f32 = 64.0;
 
 enum Req {
     VoiceCheck,
+    Download(std::sync::Arc<std::sync::atomic::AtomicBool>),
     Voice(Vec<f32>),
     Text(String, bool),
     Confirm,
@@ -128,6 +129,10 @@ struct App {
     voice_preview: bool,
     /// True while the text in the input box came from speech (stays set while edited).
     voice_origin: bool,
+    /// The open confirm card is the model-download question, not a plan.
+    dl_ask: bool,
+    /// Set while a model download runs; Esc sets it to cancel.
+    dl_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Edit cursor as a char index into `input`, first visible wrapped line, and layout memo.
     cursor: usize,
     input_top: usize,
@@ -448,7 +453,8 @@ impl App {
         let (yes_bg, yes_fg) = if can_yes { ((46, 125, 80, 255), (255, 255, 255)) } else { ((60, 60, 66, 255), (130, 130, 140)) };
         fill(pm, &rrect(self.r_yes.0, by, 120.0, 34.0, 10.0), yes_bg);
         fill(pm, &rrect(self.r_no.0, by, 120.0, 34.0, 10.0), (110, 60, 70, 255));
-        self.text(pm, "Do it", self.r_yes.0 + 36.0, by + 23.0, PX, yes_fg, (0.0, h));
+        let yes_label = if self.dl_ask { "Download" } else { "Do it" };
+        self.text(pm, yes_label, self.r_yes.0 + if self.dl_ask { 22.0 } else { 36.0 }, by + 23.0, PX, yes_fg, (0.0, h));
         self.text(pm, "Cancel", self.r_no.0 + 30.0, by + 23.0, PX, (255, 255, 255), (0.0, h));
         let fr = if self.focus == Btn::Yes { self.r_yes } else { self.r_no };
         stroke(pm, &rrect(fr.0 - 2.0, fr.1 - 2.0, fr.2 + 4.0, fr.3 + 4.0, 12.0), (34, 211, 238, 255), 2.5);
@@ -554,12 +560,46 @@ impl App {
         }
         self.confirm = None;
         self.plan_scroll = 0.0;
+        if self.dl_ask {
+            self.dl_ask = false;
+            self.voice_pending = false;
+            if yes {
+                let c = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                self.dl_cancel = Some(c.clone());
+                self.voice_pending = true;
+                self.busy = true;
+                self.voice_status = "downloading speech model, Esc cancels".into();
+                let _ = self.tx.send(Req::Download(c));
+            } else {
+                self.push(false, "message", "Okay, nothing was downloaded. Voice stays off.".into());
+            }
+            return;
+        }
         self.busy = true;
         let _ = self.tx.send(if yes { Req::Confirm } else { Req::Cancel });
     }
 
     fn on_reply(&mut self, r: UiReply) {
+        if r.kind == "dl-progress" {
+            if self.dl_cancel.is_some() {
+                self.voice_status = format!("{}, Esc cancels", r.text);
+                self.draw();
+            }
+            return;
+        }
+        if r.kind == "voice-needmodel" {
+            self.voice_pending = false;
+            self.voice_status.clear();
+            self.dl_ask = true;
+            self.confirm = Some(r.text);
+            self.focus = Btn::No;
+            self.plan_scroll = 0.0;
+            self.draw();
+            return;
+        }
         if r.kind == "voice-ready" || r.kind == "voice-error" {
+            self.dl_cancel = None;
+            self.busy = false;
             self.voice_pending = false;
             self.voice_status.clear();
             self.voice_on = r.kind == "voice-ready";
@@ -604,6 +644,14 @@ impl App {
             return;
         }
         let page = 200.0;
+        if let Some(c) = &self.dl_cancel {
+            if e.keysym == Keysym::Escape {
+                c.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.voice_status = "cancelling download".into();
+                self.draw();
+            }
+            return;
+        }
         if self.cap.is_some() {
             // Any key other than the held F9 cancels listening.
             if e.keysym != Keysym::F9 {
@@ -935,12 +983,17 @@ fn run_terminal() {
 }
 
 /// Reads the pinned libs into memory, verifies them, loads from memory. Fails closed.
-fn voice_runtime() -> Result<pawline_voice::runtime::Runtime, String> {
+enum VoiceErr {
+    /// The libs are fine but the speech model is missing or fails its pinned hashes.
+    NeedModel,
+    Msg(String),
+}
+fn voice_runtime() -> Result<pawline_voice::runtime::Runtime, VoiceErr> {
+    voice_runtime_inner().map_err(VoiceErr::Msg).and_then(|r| r)
+}
+fn voice_runtime_inner() -> Result<Result<pawline_voice::runtime::Runtime, VoiceErr>, String> {
     let dir = voice_cfg::voice_dir();
     let model = voice_cfg::model_dir();
-    if !model.join("encoder.ort").exists() {
-        return Err(format!("Voice is not set up: no speech model found in {}. It is optional; Pawline works without it.", model.display()));
-    }
     let mut bytes = Vec::new();
     for (name, _) in voice_cfg::LIBS {
         let f = dir.join("lib").join(name);
@@ -955,7 +1008,18 @@ fn voice_runtime() -> Result<pawline_voice::runtime::Runtime, String> {
         .zip(bytes.iter())
         .map(|((n, h), b)| pawline_voice::runtime::PinnedLib { name: n, bytes: b, sha256_hex: h })
         .collect();
-    pawline_voice::runtime::Runtime::load(&libs).map_err(|e| e.to_string())
+    if !pawline_voice::download::verify_dir(&pawline_voice::download::EN_TINY, &model) {
+        return Ok(Err(VoiceErr::NeedModel));
+    }
+    pawline_voice::runtime::Runtime::load(&libs).map(Ok).map_err(|e| e.to_string())
+}
+
+fn need_model_text() -> String {
+    let p = &pawline_voice::download::EN_TINY;
+    format!(
+        "Voice needs a speech model that is not on this computer. Download it now?\n\nModel: {} (English)\nFrom: {}\nSize: {:.1} MB\nSaved to: {}\n\nEvery file is checked against a fixed checksum before it is used. If it fails the check, or you cancel, nothing is kept. Nothing is downloaded unless you choose Download. Cancel is selected.",
+        p.id, p.host(), p.total_bytes() as f64 / 1e6, voice_cfg::model_dir().display()
+    )
 }
 
 fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
@@ -974,8 +1038,30 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
                     vrt = Some(rt);
                     bridge::reply("voice-ready", "Voice is on. Hold F9 and talk, release to get a transcript to review. F8 turns it off. Audio stays in memory and is not saved.".into())
                 }
-                Err(e) => bridge::reply("voice-error", e),
+                Err(VoiceErr::NeedModel) => bridge::reply("voice-needmodel", need_model_text()),
+                Err(VoiceErr::Msg(e)) => bridge::reply("voice-error", e),
             },
+            Req::Download(c) => {
+                let last = std::cell::Cell::new(0u64);
+                let b2 = back.clone();
+                let r = pawline_voice::download::download_model(&pawline_voice::download::EN_TINY, &voice_cfg::model_dir(), &c, &|d, t| {
+                    if d == t || d >= last.get() + (1 << 20) {
+                        last.set(d);
+                        let _ = b2.send(bridge::reply("dl-progress", format!("downloading speech model {:.0} / {:.0} MB", d as f64 / 1e6, t as f64 / 1e6)));
+                    }
+                });
+                match r {
+                    Err(e) => bridge::reply("voice-error", format!("Model download stopped: {e}. Nothing was kept.")),
+                    Ok(()) => match voice_runtime() {
+                        Ok(rt) => {
+                            vrt = Some(rt);
+                            bridge::reply("voice-ready", "Model downloaded and verified. Voice is on. Hold F9 and talk, release to get a transcript to review. F8 turns it off. Audio stays in memory and is not saved.".into())
+                        }
+                        Err(VoiceErr::NeedModel) => bridge::reply("voice-error", "The model did not verify after download. Nothing was kept.".into()),
+                        Err(VoiceErr::Msg(e)) => bridge::reply("voice-error", e),
+                    },
+                }
+            }
             Req::Voice(samples) => match &vrt {
                 None => bridge::reply("voice-fail", "Voice is not loaded. Press F8 to turn it on.".into()),
                 Some(rt) => match rt.transcribe(&voice_cfg::model_dir().to_string_lossy(), &samples) {
@@ -1068,6 +1154,8 @@ fn main() {
         input: String::new(),
         msgs: vec![Msg { user: false, kind: "message".into(), text: "Hi, I am Pawline. Try: make a folder called kitten paws".into() }],
         confirm: None,
+        dl_ask: false,
+        dl_cancel: None,
         focus: Btn::No,
         scroll: 0.0,
         plan_scroll: 0.0,
