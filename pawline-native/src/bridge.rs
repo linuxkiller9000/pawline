@@ -272,12 +272,15 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
         return r;
     }
     if let Some((text_search, q)) = pawline_core::finder::parse(input) {
+        // Pawline's own data folder is never searched, besides the journal store the scope always leaves out.
+        let own_dir: Vec<std::path::PathBuf> = pawline_core::searchmem::default_path().and_then(|p| p.parent().map(|d| d.to_path_buf())).into_iter().collect();
+        let Some(sc) = pawline_core::finder::Scope::new(&state.root, own_dir) else { return reply("failed", "I can't open your home area to search it.".into()) };
         let f = if text_search {
-            pawline_core::finder::find_text(&state.root, &q)
+            pawline_core::finder::find_text(&sc, &q)
         } else {
-            pawline_core::finder::find_names(&state.root, &q.split_whitespace().map(String::from).collect::<Vec<_>>())
+            pawline_core::finder::find_names(&sc, &q.split_whitespace().map(String::from).collect::<Vec<_>>())
         };
-        let mut r = reply("message", pawline_core::finder::render(if text_search { "rg" } else { "fd" }, &q, &state.root, &f));
+        let mut r = reply("message", pawline_core::finder::render(if text_search { "rg" } else { "fd" }, &q, &sc.root, &f));
         let rows = pawline_core::finder::dir_rows(&f);
         if !rows.is_empty() {
             r.plan = Some(rows.join("\n"));

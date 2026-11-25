@@ -7,6 +7,8 @@ use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{sinks::UTF8, BinaryDetection, SearcherBuilder};
 use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const MAX_RESULTS: usize = 30;
@@ -14,83 +16,161 @@ pub const TIME_LIMIT: Duration = Duration::from_secs(2);
 const MAX_FILE: u64 = 2 * 1024 * 1024;
 const MAX_LINE: usize = 160;
 
+#[derive(Default, Clone)]
 pub struct Found {
     pub hits: Vec<(PathBuf, bool, Option<String>)>, // path, is_dir, matching line (rg)
     pub truncated: bool,
     pub timed_out: bool,
+    /// Files not read: over 2 MB, unreadable, or changed into something else while searching.
+    pub skipped: usize,
+    pub scanned: usize,
 }
 
-fn walker(root: &Path) -> ignore::Walk {
-    let store = root.join(crate::journal::STORE);
-    WalkBuilder::new(root).follow_links(false).filter_entry(move |e| !e.path().starts_with(&store)).build()
+/// Where a search may look. The root is canonical; folders in `exclude` (Pawline's own data) are never entered.
+#[derive(Clone)]
+pub struct Scope {
+    pub root: PathBuf,
+    pub exclude: Vec<PathBuf>,
+    pub limit: Duration,
 }
 
-/// Names containing every word (smart case: lower-case words ignore case). Folders and files.
-pub fn find_names(root: &Path, words: &[String]) -> Found {
-    let start = Instant::now();
-    let mut f = Found { hits: vec![], truncated: false, timed_out: false };
-    if words.is_empty() {
-        return f;
+impl Scope {
+    pub fn new(root: &Path, mut exclude: Vec<PathBuf>) -> Option<Scope> {
+        let root = std::fs::canonicalize(root).ok()?;
+        exclude.push(root.join(crate::journal::STORE));
+        let exclude = exclude.into_iter().filter_map(|p| std::fs::canonicalize(&p).ok().or(Some(p))).collect();
+        Some(Scope { root, exclude, limit: TIME_LIMIT })
     }
-    let sens: Vec<bool> = words.iter().map(|w| w.chars().any(|c| c.is_uppercase())).collect();
-    for ent in walker(root).flatten() {
-        if start.elapsed() > TIME_LIMIT {
-            f.timed_out = true;
-            break;
-        }
-        if ent.path() == root {
-            continue;
-        }
-        let name = ent.file_name().to_string_lossy().to_string();
-        let low = name.to_lowercase();
-        if words.iter().zip(&sens).all(|(w, s)| if *s { name.contains(w.as_str()) } else { low.contains(&w.to_lowercase()) }) {
-            if f.hits.len() == MAX_RESULTS {
-                f.truncated = true;
-                break;
-            }
-            f.hits.push((ent.path().to_path_buf(), ent.file_type().is_some_and(|t| t.is_dir()), None));
-        }
+}
+
+fn walker(sc: &Scope) -> ignore::Walk {
+    let ex = sc.exclude.clone();
+    WalkBuilder::new(&sc.root).follow_links(false).filter_entry(move |e| !ex.iter().any(|x| e.path().starts_with(x))).build()
+}
+
+/// Run `work` on a worker thread and wait at most the limit (plus a little). The UI never waits on a slow disk:
+/// on a timeout the hits so far are returned, marked incomplete, and the worker is told to stop.
+fn run(sc: &Scope, work: impl FnOnce(&Scope, &AtomicBool, &Mutex<Found>) + Send + 'static) -> Found {
+    let stop = Arc::new(AtomicBool::new(false));
+    let out = Arc::new(Mutex::new(Found::default()));
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    {
+        let (sc, stop, out) = (sc.clone(), stop.clone(), out.clone());
+        std::thread::spawn(move || {
+            work(&sc, &stop, &out);
+            let _ = tx.send(());
+        });
+    }
+    let finished = rx.recv_timeout(sc.limit + Duration::from_millis(500)).is_ok();
+    stop.store(true, Ordering::SeqCst);
+    let mut f = out.lock().map(|g| g.clone()).unwrap_or_default();
+    if !finished {
+        f.timed_out = true;
     }
     f
 }
 
-/// Lines containing the text (literal, smart case) in text files up to 2 MB. Binary files are skipped.
-pub fn find_text(root: &Path, text: &str) -> Found {
-    let start = Instant::now();
-    let mut f = Found { hits: vec![], truncated: false, timed_out: false };
-    if text.trim().is_empty() {
-        return f;
-    }
-    let smart = !text.chars().any(|c| c.is_uppercase());
-    let Ok(m) = RegexMatcherBuilder::new().case_insensitive(smart).fixed_strings(true).build(text) else { return f };
-    let mut s = SearcherBuilder::new().binary_detection(BinaryDetection::quit(0)).line_number(true).build();
-    'outer: for ent in walker(root).flatten() {
-        if start.elapsed() > TIME_LIMIT {
-            f.timed_out = true;
-            break;
+/// Names containing every word (smart case: a word with a capital letter is case-sensitive). Folders and files.
+pub fn find_names(sc: &Scope, words: &[String]) -> Found {
+    let words = words.to_vec();
+    run(sc, move |sc, stop, out| {
+        if words.is_empty() {
+            return;
         }
-        if !ent.file_type().is_some_and(|t| t.is_file()) || ent.metadata().map(|m| m.len() > MAX_FILE).unwrap_or(true) {
-            continue;
-        }
-        let mut first: Option<String> = None;
-        let _ = s.search_path(&m, ent.path(), UTF8(|n, line| {
-            first = Some(format!("{n}: {}", line.trim().chars().take(MAX_LINE).collect::<String>()));
-            Ok(false)
-        }));
-        if let Some(l) = first {
-            if f.hits.len() == MAX_RESULTS {
-                f.truncated = true;
-                break 'outer;
+        let start = Instant::now();
+        let sens: Vec<bool> = words.iter().map(|w| w.chars().any(|c| c.is_uppercase())).collect();
+        for ent in walker(sc).flatten() {
+            if stop.load(Ordering::SeqCst) || start.elapsed() > sc.limit {
+                if let Ok(mut f) = out.lock() {
+                    f.timed_out = true;
+                }
+                return;
             }
-            f.hits.push((ent.path().to_path_buf(), false, Some(l)));
+            if ent.path() == sc.root {
+                continue;
+            }
+            let name = ent.file_name().to_string_lossy().to_string();
+            let low = name.to_lowercase();
+            if words.iter().zip(&sens).all(|(w, s)| if *s { name.contains(w.as_str()) } else { low.contains(&w.to_lowercase()) }) {
+                let Ok(mut f) = out.lock() else { return };
+                if f.hits.len() == MAX_RESULTS {
+                    f.truncated = true;
+                    return;
+                }
+                f.hits.push((ent.path().to_path_buf(), ent.file_type().is_some_and(|t| t.is_dir()), None));
+            }
         }
+    })
+}
+
+/// Open a regular file without following a symlink and without blocking on a pipe, then check that what we hold
+/// is the same regular file the path names, still inside the root (guards against a swap after the walk).
+fn open_checked(path: &Path, root: &Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC).open(path).ok()?;
+    let md = f.metadata().ok()?;
+    if !md.is_file() || md.len() > MAX_FILE {
+        return None;
     }
-    f
+    let real = std::fs::canonicalize(path).ok()?;
+    let again = std::fs::metadata(&real).ok()?;
+    (real.starts_with(root) && again.ino() == md.ino() && again.dev() == md.dev()).then_some(f)
+}
+
+/// Lines containing the text (literal, smart case) in text files up to 2 MB. Binary files (a NUL byte) are skipped.
+pub fn find_text(sc: &Scope, text: &str) -> Found {
+    let text = text.to_string();
+    run(sc, move |sc, stop, out| {
+        if text.trim().is_empty() {
+            return;
+        }
+        let start = Instant::now();
+        let smart = !text.chars().any(|c| c.is_uppercase());
+        let Ok(m) = RegexMatcherBuilder::new().case_insensitive(smart).fixed_strings(true).build(&text) else { return };
+        let mut s = SearcherBuilder::new().binary_detection(BinaryDetection::quit(0)).line_number(true).build();
+        for ent in walker(sc).flatten() {
+            if stop.load(Ordering::SeqCst) || start.elapsed() > sc.limit {
+                if let Ok(mut f) = out.lock() {
+                    f.timed_out = true;
+                }
+                return;
+            }
+            if !ent.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+            let Some(file) = open_checked(ent.path(), &sc.root) else {
+                if let Ok(mut f) = out.lock() {
+                    f.skipped += 1;
+                }
+                continue;
+            };
+            if let Ok(mut f) = out.lock() {
+                f.scanned += 1;
+            }
+            let mut first: Option<String> = None;
+            let _ = s.search_file(&m, &file, UTF8(|n, line| {
+                first = Some(format!("{n}: {}", line.trim().chars().take(MAX_LINE).collect::<String>()));
+                Ok(false)
+            }));
+            if let Some(l) = first {
+                let Ok(mut f) = out.lock() else { return };
+                if f.hits.len() == MAX_RESULTS {
+                    f.truncated = true;
+                    return;
+                }
+                f.hits.push((ent.path().to_path_buf(), false, Some(l)));
+            }
+        }
+    })
 }
 
 pub fn render(kind: &str, query: &str, root: &Path, f: &Found) -> String {
     if f.hits.is_empty() {
-        return format!("{kind} \"{query}\": nothing found in your home area{}. Hidden and .gitignore'd files are skipped.", if f.timed_out { " within 2 seconds" } else { "" });
+        return if f.timed_out {
+            format!("{kind} \"{query}\": nothing found yet, but I stopped after 2 seconds, so this search is incomplete. Add a word to narrow it.")
+        } else {
+            format!("{kind} \"{query}\": searched everything I can look at in your home area and found no match.{} Hidden files, .gitignore'd files (inside git repos), binary files and files over 2 MB are not searched.", if f.skipped > 0 { format!(" ({} file(s) could not be read.)", f.skipped) } else { String::new() })
+        };
     }
     let mut out = format!("{kind} \"{query}\" (read only, inside your home area):\n");
     for (k, (p, d, l)) in f.hits.iter().enumerate() {
@@ -146,15 +226,60 @@ mod tests {
         std::fs::create_dir_all(r.join(".git")).unwrap();
         std::fs::write(r.join(".gitignore"), "ignored.txt\n").unwrap();
         std::fs::write(r.join("ignored.txt"), "Needle").unwrap();
-        let f = find_names(&r, &["models".into()]);
+        std::fs::write(r.join("big.txt"), "Needle ".repeat(400_000)).unwrap();
+        let sc = Scope::new(&r, vec![]).unwrap();
+        let f = find_names(&sc, &["models".into()]);
         assert_eq!(f.hits.len(), 1);
         assert!(f.hits[0].1);
-        assert!(find_names(&r, &["Models".into()]).hits.len() == 1 && find_names(&r, &["MODELS".into()]).hits.is_empty());
-        let t = find_text(&r, "needle");
+        assert!(find_names(&sc, &["Models".into()]).hits.len() == 1 && find_names(&sc, &["MODELS".into()]).hits.is_empty());
+        let t = find_text(&sc, "needle");
         let names: Vec<String> = t.hits.iter().map(|h| h.0.file_name().unwrap().to_string_lossy().to_string()).collect();
-        assert_eq!(names, vec!["notes.txt"], "hidden, binary (and .gitignore in a git repo) are skipped: {names:?}");
+        assert_eq!(names, vec!["notes.txt"], "hidden, binary, .gitignore'd and over-2MB files are skipped: {names:?}");
         assert!(t.hits[0].2.as_ref().unwrap().starts_with("2: Needle here"));
+        assert!(t.skipped >= 1, "the big file is reported as not read");
+        let none = find_text(&sc, "zzzqqq");
+        assert!(none.hits.is_empty() && !none.timed_out);
+        assert!(render("rg", "zzzqqq", &r, &none).contains("found no match"));
     }
+
+    #[test]
+    fn symlinks_and_excluded_folders_are_never_used() {
+        let r = tmp("b");
+        let out = tmp("b-outside");
+        std::fs::write(out.join("secret.txt"), "Needle outside").unwrap();
+        std::os::unix::fs::symlink(&out, r.join("linkdir")).unwrap();
+        std::os::unix::fs::symlink(out.join("secret.txt"), r.join("linkfile.txt")).unwrap();
+        std::fs::create_dir_all(r.join("pawdata")).unwrap();
+        std::fs::write(r.join("pawdata/mem.json"), "Needle private").unwrap();
+        std::fs::write(r.join("ok.txt"), "Needle ok").unwrap();
+        let sc = Scope::new(&r, vec![r.join("pawdata")]).unwrap();
+        let t = find_text(&sc, "needle");
+        let names: Vec<String> = t.hits.iter().map(|h| h.0.file_name().unwrap().to_string_lossy().to_string()).collect();
+        assert_eq!(names, vec!["ok.txt"], "{names:?}");
+        assert!(find_names(&sc, &["mem".into()]).hits.is_empty());
+        assert!(find_names(&sc, &["secret".into()]).hits.is_empty());
+        // a file swapped for a link after the walk is refused by the checked open
+        assert!(open_checked(&r.join("linkfile.txt"), &sc.root).is_none());
+        assert!(open_checked(&r.join("ok.txt"), &sc.root).is_some());
+    }
+
+    #[test]
+    fn a_pipe_does_not_hang_and_time_limit_is_reported() {
+        let r = tmp("c");
+        let fifo = r.join("pipe.txt");
+        let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        std::fs::write(r.join("a.txt"), "Needle").unwrap();
+        let sc = Scope::new(&r, vec![]).unwrap();
+        let t0 = Instant::now();
+        let t = find_text(&sc, "needle");
+        assert!(t0.elapsed() < Duration::from_secs(1) && t.hits.len() == 1, "pipe skipped, others searched");
+        let mut zero = sc.clone();
+        zero.limit = Duration::from_secs(0);
+        let f = find_names(&zero, &["a".into()]);
+        assert!(f.timed_out || f.hits.len() == 1);
+    }
+
     #[test]
     fn parse_only_the_two_commands() {
         assert_eq!(parse("fd co models"), Some((false, "co models".into())));
