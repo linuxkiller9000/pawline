@@ -17,12 +17,14 @@ pub const STT_TIMEOUT: Duration = Duration::from_secs(90);
 pub struct Cmd {
     pub program: String,
     pub args: Vec<String>,
+    /// Extra environment (library path for a private sherpa-onnx install).
+    pub env: Vec<(String, String)>,
 }
 
 fn split_env(s: &str) -> Option<Cmd> {
     let mut it = s.split_whitespace().map(String::from);
     let program = it.next()?;
-    Some(Cmd { program, args: it.collect() })
+    Some(Cmd { program, args: it.collect(), env: vec![] })
 }
 
 /// The recorder command for writing a WAV to `out`. `PAWLINE_REC_CMD` overrides detection (program and fixed args;
@@ -37,34 +39,94 @@ pub fn recorder(env_override: Option<&str>, has: &dyn Fn(&str) -> bool, out: &Pa
     if has("parecord") {
         let mut args = a(&["--channels=1", "--rate=16000", "--format=s16le", "--file-format=wav"]);
         args.push(o);
-        return Ok(Cmd { program: "parecord".into(), args });
+        return Ok(Cmd { program: "parecord".into(), args, env: vec![] });
     }
     if has("pw-record") {
         let mut args = a(&["--rate", "16000", "--channels", "1"]);
         args.push(o);
-        return Ok(Cmd { program: "pw-record".into(), args });
+        return Ok(Cmd { program: "pw-record".into(), args, env: vec![] });
     }
     if has("arecord") {
         let mut args = a(&["-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "wav"]);
         args.push(o);
-        return Ok(Cmd { program: "arecord".into(), args });
+        return Ok(Cmd { program: "arecord".into(), args, env: vec![] });
     }
     Err("No recorder found. Install one of: parecord (PulseAudio), pw-record (PipeWire) or arecord (ALSA).".into())
 }
 
-/// The speech-to-text command for the WAV at `wav`. `PAWLINE_STT_CMD` overrides (file path appended; it must print the
-/// text on stdout). Otherwise whisper.cpp (whisper-cli) with a model file the user already has.
-pub fn stt(env_override: Option<&str>, has: &dyn Fn(&str) -> bool, model: Option<PathBuf>, wav: &Path) -> Result<Cmd, String> {
+/// What the user has installed for speech-to-text.
+pub struct SttSetup {
+    /// sherpa-onnx-offline (official CLI) and, for a private install, its library folder.
+    pub sherpa: Option<(String, Option<PathBuf>)>,
+    /// A Moonshine model folder (the sherpa-onnx export) found in the user's models folder.
+    pub moonshine: Option<PathBuf>,
+    pub whisper_model: Option<PathBuf>,
+}
+
+/// Files of a sherpa-onnx Moonshine (v1) model folder, if complete.
+pub fn moonshine_files(dir: &Path) -> Option<[PathBuf; 5]> {
+    let pick = |names: &[&str]| names.iter().map(|n| dir.join(n)).find(|p| p.is_file());
+    Some([
+        pick(&["preprocess.onnx"])?,
+        pick(&["encode.int8.onnx", "encode.onnx"])?,
+        pick(&["uncached_decode.int8.onnx", "uncached_decode.onnx"])?,
+        pick(&["cached_decode.int8.onnx", "cached_decode.onnx"])?,
+        pick(&["tokens.txt"])?,
+    ])
+}
+
+/// Look for sherpa-onnx and a Moonshine model where Pawline documents them: PATH, or ~/.local/share/pawline/sherpa,
+/// and ~/.local/share/pawline/models/moonshine-*.
+pub fn find_stt(home: &Path, has: &dyn Fn(&str) -> bool) -> SttSetup {
+    let base = home.join(".local/share/pawline");
+    let private = base.join("sherpa/bin/sherpa-onnx-offline");
+    let sherpa = if has("sherpa-onnx-offline") {
+        Some(("sherpa-onnx-offline".to_string(), None))
+    } else if private.is_file() {
+        Some((private.to_string_lossy().to_string(), Some(base.join("sherpa/lib"))))
+    } else {
+        None
+    };
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(base.join("models")).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+    dirs.sort();
+    let moonshine = dirs.into_iter().find(|d| d.is_dir() && d.file_name().map_or(false, |n| n.to_string_lossy().starts_with("moonshine-")) && moonshine_files(d).is_some());
+    SttSetup { sherpa, moonshine, whisper_model: find_model(None, home) }
+}
+
+/// The speech-to-text command for the WAV at `wav`. Order: `PAWLINE_STT_CMD` override (file path appended; it must
+/// print the text on stdout); sherpa-onnx with a Moonshine model (the planned default: small, MIT, CPU only); then
+/// whisper.cpp with a model the user already has. Pawline never downloads models.
+pub fn stt(env_override: Option<&str>, has: &dyn Fn(&str) -> bool, setup: &SttSetup, wav: &Path) -> Result<Cmd, String> {
     let w = wav.to_string_lossy().to_string();
     if let Some(mut c) = env_override.and_then(split_env) {
         c.args.push(w);
         return Ok(c);
     }
+    if let (Some((bin, lib)), Some(dir)) = (&setup.sherpa, &setup.moonshine) {
+        if let Some(f) = moonshine_files(dir) {
+            let p = |x: &PathBuf| x.to_string_lossy().to_string();
+            let args = vec![
+                format!("--moonshine-preprocessor={}", p(&f[0])),
+                format!("--moonshine-encoder={}", p(&f[1])),
+                format!("--moonshine-uncached-decoder={}", p(&f[2])),
+                format!("--moonshine-cached-decoder={}", p(&f[3])),
+                format!("--tokens={}", p(&f[4])),
+                "--num-threads=1".to_string(),
+                w,
+            ];
+            let env = lib.iter().map(|l| ("LD_LIBRARY_PATH".to_string(), l.to_string_lossy().to_string())).collect();
+            return Ok(Cmd { program: bin.clone(), args, env });
+        }
+    }
     let bin = ["whisper-cli", "whisper-cpp"].into_iter().find(|b| has(b));
-    match (bin, model) {
-        (Some(b), Some(m)) => Ok(Cmd { program: b.into(), args: vec!["-m".into(), m.to_string_lossy().to_string(), "-f".into(), w, "-nt".into(), "-np".into()] }),
-        (Some(_), None) => Err("whisper.cpp is installed but no model file was found. Put a ggml model (for example ggml-base.bin) in ~/.local/share/pawline/models/ or set PAWLINE_WHISPER_MODEL. Pawline does not download models.".into()),
-        _ => Err("No speech-to-text engine found. Install whisper.cpp (whisper-cli) with a ggml model, or set PAWLINE_STT_CMD to a local command that prints the text for a WAV file. Pawline never uses an online service for this.".into()),
+    match (bin, &setup.whisper_model) {
+        (Some(b), Some(m)) => Ok(Cmd { program: b.into(), args: vec!["-m".into(), m.to_string_lossy().to_string(), "-f".into(), w, "-nt".into(), "-np".into()], env: vec![] }),
+        _ => Err(format!(
+            "No speech-to-text set up. Pawline's default is Moonshine through sherpa-onnx: install sherpa-onnx-offline (on PATH, or in ~/.local/share/pawline/sherpa/) and put a Moonshine model folder named moonshine-* in ~/.local/share/pawline/models/. Alternatives: whisper.cpp (whisper-cli plus a ggml .bin model in that models folder), or PAWLINE_STT_CMD. Pawline downloads nothing and never uses an online service for this. Found: sherpa-onnx {}, Moonshine model {}, whisper {}.",
+            if setup.sherpa.is_some() { "yes" } else { "no" },
+            if setup.moonshine.is_some() { "yes" } else { "no" },
+            if bin.is_some() { "yes" } else { "no" }
+        )),
     }
 }
 
@@ -86,13 +148,13 @@ pub fn tts(env_override: Option<&str>, has: &dyn Fn(&str) -> bool) -> Result<Cmd
         return Ok(c);
     }
     if has("espeak-ng") {
-        return Ok(Cmd { program: "espeak-ng".into(), args: vec!["--stdin".into()] });
+        return Ok(Cmd { program: "espeak-ng".into(), args: vec!["--stdin".into()], env: vec![] });
     }
     if has("espeak") {
-        return Ok(Cmd { program: "espeak".into(), args: vec!["--stdin".into()] });
+        return Ok(Cmd { program: "espeak".into(), args: vec!["--stdin".into()], env: vec![] });
     }
     if has("flite") {
-        return Ok(Cmd { program: "flite".into(), args: vec!["-f".into(), "/dev/stdin".into()] });
+        return Ok(Cmd { program: "flite".into(), args: vec!["-f".into(), "/dev/stdin".into()], env: vec![] });
     }
     Err("No local text-to-speech engine found. Install espeak-ng (or flite), or set PAWLINE_TTS_CMD to a local command that reads text on stdin and speaks it.".into())
 }
@@ -153,7 +215,9 @@ pub fn temp_wav() -> PathBuf {
 pub fn start_recording(cmd: &Cmd, out: &Path) -> Result<Child, String> {
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(out).map_err(|e| format!("Could not create the private audio file: {e}"))?;
-    Command::new(&cmd.program).args(&cmd.args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| {
+    let mut c = Command::new(&cmd.program);
+    c.args(&cmd.args).envs(cmd.env.iter().cloned()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    group(&mut c).spawn().map_err(|e| {
         let _ = std::fs::remove_file(out);
         format!("Could not start {}: {e}", cmd.program)
     })
@@ -168,8 +232,7 @@ pub fn stop_recording(mut child: Child) {
             Ok(Some(_)) => return,
             Ok(None) if t.elapsed() < Duration::from_secs(3) => std::thread::sleep(Duration::from_millis(20)),
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_group(&mut child);
                 return;
             }
         }
@@ -178,17 +241,31 @@ pub fn stop_recording(mut child: Child) {
 
 /// Stop at once and throw the audio away.
 pub fn cancel_recording(mut child: Child, out: &Path) {
-    let _ = child.kill();
-    let _ = child.wait();
+    kill_group(&mut child);
     let _ = std::fs::remove_file(out);
 }
 
-/// Run the STT command on the WAV; the WAV is deleted whatever happens. Returns the cleaned transcript.
-pub fn transcribe(cmd: &Cmd, wav: &Path, timeout: Duration) -> Result<String, String> {
-    let r = run_capture(cmd, timeout);
+pub const CANCELLED: &str = "cancelled";
+
+/// Kill a child and everything it started (it runs in its own process group).
+pub fn kill_group(child: &mut Child) {
+    let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", child.id())]).status();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn group(c: &mut Command) -> &mut Command {
+    use std::os::unix::process::CommandExt;
+    c.process_group(0)
+}
+
+/// Run the STT command on the WAV; the WAV is deleted whatever happens (done, failed, timed out, cancelled).
+/// `cancel` is polled while it runs; when it turns true the engine and its helpers are killed and Err(CANCELLED) comes back.
+pub fn transcribe(cmd: &Cmd, wav: &Path, timeout: Duration, cancel: &std::sync::atomic::AtomicBool) -> Result<String, String> {
+    let r = run_capture(cmd, timeout, cancel);
     let _ = std::fs::remove_file(wav);
     let raw = r?;
-    let text = clean_transcript(&raw);
+    let text = extract_json_text(&raw).map(|t| clean_transcript(&t)).unwrap_or_else(|| clean_transcript(&raw));
     if text.is_empty() {
         Err("I did not hear any words. Nothing was added.".into())
     } else {
@@ -196,9 +273,42 @@ pub fn transcribe(cmd: &Cmd, wav: &Path, timeout: Duration) -> Result<String, St
     }
 }
 
-fn run_capture(cmd: &Cmd, timeout: Duration) -> Result<String, String> {
+/// sherpa-onnx prints one JSON result line; take its "text". None when there is no such line.
+pub fn extract_json_text(raw: &str) -> Option<String> {
+    for line in raw.lines() {
+        let l = line.trim();
+        if !l.starts_with('{') {
+            continue;
+        }
+        let k = l.find("\"text\"")?;
+        let rest = l[k + 6..].trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+        let mut out = String::new();
+        let mut it = rest.chars();
+        while let Some(c) = it.next() {
+            match c {
+                '"' => return Some(out),
+                '\\' => match it.next()? {
+                    'n' | 't' | 'r' => out.push(' '),
+                    'u' => {
+                        let h: String = it.by_ref().take(4).collect();
+                        out.push(u32::from_str_radix(&h, 16).ok().and_then(char::from_u32).unwrap_or('?'));
+                    }
+                    o => out.push(o),
+                },
+                c => out.push(c),
+            }
+        }
+        return None;
+    }
+    None
+}
+
+fn run_capture(cmd: &Cmd, timeout: Duration, cancel: &std::sync::atomic::AtomicBool) -> Result<String, String> {
     use std::io::Read;
-    let mut child = Command::new(&cmd.program).args(&cmd.args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("Could not start {}: {e}", cmd.program))?;
+    use std::sync::atomic::Ordering;
+    let mut c = Command::new(&cmd.program);
+    c.args(&cmd.args).envs(cmd.env.iter().cloned()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = group(&mut c).spawn().map_err(|e| format!("Could not start {}: {e}", cmd.program))?;
     let mut so = child.stdout.take().ok_or("no output pipe")?;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -208,6 +318,10 @@ fn run_capture(cmd: &Cmd, timeout: Duration) -> Result<String, String> {
     });
     let t = Instant::now();
     loop {
+        if cancel.load(Ordering::SeqCst) {
+            kill_group(&mut child);
+            return Err(CANCELLED.into());
+        }
         match child.try_wait() {
             Ok(Some(st)) => {
                 let b = rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
@@ -218,12 +332,44 @@ fn run_capture(cmd: &Cmd, timeout: Duration) -> Result<String, String> {
             }
             Ok(None) if t.elapsed() < timeout => std::thread::sleep(Duration::from_millis(25)),
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_group(&mut child);
                 return Err(format!("{} took too long and was stopped. Nothing was added.", cmd.program));
             }
         }
     }
+}
+
+/// The three phases of the microphone flow. Repeated clicks can only move forward one legal step, and only the
+/// Listening -> Working step starts a transcription worker, so workers cannot pile up.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Phase {
+    Idle,
+    Listening,
+    Working,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Ev {
+    Start,
+    Stop,
+    Cancel,
+    Done,
+}
+
+/// (next phase, whether a transcription worker must be started)
+pub fn transition(p: Phase, e: Ev) -> (Phase, bool) {
+    match (p, e) {
+        (Phase::Idle, Ev::Start) => (Phase::Listening, false),
+        (Phase::Listening, Ev::Stop) => (Phase::Working, true),
+        (Phase::Listening, Ev::Cancel) => (Phase::Idle, false),
+        (Phase::Working, Ev::Cancel) | (Phase::Working, Ev::Done) => (Phase::Idle, false),
+        (p, _) => (p, false),
+    }
+}
+
+/// Spoken replies are only ever started when the setting is on, and only for answers and "Done" lines.
+pub fn should_speak(setting_on: bool, kind: &str) -> bool {
+    setting_on && (kind == "md" || kind == "executed")
 }
 
 /// Engines print markers like [BLANK_AUDIO] or timestamps; keep just the words, on one line, shortened.
@@ -245,7 +391,9 @@ pub fn clean_transcript(raw: &str) -> String {
 /// Start speaking (text on stdin). The caller keeps the child so a Stop control can kill it.
 pub fn speak(cmd: &Cmd, text: &str) -> Result<Child, String> {
     use std::io::Write;
-    let mut child = Command::new(&cmd.program).args(&cmd.args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| format!("Could not start {}: {e}", cmd.program))?;
+    let mut c = Command::new(&cmd.program);
+    c.args(&cmd.args).envs(cmd.env.iter().cloned()).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+    let mut child = group(&mut c).spawn().map_err(|e| format!("Could not start {}: {e}", cmd.program))?;
     if let Some(mut si) = child.stdin.take() {
         let t = text.to_string();
         std::thread::spawn(move || {
@@ -274,16 +422,105 @@ mod tests {
     }
 
     #[test]
-    fn stt_needs_engine_and_model_and_never_names_a_cloud_service() {
+    fn stt_default_is_moonshine_through_sherpa_then_whisper_and_never_cloud() {
         let wav = Path::new("/run/x.wav");
-        let e = stt(None, &|_| false, None, wav).unwrap_err();
-        assert!(e.contains("whisper") && e.contains("PAWLINE_STT_CMD") && e.contains("never uses an online"));
-        let e = stt(None, &|b| b == "whisper-cli", None, wav).unwrap_err();
-        assert!(e.contains("no model file") && e.contains("does not download"));
-        let c = stt(None, &|b| b == "whisper-cli", Some("/m/ggml-base.bin".into()), wav).unwrap();
+        let none = SttSetup { sherpa: None, moonshine: None, whisper_model: None };
+        let e = stt(None, &|_| false, &none, wav).unwrap_err();
+        assert!(e.contains("Moonshine") && e.contains("sherpa-onnx") && e.contains("PAWLINE_STT_CMD") && e.contains("never uses an online") && e.contains("downloads nothing"));
+        // a model folder
+        let d = std::env::temp_dir().join(format!("pawline-ms-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let m = d.join(".local/share/pawline/models/moonshine-tiny-en-int8");
+        std::fs::create_dir_all(&m).unwrap();
+        assert!(find_stt(&d, &|_| true).moonshine.is_none(), "incomplete folder is not used");
+        for f in ["preprocess.onnx", "encode.int8.onnx", "uncached_decode.int8.onnx", "cached_decode.int8.onnx", "tokens.txt"] {
+            std::fs::write(m.join(f), "x").unwrap();
+        }
+        let su = find_stt(&d, &|b| b == "sherpa-onnx-offline");
+        assert!(su.moonshine.is_some() && su.sherpa.is_some());
+        let c = stt(None, &|_| false, &su, wav).unwrap();
+        assert_eq!(c.program, "sherpa-onnx-offline");
+        assert!(c.args[0].starts_with("--moonshine-preprocessor=") && c.args.last().unwrap() == "/run/x.wav" && c.env.is_empty());
+        // private install gets its own library path
+        let sd = d.join(".local/share/pawline/sherpa/bin");
+        std::fs::create_dir_all(&sd).unwrap();
+        std::fs::write(sd.join("sherpa-onnx-offline"), "x").unwrap();
+        let su = find_stt(&d, &|_| false);
+        let c = stt(None, &|_| false, &su, wav).unwrap();
+        assert!(c.program.ends_with("sherpa/bin/sherpa-onnx-offline") && c.env[0].0 == "LD_LIBRARY_PATH");
+        let _ = std::fs::remove_dir_all(&d);
+        // whisper fallback and override
+        let w = SttSetup { sherpa: None, moonshine: None, whisper_model: Some("/m/ggml-base.bin".into()) };
+        let c = stt(None, &|b| b == "whisper-cli", &w, wav).unwrap();
         assert_eq!(c.args, ["-m", "/m/ggml-base.bin", "-f", "/run/x.wav", "-nt", "-np"]);
-        let c = stt(Some("my-stt --lang en"), &|_| false, None, wav).unwrap();
+        let c = stt(Some("my-stt --lang en"), &|_| false, &none, wav).unwrap();
         assert_eq!(c.args, ["--lang", "en", "/run/x.wav"]);
+    }
+
+    #[test]
+    fn sherpa_json_line_is_parsed() {
+        let raw = "/tmp/a.wav\n{\"lang\": \"\", \"text\": \"Make a folder called kitten.\", \"tokens\": [\"a\"]}\n";
+        assert_eq!(extract_json_text(raw).unwrap(), "Make a folder called kitten.");
+        assert_eq!(extract_json_text("{\"text\": \"a\\u0645 b\"}").unwrap(), "a\u{645} b");
+        assert!(extract_json_text("plain text").is_none());
+    }
+
+    #[test]
+    fn mic_phases_allow_one_worker_and_speech_is_off_unless_enabled() {
+        use Ev::*;
+        use Phase::*;
+        assert_eq!(transition(Idle, Start), (Listening, false));
+        // hammering Start/Stop: exactly one worker is ever requested
+        let mut p = Idle;
+        let mut workers = 0;
+        for e in [Start, Start, Start, Stop, Stop, Stop, Start, Start, Stop] {
+            let (np, w) = transition(p, e);
+            p = np;
+            workers += w as u32;
+        }
+        assert_eq!(workers, 1, "no new worker while one is running");
+        assert_eq!(p, Working);
+        assert_eq!(transition(Working, Cancel), (Idle, false));
+        assert_eq!(transition(Listening, Cancel), (Idle, false));
+        assert!(!should_speak(false, "md") && !should_speak(false, "executed"));
+        assert!(should_speak(true, "md") && !should_speak(true, "error"));
+    }
+
+    #[test]
+    fn cancel_during_stt_kills_the_engine_and_its_children_and_deletes_the_audio() {
+        let dir = std::env::temp_dir().join(format!("pawline-cx-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("a.wav");
+        std::fs::write(&wav, b"x").unwrap();
+        let pidf = dir.join("child.pid");
+        // engine that starts a grandchild and waits
+        let sh = script("grand", &format!("sleep 60 &\necho $! > {}\nwait", pidf.display()));
+        let cmd = Cmd { program: sh.to_string_lossy().to_string(), args: vec![], env: vec![] };
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let c2 = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            c2.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let t = Instant::now();
+        let e = transcribe(&cmd, &wav, Duration::from_secs(20), &cancel).unwrap_err();
+        assert_eq!(e, CANCELLED);
+        assert!(t.elapsed() < Duration::from_secs(3));
+        assert!(!wav.exists(), "audio deleted on cancel");
+        let pid: u32 = std::fs::read_to_string(&pidf).unwrap().trim().parse().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!Path::new(&format!("/proc/{pid}")).exists() || std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |s| s.contains(") Z")), "grandchild is gone");
+        // same for the timeout path
+        let wav2 = dir.join("b.wav");
+        std::fs::write(&wav2, b"x").unwrap();
+        let _ = std::fs::remove_file(&pidf);
+        let no = std::sync::atomic::AtomicBool::new(false);
+        let e = transcribe(&cmd, &wav2, Duration::from_millis(400), &no).unwrap_err();
+        assert!(e.contains("too long"));
+        let pid: u32 = std::fs::read_to_string(&pidf).unwrap().trim().parse().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!Path::new(&format!("/proc/{pid}")).exists() || std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |s| s.contains(") Z")), "grandchild gone after timeout");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -333,8 +570,8 @@ mod tests {
         let t = Instant::now();
         stop_recording(child);
         assert!(t.elapsed() < Duration::from_secs(2), "stopped promptly");
-        let sc = stt(Some(&stt_s.to_string_lossy()), &|_| false, None, &wav).unwrap();
-        let text = transcribe(&sc, &wav, Duration::from_secs(5)).unwrap();
+        let sc = stt(Some(&stt_s.to_string_lossy()), &|_| false, &SttSetup { sherpa: None, moonshine: None, whisper_model: None }, &wav).unwrap();
+        let text = transcribe(&sc, &wav, Duration::from_secs(5), &std::sync::atomic::AtomicBool::new(false)).unwrap();
         assert_eq!(text, "make a folder called kitten");
         assert!(!wav.exists(), "audio deleted after transcription");
     }
@@ -350,24 +587,24 @@ mod tests {
         assert!(!wav.exists());
         // missing recorder program: file is removed again
         let w2 = temp_wav();
-        let bad = Cmd { program: "/nonexistent/recorder".into(), args: vec![w2.to_string_lossy().to_string()] };
+        let bad = Cmd { program: "/nonexistent/recorder".into(), args: vec![w2.to_string_lossy().to_string()], env: vec![] };
         assert!(start_recording(&bad, &w2).is_err() && !w2.exists());
         // failing and silent engines: error, audio deleted
         let w3 = temp_wav();
         std::fs::write(&w3, b"x").unwrap();
-        let fail = Cmd { program: script("fail", "exit 3").to_string_lossy().to_string(), args: vec![] };
-        assert!(transcribe(&fail, &w3, Duration::from_secs(5)).unwrap_err().contains("failed"));
+        let fail = Cmd { program: script("fail", "exit 3").to_string_lossy().to_string(), args: vec![], env: vec![] };
+        assert!(transcribe(&fail, &w3, Duration::from_secs(5), &std::sync::atomic::AtomicBool::new(false)).unwrap_err().contains("failed"));
         assert!(!w3.exists());
         let w4 = temp_wav();
         std::fs::write(&w4, b"x").unwrap();
-        let silent = Cmd { program: script("silent", "echo '[BLANK_AUDIO]'").to_string_lossy().to_string(), args: vec![] };
-        assert!(transcribe(&silent, &w4, Duration::from_secs(5)).unwrap_err().contains("did not hear"));
+        let silent = Cmd { program: script("silent", "echo '[BLANK_AUDIO]'").to_string_lossy().to_string(), args: vec![], env: vec![] };
+        assert!(transcribe(&silent, &w4, Duration::from_secs(5), &std::sync::atomic::AtomicBool::new(false)).unwrap_err().contains("did not hear"));
         // a hung engine is stopped by the timeout
         let w5 = temp_wav();
         std::fs::write(&w5, b"x").unwrap();
-        let hang = Cmd { program: script("hang", "sleep 30").to_string_lossy().to_string(), args: vec![] };
+        let hang = Cmd { program: script("hang", "sleep 30").to_string_lossy().to_string(), args: vec![], env: vec![] };
         let t = Instant::now();
-        assert!(transcribe(&hang, &w5, Duration::from_millis(200)).unwrap_err().contains("too long"));
+        assert!(transcribe(&hang, &w5, Duration::from_millis(200), &std::sync::atomic::AtomicBool::new(false)).unwrap_err().contains("too long"));
         assert!(t.elapsed() < Duration::from_secs(3) && !w5.exists());
     }
 
@@ -381,7 +618,7 @@ mod tests {
         ch.wait().unwrap();
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "hello there");
         let long = script("spk2", "sleep 30");
-        let mut ch = speak(&Cmd { program: long.to_string_lossy().to_string(), args: vec![] }, "x").unwrap();
+        let mut ch = speak(&Cmd { program: long.to_string_lossy().to_string(), args: vec![], env: vec![] }, "x").unwrap();
         ch.kill().unwrap();
         ch.wait().unwrap();
     }

@@ -232,7 +232,7 @@ enum VState {
 }
 
 enum VEv {
-    Text(Result<String, String>),
+    Text(u64, Result<String, String>),
 }
 
 enum Surf {
@@ -304,6 +304,9 @@ struct App {
     searcher: Option<fsearch::Searcher>,
     pill_gen: u64,
     stt_cmd: Option<voice::Cmd>,
+    vjob: u64,
+    vcancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    vnote: bool,
     vstate: VState,
     voice_tx: Option<channel::Sender<VEv>>,
     speaking: Option<std::process::Child>,
@@ -727,7 +730,8 @@ impl App {
             }
             self.input_lines = lines;
             if let Some(t) = self.toast {
-                self.text(pm, t, w - PAD - 60.0, top - 6.0, 12.0, (170, 165, 195), (0.0, h));
+                let tw = self.measure(t, 12.0, shape::Mode::Auto);
+                self.text(pm, t, (w - PAD - 36.0 - tw).max(PAD), top - 6.0, 12.0, (170, 165, 195), (0.0, h));
             }
             self.draw_menu(pm, w, h);
             self.pill_refresh();
@@ -1058,8 +1062,8 @@ impl App {
         let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
         let has = &voice::has_in_path;
         let rec = voice::recorder(std::env::var("PAWLINE_REC_CMD").ok().as_deref(), has, &wav)?;
-        let model = voice::find_model(std::env::var("PAWLINE_WHISPER_MODEL").ok().as_deref(), &home);
-        let st = voice::stt(std::env::var("PAWLINE_STT_CMD").ok().as_deref(), has, model, &wav)?;
+        let setup = voice::find_stt(&home, &|b| voice::has_in_path(b));
+        let st = voice::stt(std::env::var("PAWLINE_STT_CMD").ok().as_deref(), has, &setup, &wav)?;
         Ok((rec, st, wav))
     }
 
@@ -1088,10 +1092,14 @@ impl App {
             self.vstate = VState::Idle;
             return;
         };
+        self.vjob += 1;
+        let job = self.vjob;
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.vcancel = cancel.clone();
         std::thread::spawn(move || {
             voice::stop_recording(child);
-            let r = voice::transcribe(&st, &path, voice::STT_TIMEOUT);
-            let _ = tx.send(VEv::Text(r));
+            let r = voice::transcribe(&st, &path, voice::STT_TIMEOUT, &cancel);
+            let _ = tx.send(VEv::Text(job, r));
         });
         self.draw();
     }
@@ -1105,26 +1113,39 @@ impl App {
         self.draw();
     }
 
+    /// Cancel while the text is being made: the engine is killed and whatever it returns is dropped.
+    fn cancel_working(&mut self) {
+        if matches!(self.vstate, VState::Working) {
+            self.vcancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.vstate = VState::Idle;
+            self.toast = Some("Cancelled. Your draft is unchanged");
+        }
+        self.draw();
+    }
+
     fn on_voice(&mut self, ev: VEv) {
+        let VEv::Text(job, _) = &ev;
+        if *job != self.vjob || !matches!(self.vstate, VState::Working) {
+            return; // cancelled or stale: drop it
+        }
         self.vstate = VState::Idle;
         match ev {
-            VEv::Text(Ok(t)) => {
+            VEv::Text(_, Ok(t)) => {
                 let cur = self.input.text();
                 if !cur.is_empty() && !cur.ends_with(' ') {
                     self.input.insert(" ");
                 }
                 self.input.insert(&t);
-                self.toast = Some("Check the text, then press Enter");
+                self.vnote = true;
             }
-            VEv::Text(Err(e)) => self.push(false, "error", e, None),
+            VEv::Text(_, Err(e)) => self.push(false, "error", e, None),
         }
         self.draw();
     }
 
     fn stop_speaking(&mut self) {
         if let Some(mut c) = self.speaking.take() {
-            let _ = c.kill();
-            let _ = c.wait();
+            voice::kill_group(&mut c);
         }
     }
 
@@ -1179,7 +1200,15 @@ impl App {
             VState::Idle if self.speaking.is_some() => Some("Speaking...".to_string()),
             VState::Idle => None,
         };
-        let Some(label) = label else { return };
+        let Some(label) = label else {
+            if self.vnote {
+                // Safety text: the transcript can be wrong. Own rows, wrapped, never clipped; stays until a key press.
+                let msg = "Check this text before Enter: speech-to-text can be wrong.";
+                fill(pm, &rrect(PAD - 2.0, bar_y, bw, 28.0, 10.0), (70, 52, 14, 255));
+                self.text(pm, msg, PAD + 8.0, bar_y + 19.0, 12.0, (255, 235, 180), (0.0, h));
+            }
+            return;
+        };
         fill(pm, &rrect(PAD - 2.0, bar_y, bw, 28.0, 10.0), (60, 24, 32, 255));
         fill(pm, &rrect(PAD + 6.0, bar_y + 10.0, 8.0, 8.0, 4.0), (240, 70, 80, 255));
         self.text(pm, &label, PAD + 20.0, bar_y + 19.0, 12.0, (255, 255, 255), (0.0, h));
@@ -1189,9 +1218,10 @@ impl App {
             self.text(pm, "Stop", sx + 15.0, bar_y + 18.0, 12.0, (255, 255, 255), (0.0, h));
             self.r_vstop = (sx, bar_y + 4.0, 60.0, 20.0);
         }
-        if listening || self.speaking.is_some() {
+        let working = matches!(self.vstate, VState::Working);
+        if listening || working || self.speaking.is_some() {
             fill(pm, &rrect(cx, bar_y + 4.0, 60.0, 20.0, 8.0), (110, 50, 60, 255));
-            self.text(pm, if listening { "Cancel" } else { "Stop" }, cx + 12.0, bar_y + 18.0, 12.0, (255, 255, 255), (0.0, h));
+            self.text(pm, if listening || working { "Cancel" } else { "Stop" }, cx + 12.0, bar_y + 18.0, 12.0, (255, 255, 255), (0.0, h));
             self.r_vcancel = (cx, bar_y + 4.0, 60.0, 20.0);
         }
     }
@@ -1502,7 +1532,7 @@ impl App {
                 m.md = true;
             }
         }
-        if self.settings.speak && (r.kind == "md" || r.kind == "executed") {
+        if voice::should_speak(self.settings.speak, &r.kind) {
             let t = r.text.clone();
             self.speak_reply(&t);
         }
@@ -1518,6 +1548,15 @@ impl App {
 
     fn key(&mut self, e: KeyEvent) {
         self.toast = None;
+        if !matches!(self.vstate, VState::Working) {
+            self.vnote = false;
+        }
+        if matches!(self.vstate, VState::Working) {
+            if e.keysym == Keysym::Escape {
+                self.cancel_working();
+            }
+            return;
+        }
         if !self.expanded && !self.bar {
             if matches!(e.keysym, Keysym::Return | Keysym::KP_Enter | Keysym::space) {
                 self.set_expanded(true);
@@ -1821,7 +1860,9 @@ impl App {
                 return;
             }
             if inside(self.r_vcancel, self.ptr_pos) {
-                if matches!(self.vstate, VState::Listening { .. }) {
+                if matches!(self.vstate, VState::Working) {
+                    self.cancel_working();
+                } else if matches!(self.vstate, VState::Listening { .. }) {
                     self.cancel_listening();
                 } else {
                     self.stop_speaking();
@@ -2534,6 +2575,9 @@ fn main() {
         r_skill_name: (0.0, 0.0, 0.0, 0.0),
         pill_gen: 0,
         stt_cmd: None,
+        vjob: 0,
+        vcancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        vnote: false,
         vstate: VState::Idle,
         speaking: None,
         r_mic: (0.0, 0.0, 0.0, 0.0),
