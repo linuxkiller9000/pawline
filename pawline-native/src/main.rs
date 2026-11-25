@@ -529,6 +529,12 @@ impl Ui {
         self.draw();
     }
 
+    /// Keyboard focus left the window (any backend): close the mic, drop the audio.
+    fn focus_lost(&mut self) {
+        self.cancel_voice("window lost focus");
+        self.draw();
+    }
+
     /// Close the mic and throw the audio away (focus loss, collapse, other key, device change).
     fn cancel_voice(&mut self, why: &str) {
         if let Some(c) = self.cap.take() {
@@ -902,8 +908,7 @@ impl SeatHandler for App {
 impl KeyboardHandler for App {
     fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32, _: &[u32], _: &[Keysym]) {}
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32) {
-        self.cancel_voice("window lost focus");
-        self.draw();
+        self.focus_lost();
     }
     fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, e: KeyEvent) {
         self.key(Ke { keysym: e.keysym, utf8: e.utf8 });
@@ -1272,5 +1277,139 @@ fn main() {
     let _ = calloop::timer::Timer::immediate();
     while !app.exit {
         event_loop.dispatch(None, &mut app).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct Rec(Rc<RefCell<u32>>);
+    impl Out for Rec {
+        fn present(&mut self, w: u32, h: u32, pm: &Pixmap) {
+            assert_eq!((w, h), (pm.width(), pm.height()));
+            *self.0.borrow_mut() += 1;
+        }
+        fn resize(&mut self, _: u32, _: u32) {}
+    }
+    fn ui() -> (Ui, mpsc::Receiver<Req>, Rc<RefCell<u32>>) {
+        let (tx, rx) = mpsc::channel();
+        let n = Rc::new(RefCell::new(0));
+        let mut u = Ui::new(Box::new(Rec(n.clone())), tx);
+        u.set_expanded(true);
+        (u, rx, n)
+    }
+    fn k(u: &mut Ui, ks: Keysym, t: Option<&str>) {
+        u.key(Ke { keysym: ks, utf8: t.map(|s| s.to_string()) });
+    }
+    fn typ(u: &mut Ui, s: &str) {
+        for c in s.chars() {
+            let t = c.to_string();
+            k(u, Keysym::new(c as u32), Some(&t));
+        }
+    }
+    fn reply(u: &mut Ui, kind: &str, text: &str) {
+        u.on_reply(UiReply { kind: kind.into(), text: text.into(), plan: None });
+    }
+    fn sent(rx: &mpsc::Receiver<Req>) -> Vec<String> {
+        rx.try_iter()
+            .map(|r| match r {
+                Req::Text(t, v) => format!("text:{t}:voice={v}"),
+                Req::Confirm => "confirm".into(),
+                Req::Cancel => "cancel".into(),
+                Req::Voice(_) => "voice".into(),
+                Req::VoiceCheck => "voicecheck".into(),
+                Req::Download(_) => "download".into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn typed_request_is_sent_once_and_draws() {
+        let (mut u, rx, n) = ui();
+        typ(&mut u, "make a folder called kitten");
+        assert_eq!(u.input, "make a folder called kitten");
+        k(&mut u, Keysym::Return, None);
+        assert_eq!(sent(&rx), vec!["text:make a folder called kitten:voice=false"]);
+        assert!(u.busy && u.input.is_empty());
+        assert!(*n.borrow() > 0);
+    }
+
+    #[test]
+    fn confirm_defaults_to_cancel_and_typing_never_approves() {
+        let (mut u, rx, _) = ui();
+        reply(&mut u, "confirm", "Create folder /x/kitten");
+        assert!(u.confirm.is_some() && u.focus == Btn::No);
+        typ(&mut u, "yes y Y");
+        assert!(sent(&rx).is_empty());
+        assert!(u.confirm.is_some());
+        k(&mut u, Keysym::Return, None); // Enter on the default (Cancel)
+        assert_eq!(sent(&rx), vec!["cancel"]);
+    }
+
+    #[test]
+    fn explicit_approval_needs_focus_on_do_it() {
+        let (mut u, rx, _) = ui();
+        reply(&mut u, "confirm", "Create folder /x/kitten");
+        k(&mut u, Keysym::Tab, None);
+        assert!(u.focus == Btn::Yes);
+        k(&mut u, Keysym::Return, None);
+        assert_eq!(sent(&rx), vec!["confirm"]);
+        // y works only with Do it focused
+        let (mut u, rx, _) = ui();
+        reply(&mut u, "confirm", "p");
+        k(&mut u, Keysym::new('y' as u32), Some("y"));
+        assert!(sent(&rx).is_empty());
+        k(&mut u, Keysym::Tab, None);
+        k(&mut u, Keysym::new('y' as u32), Some("y"));
+        assert_eq!(sent(&rx), vec!["confirm"]);
+    }
+
+    #[test]
+    fn escape_and_n_cancel_a_plan() {
+        for (ks, t) in [(Keysym::Escape, None), (Keysym::new('n' as u32), Some("n"))] {
+            let (mut u, rx, _) = ui();
+            reply(&mut u, "confirm", "p");
+            k(&mut u, Keysym::Tab, None);
+            k(&mut u, ks, t);
+            assert_eq!(sent(&rx), vec!["cancel"]);
+        }
+    }
+
+    #[test]
+    fn voice_text_only_previews_and_is_flagged_voice_origin() {
+        let (mut u, rx, _) = ui();
+        reply(&mut u, "voice-text", "make a folder called pictures");
+        assert!(sent(&rx).is_empty(), "nothing sent until Enter");
+        assert!(u.voice_origin && u.voice_preview);
+        k(&mut u, Keysym::Return, None);
+        assert_eq!(sent(&rx), vec!["text:make a folder called pictures:voice=true"]);
+    }
+
+    #[test]
+    fn focus_loss_is_safe_and_redraws() {
+        let (mut u, rx, n) = ui();
+        let before = *n.borrow();
+        u.focus_lost();
+        assert!(u.cap.is_none());
+        assert!(*n.borrow() > before);
+        assert!(sent(&rx).is_empty());
+    }
+
+    #[test]
+    fn plan_cannot_be_approved_before_it_is_scrolled_to_the_end() {
+        let (mut u, rx, _) = ui();
+        reply(&mut u, "confirm", &"line of plan\n".repeat(80));
+        k(&mut u, Keysym::Tab, None);
+        k(&mut u, Keysym::Return, None);
+        assert!(sent(&rx).is_empty(), "long plan must be read to the end first");
+        k(&mut u, Keysym::Page_Down, None);
+        for _ in 0..30 {
+            k(&mut u, Keysym::Page_Down, None);
+        }
+        k(&mut u, Keysym::Return, None);
+        assert_eq!(sent(&rx), vec!["confirm"]);
     }
 }
