@@ -206,8 +206,10 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                 let lines: Vec<String> = ops
                     .iter()
                     .map(|o| match &o.op {
+                        pawline_core::plan::Operation::GenerateImage { provider, .. } => {
+                            format!("Picture ready ({})\n{}", provider.label(), o.detail)
+                        }
                         pawline_core::plan::Operation::Search { .. }
-                        | pawline_core::plan::Operation::GenerateImage { .. }
                         | pawline_core::plan::Operation::AskOnline { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)
@@ -282,8 +284,10 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
                 let lines: Vec<String> = ops
                     .iter()
                     .map(|o| match &o.op {
+                        pawline_core::plan::Operation::GenerateImage { provider, .. } => {
+                            format!("Picture ready ({})\n{}", provider.label(), o.detail)
+                        }
                         pawline_core::plan::Operation::Search { .. }
-                        | pawline_core::plan::Operation::GenerateImage { .. }
                         | pawline_core::plan::Operation::AskOnline { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)

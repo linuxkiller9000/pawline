@@ -1,4 +1,4 @@
-//! Small preview of a picture Pawline itself saved. PNG and JPEG only (WebP is saved but not previewed).
+//! Small preview of a picture Pawline itself saved. PNG, JPEG and still WebP.
 //! The decoders are memory-safe Rust. Size is checked from the header before any pixels are decoded.
 use std::path::Path;
 use tiny_skia::Pixmap;
@@ -54,6 +54,21 @@ fn decode(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
             jpeg_decoder::PixelFormat::RGB24 => px.chunks_exact(3).for_each(|c| out.extend_from_slice(&[c[0], c[1], c[2], 255])),
             jpeg_decoder::PixelFormat::L8 => px.iter().for_each(|g| out.extend_from_slice(&[*g, *g, *g, 255])),
             _ => return None,
+        }
+        (out.len() == w as usize * h as usize * 4).then_some((w, h, out))
+    } else if bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        let mut dec = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes)).ok()?;
+        let (w, h) = dec.dimensions();
+        if !dims_ok(w, h) || dec.is_animated() {
+            return None;
+        }
+        let mut buf = vec![0u8; dec.output_buffer_size()?];
+        dec.read_image(&mut buf).ok()?;
+        let mut out = Vec::with_capacity(w as usize * h as usize * 4);
+        if dec.has_alpha() {
+            out = buf;
+        } else {
+            buf.chunks_exact(3).for_each(|c| out.extend_from_slice(&[c[0], c[1], c[2], 255]));
         }
         (out.len() == w as usize * h as usize * 4).then_some((w, h, out))
     } else {
@@ -132,9 +147,17 @@ mod tests {
     }
 
     #[test]
+    fn webp_is_decoded() {
+        // 1x1 lossless WebP
+        let b: &[u8] = &[0x52,0x49,0x46,0x46,0x1a,0,0,0,0x57,0x45,0x42,0x50,0x56,0x50,0x38,0x4c,0x0d,0,0,0,0x2f,0,0,0,0x10,0x07,0x10,0x11,0x11,0x88,0x88,0xfe,7,0];
+        let (w, h, d) = decode(b).expect("webp");
+        assert_eq!((w, h, d.len()), (1, 1, 4));
+    }
+
+    #[test]
     fn junk_oversized_and_webp_are_refused() {
         assert!(decode(b"not an image").is_none());
-        assert!(decode(b"RIFF\0\0\0\0WEBPxx").is_none());
+        assert!(decode(b"RIFF\0\0\0\0WEBPxx").is_none(), "truncated webp");
         assert!(!dims_ok(5000, 10));
         assert!(!dims_ok(4096, 4096) || 4096u64 * 4096 <= MAX_PIXELS);
         assert!(decode(&png_bytes(8, 8, [1, 2, 3])[..20]).is_none(), "truncated png");
