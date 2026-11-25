@@ -155,7 +155,7 @@ pub fn render(src: &str, list: &[Ranked], home: &Path) -> String {
         let note = if r.path.starts_with(home) { "" } else { "  [outside your home area: Pawline can't act on it]" };
         out.push_str(&format!("{}. {}  ({:.1}){}\n", i + 1, r.path.display(), r.score, note));
     }
-    out.push_str("This only lists them. Folders inside your home area can be used by typing their path, for example: list <path>.");
+    out.push_str("This only lists them. In the window, a chooser opens for folders inside your home area: click a row, or use Up/Down then Tab, to fill the input with \"list <path>\"; Esc closes it, typing anything hides it. Press Enter to run. In the terminal, type \"list <path>\".");
     out
 }
 
