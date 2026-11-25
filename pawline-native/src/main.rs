@@ -1507,7 +1507,7 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("pawline [--no-ui] [--panel-only]\n  (no flag)  floating orb and chat on Wayland\n  --no-ui    terminal mode, same commands and confirmations\n  --panel-only  no orb: Pawline stays hidden until a panel widget opens it\n  --ctl toggle|show|hide|status  talk to a running Pawline (toggle/show start it if it is not running)\n  --waybar | --polybar | --genmon  print the panel widget text (see integrations/)\nPAWLINE_NO_LAYER=1 uses a normal window. PAWLINE_ROOT sets the working folder (default: home).");
+        println!("pawline [--no-ui] [--panel-only]\n  (no flag)  floating orb and chat (Wayland, or X11 when there is no Wayland display; PAWLINE_BACKEND=x11 forces X11)\n  --no-ui    terminal mode, same commands and confirmations\n  --panel-only  no orb: Pawline stays hidden until a panel widget opens it\n  --ctl toggle|show|hide|status  talk to a running Pawline (toggle/show start it if it is not running)\n  --waybar | --polybar | --genmon  print the panel widget text (see integrations/)\nPAWLINE_NO_LAYER=1 uses a normal window. PAWLINE_ROOT sets the working folder (default: home).");
         return;
     }
     if let Some(i) = args.iter().position(|a| a == "--ctl") {
