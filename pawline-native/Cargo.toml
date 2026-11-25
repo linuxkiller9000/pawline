@@ -1,0 +1,17 @@
+[package]
+name = "pawline-native"
+version = "0.2.0-beta"
+edition = "2021"
+description = "Pawline native Wayland UI: CPU-rendered (no OpenGL, no GTK, no WebKit)"
+license = "GPL-3.0-only"
+
+[[bin]]
+name = "pawline"
+path = "src/main.rs"
+
+[dependencies]
+smithay-client-toolkit = "0.19"
+tiny-skia = "0.11"
+fontdue = "0.9"
+pawline-core = { path = "../pawline-core" }
+pawline-needle = { path = "../pawline-needle" }

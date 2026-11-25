@@ -11,14 +11,23 @@ fn main() {
     );
     println!("cargo:rustc-link-lib=static=cactus");
 
-    // libc++/libc++abi/libunwind live at CACTUS_CPP_LIB_DIR (no .so symlinks
-    // in the extracted debs, hence the `:file.so.1` spelling).
-    // directory of proper .so symlinks into the extracted libc++
-    let cpp = std::env::var("CACTUS_CPP_LIB_DIR").unwrap_or_else(|_| "/tmp/cpplinks".into());
-    println!("cargo:rustc-link-search=native={cpp}");
-    println!("cargo:rustc-link-lib=dylib=c++");
-    println!("cargo:rustc-link-lib=dylib=c++abi");
-    println!("cargo:rustc-link-lib=dylib=unwind");
+    // libc++, libc++abi and LLVM libunwind (Apache-2.0 with LLVM exception).
+    // Release builds link them STATICALLY (CACTUS_CPP_STATIC_DIR holds the
+    // .a archives), so the shipped binary needs no libc++/libunwind at runtime.
+    // Without it, fall back to dynamic linking for local development.
+    if let Ok(dir) = std::env::var("CACTUS_CPP_STATIC_DIR") {
+        println!("cargo:rustc-link-search=native={dir}");
+        println!("cargo:rustc-link-lib=static=c++");
+        println!("cargo:rustc-link-lib=static=c++abi");
+        println!("cargo:rustc-link-lib=static=unwind");
+        println!("cargo:rerun-if-env-changed=CACTUS_CPP_STATIC_DIR");
+    } else {
+        let cpp = std::env::var("CACTUS_CPP_LIB_DIR").unwrap_or_else(|_| "/tmp/cpplinks".into());
+        println!("cargo:rustc-link-search=native={cpp}");
+        println!("cargo:rustc-link-lib=dylib=c++");
+        println!("cargo:rustc-link-lib=dylib=c++abi");
+        println!("cargo:rustc-link-lib=dylib=unwind");
+    }
     println!("cargo:rustc-link-lib=dylib=m");
     println!("cargo:rustc-link-lib=dylib=dl");
 }
