@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 pub const MAX_SLIDES: usize = 60;
 pub const MAX_BULLETS: usize = 14;
+pub const MAX_TITLE_CHARS: usize = 80;
+pub const MAX_LINE_CHARS: usize = 160;
+pub const MAX_SLIDE_CHARS: usize = 900;
 pub const MAX_SOURCE: u64 = 256 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -67,6 +70,19 @@ pub fn parse_outline(text: &str) -> Result<Vec<Slide>, String> {
         }
         cur.bullets.push((level, body.trim().to_string()));
     }
+    for s in &slides {
+        let n = s.title.chars().count();
+        if n > MAX_TITLE_CHARS {
+            return Err(format!("the title \"{}...\" is {n} characters; the limit is {MAX_TITLE_CHARS}. Shorten it", s.title.chars().take(30).collect::<String>()));
+        }
+        if let Some((_, b)) = s.bullets.iter().find(|(_, b)| b.chars().count() > MAX_LINE_CHARS) {
+            return Err(format!("a line on the slide \"{}\" starting \"{}...\" is longer than {MAX_LINE_CHARS} characters. Shorten it or split it into bullets", s.title, b.chars().take(30).collect::<String>()));
+        }
+        let total: usize = s.bullets.iter().map(|(_, b)| b.chars().count()).sum();
+        if total > MAX_SLIDE_CHARS {
+            return Err(format!("the slide \"{}\" has {total} characters of text; the limit is {MAX_SLIDE_CHARS} so it stays readable. Split it into two slides", s.title));
+        }
+    }
     if slides.is_empty() {
         return Err("I found no headings. Use \"# Title\" and \"## Slide title\" lines with \"- bullet\" lines under them".into());
     }
@@ -74,6 +90,26 @@ pub fn parse_outline(text: &str) -> Result<Vec<Slide>, String> {
         return Err(format!("that is {} slides; the limit is {MAX_SLIDES}", slides.len()));
     }
     Ok(slides)
+}
+
+fn is_rtl_char(c: char) -> bool {
+    matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF)
+}
+
+/// First strongly-directional letter decides the paragraph direction (right-to-left for Arabic/Hebrew).
+fn is_rtl(s: &str) -> bool {
+    s.chars().find(|c| c.is_alphabetic()).map(is_rtl_char).unwrap_or(false)
+}
+
+fn para(lvl: u32, text: &str) -> String {
+    let rtl = is_rtl(text);
+    let ppr = match (lvl, rtl) {
+        (0, false) => String::new(),
+        (l, false) => format!("<a:pPr lvl=\"{l}\"/>"),
+        (l, true) => format!("<a:pPr lvl=\"{l}\" algn=\"r\" rtl=\"1\"/>"),
+    };
+    let lang = if rtl { "ar-SA" } else { "en-US" };
+    format!("<a:p>{ppr}<a:r><a:rPr lang=\"{lang}\" dirty=\"0\"/><a:t>{}</a:t></a:r></a:p>", esc(text))
 }
 
 fn esc(s: &str) -> String {
@@ -101,11 +137,11 @@ fn sp(id: u32, name: &str, ph: &str, idx: Option<u32>, x: i64, y: i64, w: i64, h
 
 fn slide_xml(s: &Slide, is_title: bool) -> String {
     let mut shapes = String::new();
-    let t = format!("<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\" dirty=\"0\"/><a:t>{}</a:t></a:r></a:p></p:txBody>", esc(&s.title));
+    let t = format!("<p:txBody><a:bodyPr/><a:lstStyle/>{}</p:txBody>", para(0, &s.title));
     if is_title {
         shapes.push_str(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Title\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph type=\"ctrTitle\"/></p:nvPr></p:nvSpPr><p:spPr/>{t}</p:sp>"));
         if !s.bullets.is_empty() {
-            let paras: String = s.bullets.iter().map(|(_, b)| format!("<a:p><a:r><a:rPr lang=\"en-US\" dirty=\"0\"/><a:t>{}</a:t></a:r></a:p>", esc(b))).collect();
+            let paras: String = s.bullets.iter().map(|(_, b)| para(0, b)).collect();
             shapes.push_str(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Subtitle\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph type=\"subTitle\" idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>{paras}</p:txBody></p:sp>"));
         }
     } else {
@@ -113,7 +149,7 @@ fn slide_xml(s: &Slide, is_title: bool) -> String {
         let paras: String = if s.bullets.is_empty() {
             "<a:p><a:endParaRPr lang=\"en-US\"/></a:p>".into()
         } else {
-            s.bullets.iter().map(|(l, b)| format!("<a:p><a:pPr lvl=\"{l}\"/><a:r><a:rPr lang=\"en-US\" dirty=\"0\"/><a:t>{}</a:t></a:r></a:p>", esc(b))).collect()
+            s.bullets.iter().map(|(l, b)| para(*l as u32, b)).collect()
         };
         shapes.push_str(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Content\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr><a:normAutofit/></a:bodyPr><a:lstStyle/>{paras}</p:txBody></p:sp>"));
     }
@@ -329,6 +365,19 @@ mod tests {
         assert_eq!(parse_command("make a presentation from notes.md").as_deref(), Some("notes.md"));
     }
     #[test]
+    fn long_text_is_refused_not_clipped_and_rtl_is_marked() {
+        let long = "x".repeat(MAX_TITLE_CHARS + 1);
+        assert!(parse_outline(&format!("## {long}\n- a")).unwrap_err().contains("limit"));
+        let line = "y".repeat(MAX_LINE_CHARS + 1);
+        assert!(parse_outline(&format!("## T\n- {line}")).unwrap_err().contains("longer than"));
+        let many: String = (0..8).map(|_| format!("- {}\n", "z".repeat(150))).collect();
+        assert!(parse_outline(&format!("## T\n{many}")).unwrap_err().contains("Split"));
+        let s = parse_outline("# مرحبا\n## الشرائح\n- نقطة أولى\n- English line\n").unwrap();
+        let t = String::from_utf8_lossy(&build_pptx(&s)).to_string();
+        assert!(t.contains("rtl=\"1\"") && t.contains("ar-SA") && t.contains("نقطة أولى"));
+        assert_eq!(t.matches("rtl=\"1\"").count(), 3);
+    }
+    #[test]
     fn zip_is_deterministic_and_escaped() {
         let s = parse_outline("# A & <B>\n## x\n- \"q\"\n").unwrap();
         let a = build_pptx(&s);
@@ -340,6 +389,11 @@ mod tests {
     #[test]
     fn writes_a_sample_when_asked() {
         if let Some(p) = std::env::var_os("PAWLINE_DECK_SAMPLE") {
+            if let Some(o) = std::env::var_os("PAWLINE_DECK_OUTLINE") {
+                let s = parse_outline(&std::fs::read_to_string(o).unwrap()).unwrap();
+                std::fs::write(p, build_pptx(&s)).unwrap();
+                return;
+            }
             let s = parse_outline("# Pawline demo\nA small helper for your files\n\n## What it does\n- Makes folders and moves files\n  - always asks first\n- Shrinks videos\n- Searches with fd and rg\n\n## Safety\n- Nothing is overwritten\n- Undo for every change\n").unwrap();
             std::fs::write(p, build_pptx(&s)).unwrap();
         }
