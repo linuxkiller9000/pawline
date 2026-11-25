@@ -676,9 +676,14 @@ fn work_root() -> std::path::PathBuf {
     let root = std::env::var_os("PAWLINE_ROOT")
         .or_else(|| std::env::var_os("HOME"))
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("pawline-home"));
-    let _ = std::fs::create_dir_all(&root);
-    root
+        .filter(|p| p.is_absolute() && p.is_dir());
+    match root {
+        Some(r) => r,
+        None => {
+            eprintln!("Pawline needs a home folder: HOME (or PAWLINE_ROOT) is not set to an existing absolute folder. Nothing was started.");
+            std::process::exit(2);
+        }
+    }
 }
 
 /// Terminal mode (--no-ui). Same engine, same validation, same confirmation
