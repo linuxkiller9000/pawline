@@ -165,20 +165,35 @@ pub fn dirs_command(
     now: u64,
     zoxide: impl FnOnce() -> Option<Vec<pawline_core::dirs::Ranked>>,
 ) -> Option<String> {
+    dirs_command_rows(input, own, home, now, zoxide).map(|r| r.0)
+}
+
+/// Same as dirs_command, plus the folders inside the home area (the ones a click may use), for a chooser.
+pub fn dirs_command_rows(
+    input: &str,
+    own: Option<&std::path::Path>,
+    home: &std::path::Path,
+    now: u64,
+    zoxide: impl FnOnce() -> Option<Vec<pawline_core::dirs::Ranked>>,
+) -> Option<(String, Vec<String>)> {
     let t = input.trim().trim_end_matches(['.', '!']);
     let low = t.to_lowercase();
     if matches!(low.as_str(), "folders memory" | "show folders memory" | "folder memory" | "forget folders" | "clear folders") {
-        let Some(own) = own else { return Some("No data folder.".into()) };
-        return Some(if low.starts_with("forget") || low.starts_with("clear") {
-            format!("Deleted {} folder(s) from Pawline's own list. zoxide was not touched.", pawline_core::dirs::forget_own(own))
-        } else {
-            pawline_core::dirs::describe_own(own)
-        });
+        let Some(own) = own else { return Some(("No data folder.".into(), vec![])) };
+        return Some((
+            if low.starts_with("forget") || low.starts_with("clear") {
+                format!("Deleted {} folder(s) from Pawline's own list. zoxide was not touched.", pawline_core::dirs::forget_own(own))
+            } else {
+                pawline_core::dirs::describe_own(own)
+            },
+            vec![],
+        ));
     }
     let query = if low == "zi" { "" } else { low.strip_prefix("zi ")? };
-    let Some(own) = own else { return Some("No data folder.".into()) };
+    let Some(own) = own else { return Some(("No data folder.".into(), vec![])) };
     let (src, list) = pawline_core::dirs::ranked(zoxide(), own, now, query);
-    Some(pawline_core::dirs::render(src, &list, home))
+    let rows: Vec<String> = list.iter().take(pawline_core::dirs::SHOWN).filter(|r| r.path.starts_with(home)).map(|r| r.path.to_string_lossy().to_string()).collect();
+    Some((pawline_core::dirs::render(src, &list, home), rows))
 }
 
 /// Folders worth remembering from completed steps: where files were made, moved, copied or renamed to, or listed.
@@ -247,8 +262,12 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             );
         }
     }
-    if let Some(m) = dirs_command(input, pawline_core::dirs::own_path().as_deref(), &state.root, pawline_core::searchmem::now_secs(), pawline_core::dirs::zoxide_ranked) {
-        return reply("message", m);
+    if let Some((m, rows)) = dirs_command_rows(input, pawline_core::dirs::own_path().as_deref(), &state.root, pawline_core::searchmem::now_secs(), pawline_core::dirs::zoxide_ranked) {
+        let mut r = reply("message", m);
+        if !rows.is_empty() {
+            r.plan = Some(rows.join("\n")); // folders a click may use; shown as a chooser by the window
+        }
+        return r;
     }
     if let Some(m) = task_memory_command(input, pawline_core::planmem::default_path().as_deref()) {
         return reply("message", m);
@@ -517,6 +536,8 @@ mod memory_tests {
         assert!(dirs_command("ziggy", Some(&own), &d, 1, || panic!("must not run")).is_none());
         let z = dirs_command("zi", Some(&own), &d, 1, || Some(vec![Ranked { score: 5.0, path: proj.clone() }])).unwrap();
         assert!(z.contains("source: zoxide") && z.contains("projects"));
+        let (_, rows) = dirs_command_rows("zi", Some(&own), &d, 1, || Some(vec![Ranked { score: 5.0, path: proj.clone() }, Ranked { score: 4.0, path: "/etc".into() }])).unwrap();
+        assert_eq!(rows, vec![proj.to_string_lossy().to_string()], "only folders inside home are clickable");
         let none = dirs_command("zi proj", Some(&own), &d, 1, || None).unwrap();
         assert!(none.contains("No frequent folders") && none.contains("Pawline's own list"));
         pawline_core::dirs::record_own(&own, &folders_of(&[pawline_core::plan::Operation::CreateFile { path: proj.join("a.txt") }]), 1);

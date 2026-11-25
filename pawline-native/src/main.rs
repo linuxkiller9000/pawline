@@ -227,6 +227,9 @@ struct App {
     plan_scroll: f32,
     busy: bool,
     menu_sel: usize,
+    /// Folders from the last "zi" reply (inside the home area only); a click or Tab fills the input with "list <path>".
+    zi_rows: Vec<String>,
+    zi_sel: usize,
     font: fontdue::Font,
     cache: HashMap<(char, u32), (fontdue::Metrics, Vec<u8>)>,
     tx: mpsc::Sender<Req>,
@@ -532,6 +535,7 @@ impl App {
                 self.text(pm, t, w - PAD - 60.0, top - 6.0, 12.0, (170, 165, 195), (0.0, h));
             }
             self.draw_menu(pm, w, h);
+            self.draw_zi(pm, w, h);
         }
     }
 
@@ -751,6 +755,40 @@ impl App {
         true
     }
 
+    /// The "zi" chooser is on screen: rows from the last zi reply, nothing typed, nothing else open.
+    fn zi_active(&self) -> bool {
+        !self.zi_rows.is_empty() && self.input.text().is_empty() && !self.busy && self.confirm.is_none() && self.expanded
+    }
+
+    fn zi_pick(&mut self) {
+        if let Some(p) = self.zi_rows.get(self.zi_sel.min(self.zi_rows.len().saturating_sub(1))).cloned() {
+            self.input.clear();
+            self.input.insert(&format!("list {p}"));
+        }
+        self.zi_rows.clear();
+        self.zi_sel = 0;
+    }
+
+    fn draw_zi(&mut self, pm: &mut Pixmap, w: f32, h: f32) {
+        if !self.zi_active() {
+            return;
+        }
+        let rh = 26.0;
+        let n = self.zi_rows.len() as f32;
+        let top = self.input_box_top - 6.0 - n * rh - 8.0;
+        fill(pm, &rrect(PAD - 2.0, top, w - 2.0 * PAD + 4.0, n * rh + 8.0, 10.0), (36, 33, 58, 255));
+        let sel = self.zi_sel.min(self.zi_rows.len() - 1);
+        let rows = self.zi_rows.clone();
+        for (k, p) in rows.iter().enumerate() {
+            let y = top + 4.0 + k as f32 * rh;
+            if k == sel {
+                fill(pm, &rrect(PAD + 2.0, y, w - 2.0 * PAD - 4.0, rh - 2.0, 6.0), (92, 80, 170, 255));
+            }
+            let shown = if p.chars().count() > 44 { format!("...{}", p.chars().rev().take(41).collect::<Vec<_>>().into_iter().rev().collect::<String>()) } else { p.clone() };
+            self.text(pm, &shown, PAD + 10.0, y + 18.0, 13.0, (255, 255, 255), (0.0, h));
+        }
+    }
+
     fn draw_menu(&mut self, pm: &mut Pixmap, w: f32, h: f32) {
         let rows = self.menu_rows();
         if rows.is_empty() {
@@ -778,6 +816,7 @@ impl App {
             return;
         }
         self.input.clear();
+        self.zi_rows.clear();
         let rep = self.reply.take();
         let quote = rep.as_ref().map(|r| r.1.clone());
         // Local follow-up that really uses the reply: "copy" copies the quoted message. Nothing is sent anywhere.
@@ -822,6 +861,8 @@ impl App {
     fn on_reply(&mut self, r: UiReply) {
         self.busy = false;
         self.push(false, &r.kind, r.text.clone(), None);
+        self.zi_rows = if r.kind == "message" { r.plan.as_deref().map(|p| p.lines().map(String::from).collect()).unwrap_or_default() } else { vec![] };
+        self.zi_sel = 0;
         if r.kind == "confirm" {
             self.confirm = Some(r.text);
             self.focus = Btn::No; // Cancel is focused by default
@@ -869,6 +910,19 @@ impl App {
                 if let Some(t) = self.msgs.last().map(|m| m.text.clone()) {
                     self.set_reply(&t);
                 }
+            }
+            Keysym::Escape if self.zi_active() => {
+                self.zi_rows.clear();
+                self.draw();
+            }
+            Keysym::Tab if self.zi_active() => {
+                self.zi_pick();
+                self.draw();
+            }
+            Keysym::Up | Keysym::Down if self.zi_active() => {
+                let n = self.zi_rows.len();
+                self.zi_sel = if e.keysym == Keysym::Up { (self.zi_sel + n - 1) % n } else { (self.zi_sel + 1) % n };
+                self.draw();
             }
             Keysym::Escape if self.reply.is_some() && !self.busy && self.menu_rows().is_empty() => {
                 self.reply = None;
@@ -1023,6 +1077,16 @@ impl App {
         if self.confirm.is_none() {
             let (px, py) = self.ptr_pos;
             let w = self.w as f32;
+            if self.zi_active() {
+                let (rh, n) = (26.0, self.zi_rows.len() as f32);
+                let top = self.input_box_top - 6.0 - n * rh - 8.0;
+                if inside((PAD - 2.0, top, w - 2.0 * PAD + 4.0, n * rh + 8.0), self.ptr_pos) {
+                    self.zi_sel = (((py as f32 - top - 4.0) / rh).floor().max(0.0) as usize).min(self.zi_rows.len() - 1);
+                    self.zi_pick();
+                    self.draw();
+                    return;
+                }
+            }
             // a click on a "/" menu row fills the input with that skill (same as Tab)
             let rows = self.menu_rows();
             if !rows.is_empty() {
@@ -1670,6 +1734,8 @@ fn main() {
         plan_scroll: 0.0,
         busy: false,
         menu_sel: 0,
+        zi_rows: vec![],
+        zi_sel: 0,
         font,
         cache: HashMap::new(),
         tx: req_tx,
