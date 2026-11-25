@@ -53,10 +53,28 @@ const SKILL_MENU: &[(&str, &str, &str)] = &[
     ("/search", "search the web or Wikipedia", "search for "),
     ("/math", "simple math, solve for x", "what is "),
     ("/picture", "Pollinations or AI Horde (asks first)", "generate a picture of "),
-    ("/ask", "ask an online model (asks first)", "what is "),
+    ("/ask", "online answer: general asks send, private-looking ask first", "what is "),
     ("/undo", "undo the last change", "undo"),
     ("/skills", "list skills", "/skills"),
 ];
+
+fn menu_filter(t: &str) -> Vec<usize> {
+    let t = t.to_ascii_lowercase();
+    SKILL_MENU.iter().enumerate().filter(|(_, m)| m.0.starts_with(&t)).map(|(i, _)| i).collect()
+}
+
+#[cfg(test)]
+mod menu_tests {
+    use super::*;
+    #[test]
+    fn filters_by_prefix_and_starters_never_run_themselves() {
+        assert_eq!(menu_filter("/").len(), SKILL_MENU.len());
+        assert_eq!(menu_filter("/pi"), vec![5]);
+        assert!(menu_filter("/zzz").is_empty());
+        // every starter is plain text that goes through the normal parser and its confirmations
+        assert!(SKILL_MENU.iter().all(|m| !m.2.starts_with('/') || m.2 == "/skills"));
+    }
+}
 
 const W: u32 = 440;
 const H: u32 = 470;
@@ -509,8 +527,7 @@ impl App {
         if self.busy || self.confirm.is_some() || !t.starts_with('/') || t.contains(' ') {
             return vec![];
         }
-        let t = t.to_ascii_lowercase();
-        SKILL_MENU.iter().enumerate().filter(|(_, m)| m.0.starts_with(&t)).map(|(i, _)| i).collect()
+        menu_filter(&t)
     }
 
     /// Fill the input from the highlighted menu row. Returns true if the key was used.
