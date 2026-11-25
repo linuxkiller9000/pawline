@@ -17,6 +17,7 @@ pub mod journal;
 pub mod math;
 pub mod plan;
 pub mod search;
+pub mod searchmem;
 pub mod textfallback;
 pub mod validate;
 pub mod wallpaper;

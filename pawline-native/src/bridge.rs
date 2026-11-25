@@ -60,6 +60,43 @@ fn ask_online(text: &str) -> Result<String, PawError> {
     .map(|a| format!("Pollinations (online, not checked, may be wrong):\n{a}"))
 }
 
+static FORCE_REFRESH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Explicit search with a small local memory of past answers (see pawline_core::searchmem).
+/// A fresh saved answer is shown labelled with its date. "refresh: <request>" fetches again.
+/// If the source can't be reached, a saved answer (any age) is shown and labelled as such.
+fn cached_search(engine: SearchEngine, query: &str) -> Result<String, PawError> {
+    use pawline_core::searchmem as sm;
+    let Some(path) = sm::default_path() else { return pawline_core::search::run(engine, query) };
+    let now = sm::now_secs();
+    let force = FORCE_REFRESH.swap(false, std::sync::atomic::Ordering::SeqCst);
+    let saved = sm::lookup(&path, engine, query, now);
+    if let (Some((e, true)), false) = (&saved, force) {
+        sm::bump(&path, engine, query);
+        return Ok(format!(
+            "From memory (saved {} from {}):\n{}\nTo fetch it again, type: refresh: <the same request>",
+            sm::date_of(e.fetched),
+            e.source,
+            e.text
+        ));
+    }
+    match pawline_core::search::run(engine, query) {
+        Ok(t) => {
+            sm::store(&path, engine, query, &t, now);
+            Ok(t)
+        }
+        Err(err) => match saved {
+            Some((e, _)) => Ok(format!(
+                "Couldn't reach the source, so this is the saved answer from {} ({}), it may be out of date:\n{}",
+                sm::date_of(e.fetched),
+                e.source,
+                e.text
+            )),
+            None => Err(err),
+        },
+    }
+}
+
 struct UiBackend {
     inner: DirectFsBackend,
 }
@@ -67,7 +104,7 @@ struct UiBackend {
 impl ExecutionBackend for UiBackend {
     fn execute(&self, op: &Operation) -> Result<OpOutcome, PawError> {
         if let Operation::Search { engine, query } = op {
-            let text = pawline_core::search::run(*engine, query)?;
+            let text = cached_search(*engine, query)?;
             return Ok(OpOutcome {
                 op: op.clone(),
                 detail: text,
@@ -110,7 +147,7 @@ impl ExecutionBackend for UiBackend {
         "ui"
     }
     fn search(&self, engine: SearchEngine, query: &str) -> Result<String, PawError> {
-        pawline_core::search::run(engine, query)
+        cached_search(engine, query)
     }
 }
 
@@ -143,6 +180,32 @@ pub fn reply(kind: &str, text: String) -> UiReply {
 
 
 fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
+    // Local, offline controls for the search memory (Pawline's own file, nothing leaves the machine).
+    {
+        use pawline_core::searchmem as sm;
+        let low = input.trim().to_lowercase();
+        let low = low.trim_end_matches(['.', '!']);
+        if matches!(low, "search memory" | "show search memory" | "what do you remember" | "what have you saved") {
+            return reply("message", sm::default_path().map_or("No data folder.".into(), |p| sm::describe_all(&p)));
+        }
+        if matches!(low, "forget searches" | "forget search memory" | "clear search memory") {
+            return reply(
+                "message",
+                match sm::default_path() {
+                    Some(p) => format!("Deleted {} saved search answer(s).", sm::forget_all(&p)),
+                    None => "No data folder.".into(),
+                },
+            );
+        }
+    }
+    let refreshed;
+    let input = if let Some(rest) = input.trim().strip_prefix("refresh:") {
+        FORCE_REFRESH.store(true, std::sync::atomic::Ordering::SeqCst);
+        refreshed = rest.trim().to_string();
+        refreshed.as_str()
+    } else {
+        input
+    };
     let backend = match DirectFsBackend::new(&state.root).map(|inner| UiBackend { inner }) {
         Ok(b) => b,
         Err(e) => return reply("error", format!("backend: {e}")),
@@ -345,6 +408,7 @@ pub fn handle_text(state: &mut UiState, input: &str) -> UiReply {
     state.carried = std::time::Duration::ZERO;
     let t = std::time::Instant::now();
     let r = handle_text_inner(state, input);
+    FORCE_REFRESH.store(false, std::sync::atomic::Ordering::SeqCst);
     finish(state, r, t.elapsed())
 }
 
