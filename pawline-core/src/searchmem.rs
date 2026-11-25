@@ -100,9 +100,16 @@ pub fn lookup(path: &Path, engine: SearchEngine, query: &str, now: u64) -> Optio
     Some((e, fresh))
 }
 
+/// Refusals and "nothing found" messages are not knowledge: never saved.
+pub fn is_non_answer(text: &str) -> bool {
+    ["Wikipedia has no article", "DuckDuckGo had no instant answer", "Wikipedia is a reference, not live data", "I can't look up live data"]
+        .iter()
+        .any(|m| text.contains(m))
+}
+
 /// Save (or replace) an answer fetched online. Secret-like queries and empty answers are not stored.
 pub fn store(path: &Path, engine: SearchEngine, query: &str, text: &str, now: u64) {
-    if crate::textfallback::looks_like_secret(query) || text.trim().is_empty() {
+    if crate::textfallback::looks_like_secret(query) || text.trim().is_empty() || is_non_answer(text) {
         return;
     }
     let key = normalize(query);
@@ -246,6 +253,17 @@ mod tests {
         store(&p, SearchEngine::Wiki, "cats", "Newer text.", 5000);
         let (e, _) = lookup(&p, SearchEngine::Wiki, "cats", 5000).unwrap();
         assert_eq!((e.text.as_str(), e.hits), ("Newer text.", 1), "refresh replaces text and keeps the count");
+        assert_eq!(load(&p).len(), 1);
+    }
+
+    #[test]
+    fn refusals_and_not_found_are_not_saved() {
+        let p = tmp("nonanswer");
+        for t in ["Wikipedia has no article summary for \"x\".", "DuckDuckGo had no instant answer for \"x\".", "Wikipedia is a reference, not live data, so no. I can't look up live data like prices."] {
+            store(&p, SearchEngine::Wiki, "milk facts", t, 1000);
+        }
+        assert!(load(&p).is_empty());
+        store(&p, SearchEngine::Wiki, "cats", "Cats are small.", 1000);
         assert_eq!(load(&p).len(), 1);
     }
 
