@@ -8,3 +8,4 @@ description = "Pawline's native-Rust Needle assist (no Cactus runtime)"
 [dependencies]
 needle-infer = { path = "../vendor/needle-rs/needle-infer", features = ["parallel"] }
 serde_json = "1"
+needle-core = { path = "../vendor/needle-rs/needle-core" }

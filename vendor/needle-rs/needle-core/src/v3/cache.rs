@@ -122,6 +122,7 @@ pub fn quantize_rows(x: &[f32], head_dim: usize) -> (Vec<i8>, Vec<f32>) {
 }
 
 /// Per-layer key/value storage.
+#[derive(Clone)]
 struct LayerCache {
     /// Populated when the precision is `F32`; empty otherwise.
     k: Vec<f32>,
@@ -145,6 +146,7 @@ struct LayerCache {
 }
 
 /// Decode state for one session.
+#[derive(Clone)]
 pub struct V3Cache {
     cfg: V3Config,
     precision: KvPrecision,

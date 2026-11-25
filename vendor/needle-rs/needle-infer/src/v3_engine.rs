@@ -195,6 +195,45 @@ impl V3Engine {
         query: &str,
         tools_json: &str,
         opts: &V3Options,
+        on_token: F,
+    ) -> V3Result
+    where
+        F: FnMut(u32, &str),
+    {
+        self.generate_inner(query, tools_json, opts, None, on_token)
+    }
+
+    /// PAWLINE PATCH: prompt prefix state (everything up to and including the
+    /// tools block) computed once, then cloned per request. Verified
+    /// bit-identical to a full prefill (examples/prefix_test.rs).
+    pub fn make_prefix(&self, tools_json: &str, system: Option<&str>) -> PrefixState {
+        let full = build_prompt("\u{1}", tools_json, system);
+        let marker = "</tools>\n";
+        let cut = full.find(marker).map(|i| i + marker.len()).unwrap_or(0);
+        let ids = alloc_prompt_ids(self.bos_id, &self.tokenizer, &full[..cut]);
+        let mut cache = V3Cache::new(&self.model.cfg, ids.len() + 64);
+        let _ = self.model.prefill(&ids, &mut cache);
+        PrefixState { ids, cache }
+    }
+
+    /// PAWLINE PATCH: generate reusing a prefix state. Falls back to a full
+    /// prefill when the tokenized prompt does not start with the prefix ids.
+    pub fn generate_prefixed(
+        &self,
+        prefix: &PrefixState,
+        query: &str,
+        tools_json: &str,
+        opts: &V3Options,
+    ) -> V3Result {
+        self.generate_inner(query, tools_json, opts, Some(prefix), |_, _| {})
+    }
+
+    fn generate_inner<F>(
+        &self,
+        query: &str,
+        tools_json: &str,
+        opts: &V3Options,
+        prefix: Option<&PrefixState>,
         mut on_token: F,
     ) -> V3Result
     where
@@ -214,15 +253,29 @@ impl V3Engine {
         }
 
         let budget = max.saturating_sub(ids.len()).min(opts.max_new_tokens);
-        let mut cache =
-            V3Cache::with_precision(&self.model.cfg, ids.len() + budget, opts.kv_precision);
+        let reuse = prefix.filter(|p| {
+            opts.kv_precision == KvPrecision::F32
+                && !prompt_truncated
+                && ids.len() > p.ids.len()
+                && ids[..p.ids.len()] == p.ids[..]
+        });
+        let mut cache = match reuse {
+            Some(p) => p.cache.clone(),
+            None => V3Cache::with_precision(&self.model.cfg, ids.len() + budget, opts.kv_precision),
+        };
 
         // Prefill the whole prompt in one batched pass, then continue from the
         // cache it fills. Stepping the prompt through `decode_step` costs a
         // full weight sweep per position; this pays it once per chunk, and the
         // result is bit-identical — `batched_prefill_leaves_the_cache_where_
         // stepping_would` asserts the continuation, not just the logits.
-        let mut logits = if ids.is_empty() {
+        let mut logits = if let Some(p) = reuse {
+            let mut l = Vec::new();
+            for &t in &ids[p.ids.len()..] {
+                l = self.model.decode_step(&mut cache, t);
+            }
+            l
+        } else if ids.is_empty() {
             Vec::new()
         } else {
             self.model.prefill(&ids, &mut cache)
@@ -382,6 +435,12 @@ impl V3Engine {
     pub fn reasoning(text: &str) -> Option<&str> {
         between(text, THINK_START, THINK_END).map(str::trim)
     }
+}
+
+/// PAWLINE PATCH: reusable prompt-prefix decode state.
+pub struct PrefixState {
+    ids: Vec<u32>,
+    cache: V3Cache,
 }
 
 /// Pull the `<tool_call>…</tool_call>` payload out of a completion.

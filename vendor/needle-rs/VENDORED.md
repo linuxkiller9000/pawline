@@ -9,3 +9,11 @@ independent re-implementation of Cactus's Needle written from the published
 Apache-2.0 sources and paper, with no upstream code copied (see NOTICE).
 That is the author's statement; Pawline has not independently verified it.
 Needle weights remain Apache-2.0 (Cactus Compute).
+
+## Pawline patches (the only edits to upstream src)
+- needle-core/src/v3/cache.rs: `#[derive(Clone)]` on `LayerCache` and `V3Cache`.
+- needle-infer/src/v3_engine.rs: `PrefixState`, `make_prefix`, `generate_prefixed`,
+  and a private `generate_inner` (the old `generate_with` body, with an optional
+  cloned prefix cache; suffix tokens are stepped with `decode_step`).
+  Checked bit-identical to full prefill (pawline-needle-native/examples/prefix_test.rs).
+  Falls back to the unpatched full-prefill path when the prefix does not match.
