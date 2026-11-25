@@ -84,6 +84,59 @@ const LH: f32 = 20.0;
 const PAD: f32 = 14.0;
 const CHAT_TOP: f32 = 64.0;
 const BOTTOM: f32 = 64.0;
+const MAX_IN_LINES: usize = 4;
+
+/// Hard-wrap by character widths: (start, end) char ranges, never empty (an empty input is one empty line).
+fn wrap_ranges(widths: &[f32], maxw: f32, spaces: &[bool]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut acc = 0.0f32;
+    let mut brk: Option<usize> = None; // index just after the last space on this line
+    while i < widths.len() {
+        if acc + widths[i] > maxw && i > start {
+            let cut = match brk {
+                Some(b) if b > start && b <= i => b,
+                _ => i,
+            };
+            out.push((start, cut));
+            start = cut;
+            i = cut;
+            acc = 0.0;
+            brk = None;
+            continue;
+        }
+        acc += widths[i];
+        if spaces[i] {
+            brk = Some(i + 1);
+        }
+        i += 1;
+    }
+    out.push((start, widths.len()));
+    out
+}
+
+/// Index within a line for an x offset: the nearest boundary between glyphs.
+fn pick_in_line(widths: &[f32], target: f32) -> usize {
+    let mut acc = 0.0;
+    for (i, w) in widths.iter().enumerate() {
+        if acc + w / 2.0 > target {
+            return i;
+        }
+        acc += w;
+    }
+    widths.len()
+}
+
+/// Line holding the caret; a caret at a wrap boundary sits at the start of the next line.
+fn line_of(lines: &[(usize, usize)], caret: usize) -> usize {
+    for (k, (_, e)) in lines.iter().enumerate() {
+        if caret < *e || (k + 1 == lines.len() && caret <= *e) {
+            return k;
+        }
+    }
+    lines.len() - 1
+}
 
 enum Req {
     Text(String),
@@ -161,7 +214,10 @@ struct App {
     r_no: (f32, f32, f32, f32),
     r_collapse: (f32, f32, f32, f32),
     ptr_pos: (f64, f64),
-    input_off: usize,
+    input_top: usize,
+    input_extra: f32,
+    input_box_top: f32,
+    input_lines: Vec<(usize, usize)>,
     dragging: bool,
     bubbles: Vec<((f32, f32, f32, f32), String)>,
     toast: Option<&'static str>,
@@ -358,42 +414,52 @@ impl App {
             self.draw_confirm(pm, w, h, inner_w);
         } else {
             self.draw_chat(pm, w, h, inner_w);
-            // input box
-            fill(pm, &rrect(PAD - 2.0, h - 52.0, w - 2.0 * PAD + 4.0, 40.0, 12.0), (52, 48, 70, 255));
-            let (mut before, mut after) = self.input.split();
-            let mut trimmed = 0usize;
-            // keep the caret visible: trim from the left first, then from the right
-            while before.chars().chain(after.chars()).map(|c| self.adv(c, PX)).sum::<f32>() > inner_w - 20.0 {
-                if !before.is_empty() {
-                    before.remove(0);
-                    trimmed += 1;
-                } else if !after.is_empty() {
-                    after.pop();
-                } else {
-                    break;
-                }
+            // input box: wraps onto up to MAX_IN_LINES lines, then scrolls by line
+            let wmax = inner_w - 30.0;
+            let chars: Vec<char> = self.input.text().chars().collect();
+            let widths: Vec<f32> = chars.iter().map(|c| self.adv(*c, PX)).collect();
+            let spaces: Vec<bool> = chars.iter().map(|c| *c == ' ').collect();
+            let lines = wrap_ranges(&widths, wmax, &spaces);
+            let nl = lines.len().clamp(1, MAX_IN_LINES);
+            let caret = self.input.caret();
+            let cl = line_of(&lines, caret);
+            if cl < self.input_top {
+                self.input_top = cl;
             }
-            self.input_off = trimmed;
-            if let Some((a, b)) = self.input.sel() {
-                let chars: Vec<char> = self.input.text().chars().collect();
-                let (a, b) = (a.max(trimmed), b.max(trimmed));
-                let x0: f32 = chars[trimmed..a.min(chars.len())].iter().map(|c| self.adv(*c, PX)).sum();
-                let x1: f32 = chars[trimmed..b.min(chars.len())].iter().map(|c| self.adv(*c, PX)).sum();
-                let bar = self.adv('|', PX);
-                let c = self.input.caret();
-                let x0 = if a > c { x0 + bar } else { x0 };
-                let x1 = if b > c { x1 + bar } else { x1 };
-                if x1 > x0 {
-                    // the caret bar takes one glyph of width in the drawn string; selection sits before/after it
-                    fill(pm, &rrect(PAD + 8.0 + x0, h - 46.0, x1 - x0, 28.0, 4.0), (92, 80, 170, 255));
-                }
+            if cl >= self.input_top + nl {
+                self.input_top = cl + 1 - nl;
             }
-            let shown = format!("{before}|{after}");
-            if let Some(t) = self.toast {
-                self.text(pm, t, w - PAD - 60.0, h - 58.0, 12.0, (170, 165, 195), (0.0, h));
-            }
+            self.input_top = self.input_top.min(lines.len().saturating_sub(nl));
+            self.input_extra = (nl as f32 - 1.0) * LH;
+            let bh = 40.0 + self.input_extra;
+            let top = h - 12.0 - bh;
+            self.input_box_top = top;
+            fill(pm, &rrect(PAD - 2.0, top, w - 2.0 * PAD + 4.0, bh, 12.0), (52, 48, 70, 255));
             let col = if self.busy { (150, 145, 165) } else { (255, 255, 255) };
-            self.text(pm, &shown, PAD + 8.0, h - 26.0, PX, col, (0.0, h));
+            let sel = self.input.sel();
+            for k in 0..nl {
+                let li = self.input_top + k;
+                let (ls, le) = lines[li];
+                let ly = top + 6.0 + k as f32 * LH;
+                if let Some((sa, sb)) = sel {
+                    let (a, b) = (sa.max(ls), sb.min(le));
+                    if b > a {
+                        let x0: f32 = widths[ls..a].iter().sum();
+                        let x1: f32 = widths[ls..b].iter().sum();
+                        fill(pm, &rrect(PAD + 8.0 + x0, ly, x1 - x0, LH, 3.0), (92, 80, 170, 255));
+                    }
+                }
+                let text: String = chars[ls..le].iter().collect();
+                self.text(pm, &text, PAD + 8.0, ly + 15.0, PX, col, (0.0, h));
+                if li == cl {
+                    let cx: f32 = widths[ls..caret.min(le)].iter().sum();
+                    fill(pm, &rrect(PAD + 8.0 + cx, ly + 1.0, 2.0, LH - 2.0, 1.0), (255, 255, 255, 255));
+                }
+            }
+            self.input_lines = lines;
+            if let Some(t) = self.toast {
+                self.text(pm, t, w - PAD - 60.0, top - 6.0, 12.0, (170, 165, 195), (0.0, h));
+            }
             self.draw_menu(pm, w, h);
         }
     }
@@ -403,7 +469,7 @@ impl App {
         let hint_top = self.chat_max > 0.0 && self.scroll < self.chat_max - 1.0;
         let hint_bot = self.scroll > 1.0;
         let top0 = CHAT_TOP;
-        let bot0 = h - BOTTOM + 4.0;
+        let bot0 = h - BOTTOM - self.input_extra + 4.0;
         let top = top0 + if hint_top { 20.0 } else { 0.0 };
         let bot = bot0 - if hint_bot { 20.0 } else { 0.0 };
         // layout all messages
@@ -550,7 +616,7 @@ impl App {
         }
         let rh = 26.0;
         let n = rows.len() as f32;
-        let top = h - 58.0 - n * rh - 8.0;
+        let top = self.input_box_top - 6.0 - n * rh - 8.0;
         fill(pm, &rrect(PAD - 2.0, top, w - 2.0 * PAD + 4.0, n * rh + 8.0, 10.0), (36, 33, 58, 255));
         let sel = self.menu_sel.min(rows.len() - 1);
         for (k, i) in rows.iter().enumerate() {
@@ -712,6 +778,15 @@ impl App {
                 self.input.select_all();
                 self.draw();
             }
+            Keysym::Up | Keysym::Down if self.input_lines.len() > 1 => {
+                let cl = line_of(&self.input_lines, self.input.caret());
+                let to = if e.keysym == Keysym::Up { cl.saturating_sub(1) } else { (cl + 1).min(self.input_lines.len() - 1) };
+                let col = self.input.caret() - self.input_lines[cl].0;
+                let (ls, le) = self.input_lines[to];
+                let sh = self.shift;
+                self.input.set_caret((ls + col).min(le), sh);
+                self.draw();
+            }
             Keysym::Page_Up | Keysym::Up => {
                 self.scroll = (self.scroll + page).min(self.chat_max);
                 self.draw();
@@ -733,21 +808,17 @@ impl App {
         }
     }
 
-    /// Character index in the input for a pointer x position.
-    fn idx_at(&mut self, x: f32) -> usize {
+    /// Character index in the input for a pointer position (line from y, then x within the line).
+    fn idx_at(&mut self, x: f32, y: f32) -> usize {
         let target = x - (PAD + 8.0);
         let chars: Vec<char> = self.input.text().chars().collect();
-        let mut acc = 0.0;
-        let mut i = self.input_off.min(chars.len());
-        while i < chars.len() {
-            let a = self.adv(chars[i], PX);
-            if acc + a / 2.0 > target {
-                break;
-            }
-            acc += a;
-            i += 1;
-        }
-        i
+        let n = self.input_lines.len().max(1);
+        let vis = n.min(MAX_IN_LINES);
+        let k = (((y - self.input_box_top - 6.0) / LH).floor().max(0.0) as usize).min(vis - 1);
+        let (ls, le) = self.input_lines.get(self.input_top + k).copied().unwrap_or((0, chars.len()));
+        let (ls, le) = (ls.min(chars.len()), le.min(chars.len()));
+        let widths: Vec<f32> = chars[ls..le].iter().map(|c| self.adv(*c, PX)).collect();
+        ls + pick_in_line(&widths, target)
     }
 
     fn click(&mut self) {
@@ -761,9 +832,9 @@ impl App {
         }
         if self.confirm.is_none() {
             let (px, py) = self.ptr_pos;
-            let (w, h) = (self.w as f32, self.h as f32);
-            if inside((PAD - 2.0, h - 52.0, w - 2.0 * PAD + 4.0, 40.0), self.ptr_pos) {
-                let i = self.idx_at(px as f32);
+            let w = self.w as f32;
+            if inside((PAD - 2.0, self.input_box_top, w - 2.0 * PAD + 4.0, 40.0 + self.input_extra), self.ptr_pos) {
+                let i = self.idx_at(px as f32, py as f32);
                 self.input.set_caret(i, self.shift);
                 self.dragging = true;
                 self.toast = None;
@@ -886,7 +957,7 @@ impl PointerHandler for App {
                 PointerEventKind::Press { .. } => self.click(),
                 PointerEventKind::Release { .. } => self.dragging = false,
                 PointerEventKind::Motion { .. } if self.dragging => {
-                    let i = self.idx_at(e.position.0 as f32);
+                    let i = self.idx_at(e.position.0 as f32, e.position.1 as f32);
                     self.input.set_caret(i, true);
                     self.draw();
                 }
@@ -1174,7 +1245,10 @@ fn main() {
         input: edit::Edit::default(),
         ctrl: false,
         shift: false,
-        input_off: 0,
+        input_top: 0,
+        input_extra: 0.0,
+        input_box_top: 0.0,
+        input_lines: vec![(0, 0)],
         dragging: false,
         bubbles: Vec::new(),
         toast: None,
@@ -1219,5 +1293,47 @@ fn main() {
     let _ = calloop::timer::Timer::immediate();
     while !app.exit {
         event_loop.dispatch(None, &mut app).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::*;
+    #[test]
+    fn wraps_by_width_and_places_caret() {
+        let w = vec![10.0; 25];
+        let no = vec![false; 25];
+        let l = wrap_ranges(&w, 100.0, &no);
+        assert_eq!(l, vec![(0, 10), (10, 20), (20, 25)]);
+        assert_eq!(wrap_ranges(&[], 100.0, &[]), vec![(0, 0)]);
+        assert_eq!(line_of(&l, 0), 0);
+        assert_eq!(line_of(&l, 10), 1); // boundary belongs to the next line
+        assert_eq!(line_of(&l, 25), 2); // end of text stays on the last line
+        // a glyph wider than the box still advances
+        assert_eq!(wrap_ranges(&[500.0, 5.0], 100.0, &[false, false]), vec![(0, 1), (1, 2)]);
+    }
+
+    #[test]
+    fn click_x_maps_to_nearest_glyph_boundary() {
+        let w = vec![10.0; 5];
+        assert_eq!(pick_in_line(&w, -5.0), 0);
+        assert_eq!(pick_in_line(&w, 4.0), 0);
+        assert_eq!(pick_in_line(&w, 6.0), 1);
+        assert_eq!(pick_in_line(&w, 24.0), 2);
+        assert_eq!(pick_in_line(&w, 500.0), 5);
+    }
+
+    #[test]
+    fn breaks_after_a_space_when_there_is_one() {
+        // "aaa bbbbbbb" at 10 px per char, 80 px wide: break after the space, not inside the word
+        let t: Vec<char> = "aaa bbbbbbb".chars().collect();
+        let w = vec![10.0; t.len()];
+        let sp: Vec<bool> = t.iter().map(|c| *c == ' ').collect();
+        assert_eq!(wrap_ranges(&w, 80.0, &sp), vec![(0, 4), (4, 11)]);
+        // ranges always cover every char exactly once
+        let l = wrap_ranges(&w, 30.0, &sp);
+        assert_eq!(l.first().unwrap().0, 0);
+        assert_eq!(l.last().unwrap().1, t.len());
+        assert!(l.windows(2).all(|p| p[0].1 == p[1].0));
     }
 }
