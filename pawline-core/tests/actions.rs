@@ -112,7 +112,9 @@ fn no_overwrite_and_store_is_private() {
     let mut e = Engine::new(root.clone());
     run(&mut e, &root, "make a folder called p1");
     save(&e, &root, "p").unwrap();
-    assert!(save(&e, &root, "P").is_err());
+    assert!(save(&e, &root, "p").is_err(), "same exact name never overwrites");
+    save(&e, &root, "P").unwrap();
+    assert_eq!(load(&root).len(), 2, "names differing only in case are different names");
     use std::os::unix::fs::PermissionsExt;
     let m = std::fs::metadata(root.join(actions::ACTIONS)).unwrap().permissions().mode() & 0o777;
     assert_eq!(m, 0o600);
@@ -183,4 +185,21 @@ fn symlinked_store_cannot_escape_the_root() {
     let b2 = DirectFsBackend::new(&root2).unwrap();
     let _ = b2.write_store_text(actions::ACTIONS, "x\ty\tz\n");
     assert!(!outside.join("pl/actions.tsv").exists(), "store symlink was not followed out of the root");
+}
+
+#[test]
+fn saved_action_names_are_case_exact_and_kelvin_sign_does_not_panic() {
+    let root = sandbox("names");
+    std::fs::write(root.join("a.txt"), "x").unwrap();
+    std::fs::create_dir(root.join("d")).unwrap();
+    let mut e = Engine::new(root.clone());
+    let cmd = format!("copy {}/a.txt to {}/d", root.display(), root.display());
+    run(&mut e, &root, &cmd);
+    save(&e, &root, "Backup").unwrap();
+    let all = load(&root);
+    assert!(actions::find(&all, "Backup").is_some());
+    assert!(actions::find(&all, "backup").is_none(), "names are case-exact");
+    // U+212A (Kelvin sign) lowercases to ASCII 'k'; it must not be sliced mid-character
+    let _ = actions::parse_meta("\u{212A}un saved action x");
+    let _ = actions::parse_meta("run saved action \u{212A}x");
 }

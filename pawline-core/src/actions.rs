@@ -54,7 +54,7 @@ fn clean_arg(s: &str) -> String {
 /// ("saved action") so they cannot be mistaken for file commands.
 pub fn parse_meta(input: &str) -> Option<Meta> {
     let t = input.trim();
-    let l = t.to_lowercase();
+    let l = t.to_ascii_lowercase();
     let after = |prefix: &str| -> Option<String> {
         l.strip_prefix(prefix).map(|_| clean_arg(&t[prefix.len()..]))
     };
@@ -125,7 +125,7 @@ pub fn render_file(all: &[Saved]) -> String {
 }
 
 pub fn find<'a>(all: &'a [Saved], name: &str) -> Option<&'a Saved> {
-    all.iter().find(|a| a.name.eq_ignore_ascii_case(name))
+    all.iter().find(|a| a.name == name)
 }
 
 /// Add a new action. Never overwrites: a name that exists must be deleted first.
@@ -150,7 +150,7 @@ pub fn add(all: &mut Vec<Saved>, name: &str, c: &Candidate) -> Result<(), PawErr
 
 pub fn remove(all: &mut Vec<Saved>, name: &str) -> Result<(), PawError> {
     let before = all.len();
-    all.retain(|a| !a.name.eq_ignore_ascii_case(name));
+    all.retain(|a| a.name != name);
     if all.len() == before {
         return Err(PawError::Validation(format!("no saved action named \"{name}\"")));
     }
