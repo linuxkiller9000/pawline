@@ -9,6 +9,7 @@
 pub mod apps;
 pub mod assist;
 pub mod context;
+pub mod dirs;
 pub mod error;
 pub mod exec;
 pub mod imagegen;

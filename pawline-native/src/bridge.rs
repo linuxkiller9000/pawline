@@ -157,6 +157,36 @@ pub fn reply(kind: &str, text: String) -> UiReply {
 }
 
 
+/// "zi" / "zi <keywords>": list frequent folders (zoxide if present, else Pawline's own list). Display only.
+pub fn dirs_command(
+    input: &str,
+    own: Option<&std::path::Path>,
+    now: u64,
+    zoxide: impl FnOnce() -> Option<Vec<pawline_core::dirs::Ranked>>,
+) -> Option<String> {
+    let t = input.trim().trim_end_matches(['.', '!']);
+    let low = t.to_lowercase();
+    let query = if low == "zi" { "" } else { low.strip_prefix("zi ")? };
+    let Some(own) = own else { return Some("No data folder.".into()) };
+    let (src, list) = pawline_core::dirs::ranked(zoxide(), own, now, query);
+    Some(pawline_core::dirs::render(src, &list))
+}
+
+/// Folders worth remembering from completed steps: where files were made, moved, copied or renamed to, or listed.
+pub fn folders_of(ops: &[Operation]) -> Vec<std::path::PathBuf> {
+    use pawline_core::plan::Operation as O;
+    let mut v = vec![];
+    for o in ops {
+        match o {
+            O::CreateDir { path } | O::List { path } => v.push(path.clone()),
+            O::CreateFile { path } => v.extend(path.parent().map(|p| p.to_path_buf())),
+            O::Move { to, .. } | O::Copy { to, .. } | O::Rename { to, .. } => v.extend(to.parent().map(|p| p.to_path_buf())),
+            _ => {}
+        }
+    }
+    v
+}
+
 /// Local task-step memory commands. None when the input is not one of them. Display/delete only.
 pub fn task_memory_command(input: &str, path: Option<&std::path::Path>) -> Option<String> {
     use pawline_core::planmem as pm;
@@ -207,6 +237,9 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                 },
             );
         }
+    }
+    if let Some(m) = dirs_command(input, pawline_core::dirs::own_path().as_deref(), pawline_core::searchmem::now_secs(), pawline_core::dirs::zoxide_ranked) {
+        return reply("message", m);
     }
     if let Some(m) = task_memory_command(input, pawline_core::planmem::default_path().as_deref()) {
         return reply("message", m);
@@ -275,6 +308,9 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     match r {
         Ok(Response::Executed(ops)) => {
             let done: Vec<String> = ops.iter().map(|o| o.op.describe()).collect();
+            if let Some(p) = pawline_core::dirs::own_path() {
+                pawline_core::dirs::record_own(&p, &folders_of(&ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>()), pawline_core::searchmem::now_secs());
+            }
             if let Some(p) = pawline_core::planmem::default_path() {
                 remember_steps(&p, input, &ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>(), pawline_core::searchmem::now_secs());
             }
@@ -358,6 +394,9 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
     match state.engine.execute_plan(plan, &backend) {
         Ok(Response::Executed(ops)) => {
             // Recorded only after the confirmed plan fully succeeded (cancelled and failed plans arrive as Failed).
+            if let Some(p) = pawline_core::dirs::own_path() {
+                pawline_core::dirs::record_own(&p, &folders_of(&ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>()), pawline_core::searchmem::now_secs());
+            }
             if let (Some(req), Some(p)) = (request.as_deref(), pawline_core::planmem::default_path()) {
                 remember_steps(&p, req, &ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>(), pawline_core::searchmem::now_secs());
             }
@@ -457,6 +496,26 @@ fn finish(state: &mut UiState, r: UiReply, spent: std::time::Duration) -> UiRepl
 #[cfg(test)]
 mod memory_tests {
     use super::*;
+    #[test]
+    fn zi_command_uses_zoxide_then_own_list_and_ignores_other_text() {
+        use pawline_core::dirs::Ranked;
+        let d = std::env::temp_dir().join(format!("pawline-zi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let proj = d.join("projects");
+        std::fs::create_dir_all(&proj).unwrap();
+        let own = d.join("ff.json");
+        assert!(dirs_command("make a folder zi", Some(&own), 1, || panic!("must not run")).is_none());
+        assert!(dirs_command("ziggy", Some(&own), 1, || panic!("must not run")).is_none());
+        let z = dirs_command("zi", Some(&own), 1, || Some(vec![Ranked { score: 5.0, path: proj.clone() }])).unwrap();
+        assert!(z.contains("source: zoxide") && z.contains("projects"));
+        let none = dirs_command("zi proj", Some(&own), 1, || None).unwrap();
+        assert!(none.contains("No frequent folders") && none.contains("Pawline's own list"));
+        pawline_core::dirs::record_own(&own, &folders_of(&[pawline_core::plan::Operation::CreateFile { path: proj.join("a.txt") }]), 1);
+        let o = dirs_command("ZI proj", Some(&own), 1, || None).unwrap();
+        assert!(o.contains("Pawline's own list") && o.contains("projects"));
+        assert!(folders_of(&[pawline_core::plan::Operation::Answer { text: "x".into() }]).is_empty());
+    }
+
     fn tdir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("pawline-bridge-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
