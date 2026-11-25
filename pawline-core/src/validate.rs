@@ -274,6 +274,11 @@ impl Validator {
                     let e = crate::journal::last_open(&text).ok_or_else(|| {
                         PawError::Validation("there is nothing to undo yet".into())
                     })?;
+                    if e.kind == "wallpaper" && e.b.is_none() {
+                        return Err(PawError::Validation(
+                            "I can't undo the last change: it was a wallpaper change and I couldn't see the previous wallpaper. Nothing was changed.".into(),
+                        ));
+                    }
                     ops.push(Operation::Undo { entry: e.id, summary: e.describe_undo() });
                 }
                 Directive::SetWallpaper { image, via, no_backup_ok } => {

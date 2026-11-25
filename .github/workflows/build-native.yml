@@ -1,0 +1,71 @@
+# Builds the single-file Pawline native binary on a free GitHub-hosted runner
+# (public repo) with the built-in GITHUB_TOKEN. No secrets are used.
+# Manual only. By default it only uploads a workflow artifact for inspection.
+# Set publish=true to attach the file to the release named by `tag`.
+name: build-native
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach to when publish=true (e.g. v0.2.0-beta)"
+        required: false
+        default: "v0.2.0-beta"
+      publish:
+        description: "Attach the binary to the existing release"
+        type: boolean
+        default: false
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build tools and static C++ runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libc++-14-dev libc++abi-14-dev libunwind-14-dev bison flex ninja-build pkg-config python3-pip
+          pip3 install --user meson
+          mkdir -p "$RUNNER_TEMP/stdir"
+          cp /usr/lib/llvm-14/lib/libc++.a /usr/lib/llvm-14/lib/libc++abi.a /usr/lib/llvm-14/lib/libunwind.a "$RUNNER_TEMP/stdir/"
+      - name: Static libxkbcommon 1.4.0 (MIT)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cd "$RUNNER_TEMP"
+          curl -fsSLO https://xkbcommon.org/download/libxkbcommon-1.4.0.tar.xz
+          echo "106cec5263f9100a7e79b5f7220f889bc78e7d7ffc55d2b6fdb1efefb8024031  libxkbcommon-1.4.0.tar.xz" | sha256sum -c -
+          tar xf libxkbcommon-1.4.0.tar.xz
+          cd libxkbcommon-1.4.0
+          meson setup build --default-library=static -Denable-x11=false -Denable-wayland=false -Denable-docs=false -Denable-tools=false -Denable-xkbregistry=false -Dbuildtype=release -Db_pie=false -Dc_args=-fPIC
+          ninja -C build libxkbcommon.a
+          mkdir -p "$RUNNER_TEMP/xkb/lib" "$RUNNER_TEMP/xkbpc"
+          cp build/libxkbcommon.a "$RUNNER_TEMP/xkb/lib/"
+          cp -r include "$RUNNER_TEMP/xkb/include"
+          printf 'prefix=%s/xkb\nlibdir=${prefix}/lib\nincludedir=${prefix}/include\nName: xkbcommon\nDescription: static\nVersion: 1.4.0\nLibs: -L${libdir} -lxkbcommon\nCflags: -I${includedir}\n' "$RUNNER_TEMP" > "$RUNNER_TEMP/xkbpc/xkbcommon.pc"
+      - name: Build pawline-native
+        run: |
+          export PKG_CONFIG_PATH="$RUNNER_TEMP/xkbpc" PKG_CONFIG_ALL_STATIC=1 CACTUS_CPP_STATIC_DIR="$RUNNER_TEMP/stdir"
+          cargo build --release -p pawline-native --locked
+      - name: Verify dependencies (fail if anything but glibc is needed)
+        run: |
+          B=target/release/pawline
+          readelf -d "$B" | grep NEEDED | tee needed.txt
+          if grep -vE 'libm\.so|libc\.so|ld-linux|libgcc_s|libdl|libpthread|librt' needed.txt; then echo "unexpected shared library requirement"; exit 1; fi
+          readelf -V "$B" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 | tee glibc.txt
+          mkdir -p out
+          cp "$B" out/pawline-0.2.0-beta-linux-x86_64
+          (cd out && sha256sum pawline-0.2.0-beta-linux-x86_64 > SHA256SUMS.txt && cat SHA256SUMS.txt && ls -l)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pawline-0.2.0-beta
+          path: |
+            out/pawline-0.2.0-beta-linux-x86_64
+            out/SHA256SUMS.txt
+            needed.txt
+            glibc.txt
+      - name: Attach to release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ inputs.tag }}" out/pawline-0.2.0-beta-linux-x86_64 out/SHA256SUMS.txt --clobber

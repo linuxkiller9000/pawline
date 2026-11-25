@@ -63,18 +63,18 @@ pub fn handle_text(state: &mut UiState, input: &str) -> UiReply {
         Err(e) => return reply("error", format!("backend: {e}")),
     };
     state.notes.extend(backend.inner.recovery_notes().iter().cloned());
-    // Lazily load the embedded model on first parser gap; if it fails,
-    // Pawline stays parser-only.
-    if !state.assist_tried {
-        state.assist_tried = true;
-        state.assist = NeedleAssist::embedded().ok();
+    // Parser first. The 35 MB model is loaded only when the parser has a
+    // gap, so ordinary commands never wait for it.
+    let mut r = state.engine.handle_with(input, &backend, false, None);
+    if r.is_err() {
+        if !state.assist_tried {
+            state.assist_tried = true;
+            state.assist = NeedleAssist::embedded().ok();
+        }
+        if let Some(a) = state.assist.as_ref() {
+            r = state.engine.handle_with(input, &backend, false, Some(a as &dyn pawline_core::assist::Assist));
+        }
     }
-    let r = state.engine.handle_with(
-        input,
-        &backend,
-        false,
-        state.assist.as_ref().map(|a| a as &dyn pawline_core::assist::Assist),
-    );
     match r {
         Ok(Response::Executed(ops)) => {
             let done: Vec<String> = ops.iter().map(|o| o.op.describe()).collect();

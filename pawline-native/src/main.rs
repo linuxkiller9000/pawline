@@ -362,10 +362,12 @@ impl App {
         }
         pm.draw_pixmap(0, top as i32, cp.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
         if self.chat_max > 0.0 && self.scroll < self.chat_max - 1.0 {
-            self.text(pm, "^ older (PageUp / wheel)", PAD, top + 12.0, 12.0, (150, 145, 175), (0.0, h));
+            fill(pm, &rrect(PAD, top + 2.0, 190.0, 18.0, 8.0), (30, 28, 40, 230));
+            self.text(pm, "^ older (PageUp / wheel)", PAD + 6.0, top + 15.0, 12.0, (170, 165, 195), (0.0, h));
         }
         if self.scroll > 1.0 {
-            self.text(pm, "v newer (PageDown)", w - 150.0, bot - 2.0, 12.0, (150, 145, 175), (0.0, h));
+            fill(pm, &rrect(w - 160.0, bot - 18.0, 146.0, 18.0, 8.0), (30, 28, 40, 230));
+            self.text(pm, "v newer (PageDown)", w - 154.0, bot - 5.0, 12.0, (170, 165, 195), (0.0, h));
         }
     }
 

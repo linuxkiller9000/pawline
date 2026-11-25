@@ -82,7 +82,9 @@ fn undo_returns_to_previous_pawline_wallpaper_and_refuses_without_one() {
     };
     run(&mut e, "set wallpaper to ~/Pictures/sunset.png anyway");
     // only one change so far: nothing earlier to return to
-    assert!(matches!(run(&mut e, "undo"), Response::Failed { .. }));
+    // planning itself refuses: no Do it is offered for a known-impossible undo
+    let err = e.plan("undo").unwrap_err().to_string();
+    assert!(err.contains("couldn't see the previous wallpaper"), "{err}");
     run(&mut e, "set wallpaper to ~/Pictures/two.jpg");
     assert!(matches!(run(&mut e, "undo"), Response::Executed(_)));
     let l = log.lock().unwrap().clone();
