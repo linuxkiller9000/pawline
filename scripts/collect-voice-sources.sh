@@ -21,21 +21,37 @@ gcc() {
 
 moonshine() {
   # tag v0.1.6 -> commit d8d8fa29d05ca67441a7719e70099f9f48917a93 (tag object a0ea0d09...)
+  # Source-only archive. Excluded on purpose (see the generated EXCLUSIONS manifest): test audio and
+  # other test-assets (terms unresolved, not needed to build), docs audio/images, the microcontroller
+  # port, language bindings, examples, and every prebuilt ONNX Runtime binary under
+  # core/third-party/onnxruntime/lib (binaries, not source; the linux-x86_64 one is the file whose
+  # sha256 is pinned in voice_cfg.rs, 13ab8084...). Kept: core/ (including its vendored sources and
+  # licences), scripts/ (ORT build script and operator config), LICENSE, docs/license.md.
   d=$(mktemp -d)
   git -c advice.detachedHead=false clone -q --branch v0.1.6 https://github.com/moonshine-ai/moonshine.git "$d/m"
   [ "$(git -C "$d/m" rev-parse HEAD)" = d8d8fa29d05ca67441a7719e70099f9f48917a93 ] || { echo "moonshine commit mismatch"; exit 1; }
-  git -C "$d/m" archive --format=tar.gz --prefix=moonshine-v0.1.6/ -o "$PWD/$OUT/moonshine-v0.1.6-d8d8fa2.tar.gz" HEAD
+  EXCL="test-assets docs/audio docs/images micro language-bindings examples core/third-party/onnxruntime/lib"
+  set --
+  for e in $EXCL; do set -- "$@" ":(exclude)$e"; done
+  git -C "$d/m" archive --format=tar.gz --prefix=moonshine-v0.1.6-src/ -o "$PWD/$OUT/moonshine-v0.1.6-d8d8fa2-src.tar.gz" HEAD . "$@"
+  : > "$OUT/moonshine-v0.1.6-EXCLUSIONS.txt"
+  for e in $EXCL; do
+    git -C "$d/m" ls-tree -r -l HEAD -- "$e" | awk -v p="$e" '{printf "%s\t%s\t%s\n", $3, $4, $5}' >> "$OUT/moonshine-v0.1.6-EXCLUSIONS.txt"
+  done
+  sed -i '1i # git blob id, size in bytes, path: files left out of the source archive (see collect-voice-sources.sh)' "$OUT/moonshine-v0.1.6-EXCLUSIONS.txt"
   rm -rf "$d"
 }
 
 ort() {
   # Microsoft ONNX Runtime v1.23.2 (the version scripts/ort-build-common.sh in Moonshine v0.1.6 builds).
-  # Not reachable from the author's sandbox, so the commit pin below must be filled in on first CI run
-  # and then checked in. Submodules are included because the build fetches them.
+  # Not reachable from the author's sandbox: the commit must be read from the upstream tag by a reviewer
+  # and passed as ORT_COMMIT (then recorded here) before any redistribution. Submodules are included because the build fetches them.
   d=$(mktemp -d)
   git clone -q --recursive --depth 1 --branch v1.23.2 https://github.com/microsoft/onnxruntime.git "$d/o"
   echo "onnxruntime v1.23.2 commit: $(git -C "$d/o" rev-parse HEAD)"
-  [ -z "${ORT_COMMIT:-}" ] || [ "$(git -C "$d/o" rev-parse HEAD)" = "$ORT_COMMIT" ] || { echo "ort commit mismatch"; exit 1; }
+  # Hard gate: no pinned commit means no ORT source asset and a failing script.
+  [ -n "${ORT_COMMIT:-}" ] || { echo "ORT_COMMIT is not pinned: refusing to produce an unpinned ORT source asset"; exit 1; }
+  [ "$(git -C "$d/o" rev-parse HEAD)" = "$ORT_COMMIT" ] || { echo "ort commit mismatch"; exit 1; }
   tar --exclude=.git -czf "$OUT/onnxruntime-v1.23.2-with-submodules.tar.gz" -C "$d" o
   rm -rf "$d"
 }
