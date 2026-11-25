@@ -43,11 +43,15 @@ Working slice, tested in a headless sandbox (not yet on the target Dell):
 - Deterministic math answers ("what is 21 * 2", "20% of 85")
 - Fail-closed refusal of unrecognized input
 
-Planned, in stages: explicit web search (DuckDuckGo/Wikipedia, offline
-preserved), wallpaper setting with theme matching (swaybg, awww, and KDE's
-plasma-apply-wallpaperimage), KDE Plasma integration and KDE Connect,
-per-change backup/restore, and named reusable actions through the same
-safety checks.
+Unreleased (in source, not in any beta yet): wallpaper setting ("set wallpaper
+to ~/Pictures/a.png"). Always asks for confirmation, only accepts an existing
+image inside your home area, and runs a fixed command with no shell: `awww img`,
+`swaybg -i ... -m fill`, or on KDE `plasma-apply-wallpaperimage`. Tested so far:
+unit tests plus the swaybg path in a headless sway sandbox. awww and Plasma
+are checked against their documented syntax only, not run.
+
+Planned, in stages: per-change backup/restore, named reusable actions through
+the same safety checks, KDE Plasma integration and KDE Connect, theme matching.
 
 ## Layout
 

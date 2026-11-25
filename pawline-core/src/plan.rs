@@ -28,6 +28,8 @@ pub enum Directive {
     Copy { target: LocationRef, dest: LocationRef },
     List { target: LocationRef },
     OpenApp { name: String },
+    /// Set the desktop wallpaper to an image the user pointed at.
+    SetWallpaper { image: LocationRef },
     /// A side-effect-free computed answer (deterministic math). Never
     /// touches disk, never needs confirmation.
     Answer { text: String },
@@ -64,6 +66,7 @@ pub enum Operation {
     Copy { from: PathBuf, to: PathBuf },
     List { path: PathBuf },
     OpenApp { name: String },
+    SetWallpaper { image: PathBuf },
     Answer { text: String },
     Search { engine: SearchEngine, query: String },
 }
@@ -81,6 +84,7 @@ impl Operation {
             Operation::Copy { from, to } => format!("Copy {} to {}", from.display(), to.display()),
             Operation::List { path } => format!("List {}", path.display()),
             Operation::OpenApp { name } => format!("Open {name}"),
+            Operation::SetWallpaper { image } => format!("Set wallpaper to {}", image.display()),
             Operation::Answer { text } => text.clone(),
             Operation::Search { engine, query } => match engine {
                 SearchEngine::Web => format!("Search the web for \"{query}\""),
@@ -91,7 +95,10 @@ impl Operation {
 
     /// Destructive or hard-to-undo operations need explicit user confirmation.
     pub fn needs_confirmation(&self) -> bool {
-        matches!(self, Operation::Delete { .. } | Operation::Move { .. })
+        matches!(
+            self,
+            Operation::Delete { .. } | Operation::Move { .. } | Operation::SetWallpaper { .. }
+        )
     }
 }
 

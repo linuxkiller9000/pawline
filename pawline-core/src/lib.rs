@@ -15,6 +15,7 @@ pub mod math;
 pub mod plan;
 pub mod search;
 pub mod validate;
+pub mod wallpaper;
 
 use assist::Assist;
 use context::ContextManager;

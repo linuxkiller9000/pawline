@@ -8,7 +8,7 @@ const CREATE_VERBS: &[&str] = &["make", "create", "add", "new"];
 const DELETE_VERBS: &[&str] = &["delete", "remove", "trash"];
 const VERBS: &[&str] = &[
     "make", "create", "add", "new", "delete", "remove", "trash", "rename", "move", "copy", "open",
-    "launch", "start", "list", "show",
+    "launch", "start", "list", "show", "set", "change",
 ];
 
 /// Parse a full user message into directives, in order.
@@ -182,6 +182,9 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
                 });
             }
         }
+    }
+    if let Some(d) = parse_wallpaper(cmd) {
+        return d;
     }
     let lower = cmd.to_lowercase();
     let first = lower.split_whitespace().next().unwrap_or("");
@@ -384,4 +387,50 @@ fn name_to_location(words: &str) -> LocationRef {
             LocationRef::Named(w)
         }
     })
+}
+
+/// "set wallpaper to X", "change my background to X", "set X as wallpaper".
+/// Returns None when the clause is not about the wallpaper.
+fn parse_wallpaper(cmd: &str) -> Option<Result<Directive, PawError>> {
+    let lower = cmd.to_lowercase();
+    let first = lower.split_whitespace().next().unwrap_or("");
+    if first != "set" && first != "change" {
+        return None;
+    }
+    let is_wp = |w: &str| matches!(w, "wallpaper" | "background" | "backdrop");
+    let words: Vec<&str> = cmd.split_whitespace().collect();
+    let lw: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
+    // "<verb> [the|my] <wallpaper-word> [to] <path...>"
+    let mut i = 1;
+    if i < lw.len() && (lw[i] == "the" || lw[i] == "my") {
+        i += 1;
+    }
+    let path_words: Vec<&str> = if i < lw.len() && is_wp(&lw[i]) {
+        i += 1;
+        if i < lw.len() && lw[i] == "to" {
+            i += 1;
+        }
+        words[i..].to_vec()
+    } else if first == "set" && lw.len() >= 3 {
+        // "set <path...> as [the|my] <wallpaper-word>"
+        let n = lw.len();
+        let tail = if n >= 2 && is_wp(&lw[n - 1]) { n - 1 } else { return None };
+        let mut as_at = tail;
+        if as_at >= 1 && (lw[as_at - 1] == "the" || lw[as_at - 1] == "my") {
+            as_at -= 1;
+        }
+        if as_at >= 2 && lw[as_at - 1] == "as" {
+            words[1..as_at - 1].to_vec()
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+    let target = path_words.join(" ");
+    let target = target.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+    if target.is_empty() {
+        return Some(Err(PawError::Parse("which picture should be the wallpaper?".into())));
+    }
+    Some(Ok(Directive::SetWallpaper { image: name_to_location(target) }))
 }

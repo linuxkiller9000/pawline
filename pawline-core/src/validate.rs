@@ -255,6 +255,25 @@ impl Validator {
                     let path = self.resolve_location(target, &sim)?;
                     ops.push(Operation::List { path });
                 }
+                Directive::SetWallpaper { image } => {
+                    let path = self.resolve_location(image, &sim)?;
+                    let meta = std::fs::metadata(&path).map_err(|_| {
+                        PawError::Validation(format!("no such image: {}", path.display()))
+                    })?;
+                    if !meta.is_file() {
+                        return Err(PawError::Validation(format!(
+                            "{} is not a picture file",
+                            path.display()
+                        )));
+                    }
+                    if !crate::wallpaper::extension_ok(&path) {
+                        return Err(PawError::Validation(format!(
+                            "{} is not a picture I can use (png, jpg, webp, bmp or gif)",
+                            path.display()
+                        )));
+                    }
+                    ops.push(Operation::SetWallpaper { image: path });
+                }
                 Directive::OpenApp { name } => ops.push(Operation::OpenApp { name: name.clone() }),
                 Directive::Answer { text } => ops.push(Operation::Answer { text: text.clone() }),
                 Directive::Search { engine, query } => ops.push(Operation::Search {

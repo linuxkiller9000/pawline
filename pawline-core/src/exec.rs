@@ -39,6 +39,7 @@ pub trait ExecutionBackend {
 pub struct DirectFsBackend {
     root_path: PathBuf,
     root: Dir,
+    wallpaper: Box<dyn crate::wallpaper::WallpaperSetter>,
 }
 
 impl DirectFsBackend {
@@ -48,7 +49,14 @@ impl DirectFsBackend {
         Ok(DirectFsBackend {
             root_path: canon,
             root: dir,
+            wallpaper: Box::new(crate::wallpaper::SystemWallpaper),
         })
+    }
+
+    /// Replace the wallpaper setter (tests, or a UI-specific one).
+    pub fn with_wallpaper(mut self, w: Box<dyn crate::wallpaper::WallpaperSetter>) -> Self {
+        self.wallpaper = w;
+        self
     }
 
     fn rel(&self, p: &Path) -> Result<PathBuf, PawError> {
@@ -124,6 +132,21 @@ impl ExecutionBackend for DirectFsBackend {
                         names.join(", ")
                     },
                 })
+            }
+            Operation::SetWallpaper { image } => {
+                // Re-check at execution time, beneath the root handle: the
+                // plan was validated earlier and the file may have changed.
+                let rel = self.rel(image)?;
+                let meta = self.root.metadata(&rel)?;
+                if !meta.is_file() || !crate::wallpaper::extension_ok(image) {
+                    return Err(PawError::Validation(format!(
+                        "{} is no longer a usable picture",
+                        image.display()
+                    )));
+                }
+                let canon = self.root_path.join(&rel);
+                let detail = self.wallpaper.set(&canon)?;
+                Ok(done(op, &detail))
             }
             Operation::OpenApp { name } => Err(PawError::Exec(format!(
                 "launching apps ({name}) is a UI-layer job; not done by the fs backend"
