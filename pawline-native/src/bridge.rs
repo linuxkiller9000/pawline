@@ -797,7 +797,10 @@ pub fn folder_candidates_with(
     zox: Option<Vec<pawline_core::dirs::Ranked>>,
     query: &str,
     cap: usize,
+    cancel: &dyn Fn() -> bool,
+    budget: std::time::Duration,
 ) -> Vec<std::path::PathBuf> {
+    let t0 = std::time::Instant::now();
     let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
     let mut out: Vec<std::path::PathBuf> = vec![];
     if let Some(own) = own {
@@ -812,6 +815,9 @@ pub fn folder_candidates_with(
     let mut seen = 0usize;
     let mut found: Vec<std::path::PathBuf> = vec![];
     while let Some((d, depth)) = stack.pop() {
+        if cancel() || t0.elapsed() > budget {
+            break;
+        }
         let Ok(rd) = std::fs::read_dir(&d) else { continue };
         let mut kids: Vec<std::path::PathBuf> = rd.flatten().map(|e| e.path()).collect();
         kids.sort();
@@ -843,8 +849,8 @@ pub fn folder_candidates_with(
     out
 }
 
-pub fn folder_candidates(home: &std::path::Path, query: &str) -> Vec<std::path::PathBuf> {
-    folder_candidates_with(home, pawline_core::dirs::own_path().as_deref(), pawline_core::searchmem::now_secs(), pawline_core::dirs::zoxide_ranked(), query, 200)
+pub fn folder_candidates(home: &std::path::Path, query: &str, cancel: &dyn Fn() -> bool) -> Vec<std::path::PathBuf> {
+    folder_candidates_with(home, pawline_core::dirs::own_path().as_deref(), pawline_core::searchmem::now_secs(), pawline_core::dirs::zoxide_ranked(), query, 200, cancel, std::time::Duration::from_millis(800))
 }
 
 /// Confirmation received -> result ready: carried planning time plus execution.
@@ -1288,6 +1294,42 @@ mod memory_tests {
     }
 
     #[test]
+    fn skill_chip_plus_folder_chip_dispatch_creates_in_the_chip_folder() {
+        let root = std::env::temp_dir().join(format!("pawline-skchip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sub = root.join("proj");
+        std::fs::create_dir_all(&sub).unwrap();
+        let mut st = new_state(root.canonicalize().unwrap());
+        let files = crate::SKILL_MENU.iter().position(|m| m.0 == "/files").unwrap();
+        let text = crate::compose_request(Some(files), "kitten");
+        let r = handle_text_in(&mut st, &text, Some(&sub.canonicalize().unwrap()));
+        assert_ne!(r.kind, "error", "{}", r.text);
+        assert!(sub.join("kitten").is_dir() && !root.join("kitten").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn folder_search_is_cancellable_and_time_bounded() {
+        let home = std::env::temp_dir().join(format!("pawline-fcb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        for i in 0..40 {
+            for j in 0..40 {
+                std::fs::create_dir_all(home.join(format!("d{i}/e{j}"))).unwrap();
+            }
+        }
+        let own = home.join("ff.json");
+        let t = std::time::Instant::now();
+        let r = folder_candidates_with(&home, Some(&own), 1, None, "zzz", 200, &|| true, std::time::Duration::from_secs(5));
+        assert!(r.is_empty() && t.elapsed() < std::time::Duration::from_millis(100), "cancelled scan returns at once");
+        let t = std::time::Instant::now();
+        let _ = folder_candidates_with(&home, Some(&own), 1, None, "zzz", 200, &|| false, std::time::Duration::from_millis(1));
+        assert!(t.elapsed() < std::time::Duration::from_millis(500), "time budget stops the walk");
+        let full = folder_candidates_with(&home, Some(&own), 1, None, "e39", 200, &|| false, std::time::Duration::from_secs(10));
+        assert_eq!(full.len(), 40);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn chip_refuses_bare_names_before_planning_and_keeps_explicit_paths() {
         let d = std::path::Path::new("/h/proj");
         for bad in ["delete kp", "move kp to Documents", "copy a.txt to b", "rename kp to z", "make a folder called x inside pics"] {
@@ -1309,18 +1351,18 @@ mod memory_tests {
         std::fs::create_dir_all(home.join("a/b/c/d/deepgem")).unwrap();
         std::fs::create_dir_all(home.join(".hidden/shared")).unwrap();
         let own = home.join("ff.json");
-        let all = folder_candidates_with(&home, Some(&own), 1, None, "", 200);
+        let all = folder_candidates_with(&home, Some(&own), 1, None, "", 200, &|| false, std::time::Duration::from_secs(5));
         assert!(all.len() > 8, "not limited to 8: {}", all.len());
-        let shared = folder_candidates_with(&home, Some(&own), 1, None, "shared", 200);
+        let shared = folder_candidates_with(&home, Some(&own), 1, None, "shared", 200, &|| false, std::time::Duration::from_secs(5));
         assert_eq!(shared.len(), 12, "duplicate basenames all listed with distinct full paths");
         assert!(shared.iter().all(|p| !p.to_string_lossy().contains(".hidden")));
-        let deep = folder_candidates_with(&home, Some(&own), 1, None, "deepgem", 200);
+        let deep = folder_candidates_with(&home, Some(&own), 1, None, "deepgem", 200, &|| false, std::time::Duration::from_secs(5));
         assert_eq!(deep, vec![home.join("a/b/c/d/deepgem")]);
-        let two = folder_candidates_with(&home, Some(&own), 1, None, "area03 shared", 200);
+        let two = folder_candidates_with(&home, Some(&own), 1, None, "area03 shared", 200, &|| false, std::time::Duration::from_secs(5));
         assert_eq!(two, vec![home.join("area03/shared")]);
         // remembered folders come first
         let z = vec![pawline_core::dirs::Ranked { score: 9.0, path: home.join("area07/shared") }];
-        let first = folder_candidates_with(&home, Some(&own), 1, Some(z), "shared", 200);
+        let first = folder_candidates_with(&home, Some(&own), 1, Some(z), "shared", 200, &|| false, std::time::Duration::from_secs(5));
         assert_eq!(first[0], home.join("area07/shared"));
         assert_eq!(first.len(), 12);
         let _ = std::fs::remove_dir_all(&home);

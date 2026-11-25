@@ -63,6 +63,14 @@ const SKILL_MENU: &[(&str, &str, &str)] = &[
     ("/skills", "list skills", "/skills"),
 ];
 
+/// The request that is sent: the chosen skill's starter text, then the draft. Without a skill, the draft as typed.
+fn compose_request(skill: Option<usize>, draft: &str) -> String {
+    match skill.and_then(|i| SKILL_MENU.get(i)) {
+        Some(s) => format!("{}{}", s.2, draft.trim()),
+        None => draft.trim().to_string(),
+    }
+}
+
 fn menu_filter(t: &str) -> Vec<usize> {
     let t = t.to_ascii_lowercase();
     SKILL_MENU.iter().enumerate().filter(|(_, m)| m.0.starts_with(&t)).map(|(i, _)| i).collect()
@@ -71,6 +79,18 @@ fn menu_filter(t: &str) -> Vec<usize> {
 #[cfg(test)]
 mod menu_tests {
     use super::*;
+    #[test]
+    fn skill_chip_dispatch_is_starter_plus_draft() {
+        let files = SKILL_MENU.iter().position(|m| m.0 == "/files").unwrap();
+        let undo = SKILL_MENU.iter().position(|m| m.0 == "/undo").unwrap();
+        let search = SKILL_MENU.iter().position(|m| m.0 == "/search").unwrap();
+        assert_eq!(compose_request(Some(files), "  kitten  "), "make a folder called kitten");
+        assert_eq!(compose_request(Some(undo), ""), "undo");
+        assert_eq!(compose_request(Some(search), "cats"), "search for cats");
+        assert_eq!(compose_request(None, " delete x "), "delete x");
+        assert_eq!(compose_request(Some(999), "x"), "x", "unknown skill index is ignored");
+    }
+
     #[test]
     fn filters_by_prefix_and_starters_never_run_themselves() {
         assert_eq!(menu_filter("/").len(), SKILL_MENU.len());
@@ -265,6 +285,13 @@ struct App {
     pill_rows: Vec<std::path::PathBuf>,
     pill_sel: usize,
     pill_q: Option<String>,
+    /// Selected skill from the "/" menu, shown as its own chip; the request is its starter text plus the draft.
+    skill: Option<usize>,
+    r_skill_x: (f32, f32, f32, f32),
+    r_skill_name: (f32, f32, f32, f32),
+    search_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    search_tx: Option<channel::Sender<(u64, String, Vec<std::path::PathBuf>)>>,
+    pill_wait: bool,
     /// Show the chip's full path (inspect without sending anything).
     pill_show: bool,
     r_pill_name: (f32, f32, f32, f32),
@@ -991,14 +1018,15 @@ impl App {
             return false;
         }
         let i = rows[self.menu_sel.min(rows.len() - 1)];
+        // the skill becomes its own chip (a second pick replaces it); the draft stays in the box
         self.input.clear();
-        self.input.insert(SKILL_MENU[i].2);
+        self.skill = Some(i);
         self.menu_sel = 0;
         true
     }
 
     fn chip_h(&self) -> f32 {
-        if self.pill.is_some() {
+        if self.pill.is_some() || self.skill.is_some() {
             28.0
         } else {
             0.0
@@ -1027,15 +1055,55 @@ impl App {
                 self.pill_off = false;
                 self.pill_rows.clear();
                 self.pill_q = None;
+                if self.pill_wait {
+                    self.pill_wait = false;
+                    self.search_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
             }
             Some((_, q)) => {
                 if self.pill_active() && self.pill_q.as_deref() != Some(q.as_str()) {
-                    self.pill_rows = bridge::folder_candidates(&self.root, &q);
-                    self.pill_q = Some(q);
-                    self.pill_sel = 0;
+                    self.pill_q = Some(q.clone());
+                    self.start_search(q);
                 }
             }
         }
+    }
+
+    /// Search off the UI thread: a new generation cancels the old walk; the worker waits 120 ms first (debounce)
+    /// and sends nothing back if it was superseded. Results come back through the event loop.
+    fn start_search(&mut self, q: String) {
+        use std::sync::atomic::Ordering;
+        let gen = self.search_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let Some(tx) = self.search_tx.clone() else {
+            self.pill_rows = bridge::folder_candidates(&self.root, &q, &|| false);
+            self.pill_sel = 0;
+            return;
+        };
+        self.pill_wait = true;
+        self.pill_rows.clear();
+        let g = self.search_gen.clone();
+        let root = self.root.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            if g.load(Ordering::SeqCst) != gen {
+                return;
+            }
+            let rows = bridge::folder_candidates(&root, &q, &|| g.load(Ordering::SeqCst) != gen);
+            if g.load(Ordering::SeqCst) == gen {
+                let _ = tx.send((gen, q, rows));
+            }
+        });
+    }
+
+    fn on_search(&mut self, gen: u64, q: String, rows: Vec<std::path::PathBuf>) {
+        use std::sync::atomic::Ordering;
+        if gen != self.search_gen.load(Ordering::SeqCst) || self.pill_q.as_deref() != Some(q.as_str()) {
+            return; // stale result
+        }
+        self.pill_wait = false;
+        self.pill_rows = rows;
+        self.pill_sel = 0;
+        self.draw();
     }
 
     /// Pick the highlighted folder: the "/in ..." words leave the draft, the rest of the draft stays, a chip appears.
@@ -1069,7 +1137,9 @@ impl App {
         }
         let (top, rows_h) = self.pill_geom();
         fill(pm, &rrect(PAD - 2.0, top, w - 2.0 * PAD + 4.0, rows_h + 26.0, 10.0), (36, 33, 58, 255));
-        if self.pill_rows.is_empty() {
+        if self.pill_rows.is_empty() && self.pill_wait {
+            self.text(pm, "Searching...", PAD + 10.0, top + 20.0, 13.0, (200, 200, 230), (0.0, h));
+        } else if self.pill_rows.is_empty() {
             self.text(pm, "No folder matches. Keep typing, or Esc.", PAD + 10.0, top + 20.0, 13.0, (230, 200, 200), (0.0, h));
         }
         let n = self.pill_rows.len();
@@ -1092,9 +1162,22 @@ impl App {
     /// The chip lives inside the composer (top row of the input box): "/in" skill label, last folder name, x to remove.
     /// A click on the name shows or hides the full path above the box. Nothing is sent.
     fn draw_pill(&mut self, pm: &mut Pixmap, h: f32) {
+        self.r_pill_x = (0.0, 0.0, 0.0, 0.0);
+        self.r_pill_name = (0.0, 0.0, 0.0, 0.0);
+        self.r_skill_x = (0.0, 0.0, 0.0, 0.0);
+        self.r_skill_name = (0.0, 0.0, 0.0, 0.0);
+        let (mut x, y, ph) = (PAD + 4.0, self.input_box_top + 5.0, 22.0);
+        if let Some(s) = self.skill.and_then(|i| SKILL_MENU.get(i)) {
+            let tw = self.measure(s.0, 13.0, shape::Mode::Strict);
+            let pw = tw + 12.0 + 26.0;
+            fill(pm, &rrect(x, y, pw, ph, 11.0), (34, 120, 140, 255));
+            self.text(pm, s.0, x + 8.0, y + 16.0, 13.0, (255, 255, 255), (0.0, h));
+            self.text(pm, "x", x + pw - 18.0, y + 16.0, 13.0, (235, 245, 250), (0.0, h));
+            self.r_skill_x = (x + pw - 26.0, y, 26.0, ph);
+            self.r_skill_name = (x, y, pw - 26.0, ph);
+            x += pw + 6.0;
+        }
         let Some(p) = self.pill.clone() else {
-            self.r_pill_x = (0.0, 0.0, 0.0, 0.0);
-            self.r_pill_name = (0.0, 0.0, 0.0, 0.0);
             return;
         };
         let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "/".into());
@@ -1102,7 +1185,6 @@ impl App {
         let label = "/in";
         let lw = self.measure(label, 12.0, shape::Mode::Strict);
         let tw = self.measure(&shown, 13.0, shape::Mode::Strict);
-        let (x, y, ph) = (PAD + 4.0, self.input_box_top + 5.0, 22.0);
         let pw = lw + tw + 12.0 + 8.0 + 26.0;
         fill(pm, &rrect(x, y, pw, ph, 11.0), self.th().accent.rgba());
         self.text(pm, label, x + 8.0, y + 16.0, 12.0, (220, 215, 245), (0.0, h));
@@ -1190,11 +1272,23 @@ impl App {
     }
 
     fn submit(&mut self) {
-        let t = self.input.text().trim().to_string();
-        if t.is_empty() || self.busy {
+        let draft = self.input.text().trim().to_string();
+        if self.busy {
+            return;
+        }
+        // a skill whose starter ends in a space still needs words from the user
+        if let Some(s) = self.skill.and_then(|i| SKILL_MENU.get(i)) {
+            if draft.is_empty() && s.2.ends_with(' ') {
+                self.toast = Some("Add the details for this skill first");
+                return;
+            }
+        }
+        let t = compose_request(self.skill, &draft);
+        if t.is_empty() {
             return;
         }
         self.input.clear();
+        self.skill = None;
         self.zi_rows.clear();
         let rep = self.reply.take();
         let quote = rep.as_ref().map(|r| r.1.clone());
@@ -1324,8 +1418,11 @@ impl App {
                 self.pill_sel = if e.keysym == Keysym::Up { (self.pill_sel + n - 1) % n } else { (self.pill_sel + 1) % n };
                 self.draw();
             }
-            Keysym::BackSpace if self.pill.is_some() && self.input.caret() == 0 && self.input.sel().is_none() && !self.busy => {
-                self.pill = None;
+            Keysym::BackSpace if (self.pill.is_some() || self.skill.is_some()) && self.input.caret() == 0 && self.input.sel().is_none() && !self.busy => {
+                // chips come off from the right: folder first, then the skill
+                if self.pill.take().is_none() {
+                    self.skill = None;
+                }
                 self.pill_show = false;
                 self.draw();
             }
@@ -1539,6 +1636,11 @@ impl App {
         if self.confirm.is_none() {
             let (px, py) = self.ptr_pos;
             let w = self.w as f32;
+            if self.skill.is_some() && !self.busy && inside(self.r_skill_x, self.ptr_pos) {
+                self.skill = None;
+                self.draw();
+                return;
+            }
             if self.pill.is_some() && inside(self.r_pill_name, self.ptr_pos) {
                 self.pill_show = !self.pill_show;
                 self.draw();
@@ -2167,6 +2269,7 @@ fn main() {
 
     let (req_tx, req_rx) = mpsc::channel::<Req>();
     let (back_tx, back_rx) = channel::channel::<UiReply>();
+    let (search_tx, search_rx) = channel::channel::<(u64, String, Vec<std::path::PathBuf>)>();
     std::thread::spawn(move || worker(req_rx, back_tx));
 
     let (conn_opt, queue_opt, mut wl_rest) = match wl {
@@ -2224,6 +2327,11 @@ fn main() {
         pill_rows: vec![],
         pill_sel: 0,
         pill_q: None,
+        skill: None,
+        r_skill_x: (0.0, 0.0, 0.0, 0.0),
+        r_skill_name: (0.0, 0.0, 0.0, 0.0),
+        search_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        pill_wait: false,
         pill_show: false,
         r_pill_name: (0.0, 0.0, 0.0, 0.0),
         r_pill_x: (0.0, 0.0, 0.0, 0.0),
@@ -2234,6 +2342,7 @@ fn main() {
         r_gear: (0.0, 0.0, 0.0, 0.0),
         input_w: 300.0,
         tx: req_tx,
+        search_tx: Some(search_tx),
         exit: false,
         panel_only,
         hidden: panel_only,
@@ -2282,6 +2391,13 @@ fn main() {
         .insert_source(x_rx, |ev, _, app: &mut App| {
             if let channel::Event::Msg(e) = ev {
                 app.x_event(e);
+            }
+        })
+        .unwrap();
+    handle
+        .insert_source(search_rx, |ev, _, app: &mut App| {
+            if let channel::Event::Msg((g, q, rows)) = ev {
+                app.on_search(g, q, rows);
             }
         })
         .unwrap();
