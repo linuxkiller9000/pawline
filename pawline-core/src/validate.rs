@@ -13,13 +13,84 @@ pub struct Validator {
     root: PathBuf,
     /// Test hook: (desktop entry dirs, PATH) to use instead of the real environment.
     pub app_env: Option<(Vec<PathBuf>, String)>,
+    /// Ranked folders (zoxide or Pawline's own list) the bridge supplies per request. Used ONLY to find
+    /// a destination folder by name; every result is still confined to the home area and shown for confirmation.
+    pub dir_hints: Vec<PathBuf>,
+    hint_notes: std::cell::RefCell<Vec<String>>,
 }
 
 impl Validator {
     pub fn new(root: PathBuf) -> Self {
         // The root itself may live behind a symlink; compare in canonical form.
         let root = std::fs::canonicalize(&root).unwrap_or(root);
-        Validator { root, app_env: None }
+        Validator { root, app_env: None, dir_hints: vec![], hint_notes: std::cell::RefCell::new(vec![]) }
+    }
+
+    /// Words like "home container models" -> "models": drop a leading "home" and filler words.
+    pub fn place_words(words: &str) -> String {
+        let mut w: Vec<&str> = words.trim().trim_end_matches('.').split_whitespace().collect();
+        if w.len() > 1 && w[0].eq_ignore_ascii_case("home") {
+            w.remove(0);
+        }
+        w.retain(|x| !matches!(x.to_lowercase().as_str(), "container" | "containing" | "contains" | "folder" | "directory" | "the" | "my" | "called" | "named"));
+        w.join(" ")
+    }
+
+    /// Existing folders inside the home area called `place`: a direct child of home, the session's, or a hinted one.
+    fn place_candidates(&self, place: &str, ctx: &ContextManager) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = vec![];
+        let mut add = |p: PathBuf, out: &mut Vec<PathBuf>| {
+            if let Ok(c) = std::fs::canonicalize(&p) {
+                if c.is_dir() && c.starts_with(&self.root) && !c.starts_with(self.root.join(crate::journal::STORE)) && !out.contains(&c) {
+                    out.push(c);
+                }
+            }
+        };
+        if place.is_empty() || place.contains('/') {
+            return out;
+        }
+        add(self.root.join(place), &mut out);
+        if let Some(p) = ctx.resolve_named(place) {
+            add(p, &mut out);
+        }
+        let exact: Vec<&PathBuf> = self.dir_hints.iter().filter(|h| h.file_name().is_some_and(|f| f.to_string_lossy() == place)).collect();
+        let loose: Vec<&PathBuf> = self.dir_hints.iter().filter(|h| h.file_name().is_some_and(|f| f.to_string_lossy().to_lowercase() == place.to_lowercase())).collect();
+        for h in if exact.is_empty() { loose } else { exact } {
+            add(h.clone(), &mut out);
+        }
+        out
+    }
+
+    /// A destination named in words. Ok(None): nothing found. Several: ask. One: use it, and the plan will ask for a yes.
+    fn find_place(&self, words: &str, ctx: &ContextManager) -> Result<Option<PathBuf>, PawError> {
+        let place = Self::place_words(words);
+        let c = self.place_candidates(&place, ctx);
+        match c.len() {
+            0 => Ok(None),
+            1 => {
+                self.hint_notes.borrow_mut().push(format!("I took \"{words}\" to mean the folder {}.", c[0].display()));
+                Ok(Some(c[0].clone()))
+            }
+            _ => Err(PawError::UnknownReference(format!(
+                "{place}\" (several folders have that name: {}. Say the full path, for example \"make a folder called x in <path>\"",
+                c.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("; ")
+            ))),
+        }
+    }
+
+    fn split_in_destination(&self, names: &[String], parent: &LocationRef, ctx: &ContextManager) -> Result<(Vec<String>, Option<PathBuf>), PawError> {
+        if !matches!(parent, LocationRef::CurrentDir) || names.len() != 1 {
+            return Ok((names.to_vec(), None));
+        }
+        let n = &names[0];
+        if let Some((head, tail)) = n.rsplit_once(" in ") {
+            if !head.trim().is_empty() && !tail.trim().is_empty() && tail.split_whitespace().count() <= 4 {
+                if let Some(dest) = self.find_place(tail, ctx)? {
+                    return Ok((vec![head.trim().to_string()], Some(dest)));
+                }
+            }
+        }
+        Ok((names.to_vec(), None))
     }
 
     pub fn root(&self) -> &Path {
@@ -131,15 +202,21 @@ impl Validator {
                 .last_created()
                 .map(|p| p.to_path_buf())
                 .ok_or_else(|| PawError::UnknownReference("it — nothing created yet".into()))?,
-            LocationRef::Named(name) => ctx.resolve_named(name).or_else(|| {
-                // A name we have not touched this session may still exist on disk.
-                let cand = self.root.join(name);
-                if cand.exists() {
-                    Some(cand)
-                } else {
-                    None
-                }
-            }).ok_or_else(|| {
+            LocationRef::Named(name) => {
+                let direct = ctx.resolve_named(name).or_else(|| {
+                    // A name we have not touched this session may still exist on disk.
+                    let cand = self.root.join(name);
+                    if cand.exists() {
+                        Some(cand)
+                    } else {
+                        None
+                    }
+                });
+                let found = match direct {
+                    Some(p) => Some(p),
+                    None => self.find_place(name, ctx)?,
+                };
+                found.ok_or_else(|| {
                 // Names are case-sensitive and never matched loosely. If a
                 // differently-cased entry exists, say so instead of using it.
                 let other = std::fs::read_dir(&self.root).ok().and_then(|rd| {
@@ -153,7 +230,8 @@ impl Validator {
                     )),
                     None => PawError::UnknownReference(name.clone()),
                 }
-            })?,
+                })?
+            }
             // Bare creates land at the root: predictable beats clever here.
             // Context-driven placement happens through "inside it"/names instead.
             LocationRef::CurrentDir => self.root.clone(),
@@ -202,6 +280,7 @@ impl Validator {
         directives: &[Directive],
         ctx: &ContextManager,
     ) -> Result<Plan, PawError> {
+        self.hint_notes.borrow_mut().clear();
         let mut ops: Vec<Operation> = Vec::new();
         // Paths this plan itself creates, so later steps may build on them.
         let mut will_exist: HashSet<PathBuf> = HashSet::new();
@@ -212,7 +291,14 @@ impl Validator {
         for d in directives {
             match d {
                 Directive::Create { kind, names, parent } => {
-                    let base = self.resolve_location(parent, &sim)?;
+                    // "make a folder called a in models": if "models" is a real folder, that is where it goes
+                    // (the plan asks for a yes). Nothing found: the whole text stays the name, as before.
+                    let (names_split, base_split) = self.split_in_destination(names, parent, &sim)?;
+                    let names = &names_split;
+                    let base = match base_split {
+                        Some(b) => b,
+                        None => self.resolve_location(parent, &sim)?,
+                    };
                     for n in names {
                         if n.contains('/') || n.contains('\\') {
                             return Err(PawError::UnsafePath(format!(
@@ -365,11 +451,14 @@ impl Validator {
             }
         }
 
-        let reasons: Vec<String> = ops
+        let mut reasons: Vec<String> = ops
             .iter()
             .filter(|o| o.needs_confirmation())
             .map(|o| o.describe())
             .collect();
+        for n in self.hint_notes.borrow_mut().drain(..) {
+            reasons.push(format!("{n} Check the path before saying yes."));
+        }
         let mut notes = Vec::new();
         if ops.iter().any(|o| matches!(o, Operation::SetWallpaper { no_backup_ok: true, .. })) {
             notes.push(

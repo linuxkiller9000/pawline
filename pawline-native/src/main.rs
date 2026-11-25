@@ -769,14 +769,20 @@ impl App {
         self.zi_sel = 0;
     }
 
+    /// (top, rows_height, total_height) of the zi chooser: rows plus one hint line.
+    fn zi_geom(&self) -> (f32, f32, f32) {
+        let rows_h = self.zi_rows.len() as f32 * 26.0;
+        let total = rows_h + 22.0 + 8.0;
+        (self.input_box_top - 6.0 - total - 8.0, rows_h, total)
+    }
+
     fn draw_zi(&mut self, pm: &mut Pixmap, w: f32, h: f32) {
         if !self.zi_active() {
             return;
         }
         let rh = 26.0;
-        let n = self.zi_rows.len() as f32;
-        let top = self.input_box_top - 6.0 - n * rh - 8.0;
-        fill(pm, &rrect(PAD - 2.0, top, w - 2.0 * PAD + 4.0, n * rh + 8.0, 10.0), (36, 33, 58, 255));
+        let (top, rows_h, total) = self.zi_geom();
+        fill(pm, &rrect(PAD - 2.0, top, w - 2.0 * PAD + 4.0, total, 10.0), (36, 33, 58, 255));
         let sel = self.zi_sel.min(self.zi_rows.len() - 1);
         let rows = self.zi_rows.clone();
         for (k, p) in rows.iter().enumerate() {
@@ -787,6 +793,7 @@ impl App {
             let shown = if p.chars().count() > 44 { format!("...{}", p.chars().rev().take(41).collect::<Vec<_>>().into_iter().rev().collect::<String>()) } else { p.clone() };
             self.text(pm, &shown, PAD + 10.0, y + 18.0, 13.0, (255, 255, 255), (0.0, h));
         }
+        self.text(pm, "Up/Down choose, Tab fills, Esc closes, Enter runs", PAD + 10.0, top + 4.0 + rows_h + 15.0, 11.0, (190, 185, 215), (0.0, h));
     }
 
     fn draw_menu(&mut self, pm: &mut Pixmap, w: f32, h: f32) {
@@ -1078,9 +1085,9 @@ impl App {
             let (px, py) = self.ptr_pos;
             let w = self.w as f32;
             if self.zi_active() {
-                let (rh, n) = (26.0, self.zi_rows.len() as f32);
-                let top = self.input_box_top - 6.0 - n * rh - 8.0;
-                if inside((PAD - 2.0, top, w - 2.0 * PAD + 4.0, n * rh + 8.0), self.ptr_pos) {
+                let rh = 26.0;
+                let (top, rows_h, _) = self.zi_geom();
+                if inside((PAD - 2.0, top, w - 2.0 * PAD + 4.0, rows_h + 8.0), self.ptr_pos) {
                     self.zi_sel = (((py as f32 - top - 4.0) / rh).floor().max(0.0) as usize).min(self.zi_rows.len() - 1);
                     self.zi_pick();
                     self.draw();

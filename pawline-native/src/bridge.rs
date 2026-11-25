@@ -285,6 +285,19 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
         Err(e) => return reply("error", format!("backend: {e}")),
     };
     state.notes.extend(backend.inner.recovery_notes().iter().cloned());
+    // A destination named in words ("... in models") may be found among the user's frequent folders.
+    {
+        let low = input.to_lowercase();
+        let hints = if [" in ", " inside ", " under ", " within "].iter().any(|k| low.contains(k)) {
+            match pawline_core::dirs::own_path() {
+                Some(own) => pawline_core::dirs::ranked(pawline_core::dirs::zoxide_ranked(), &own, pawline_core::searchmem::now_secs(), "").1.into_iter().map(|r| r.path).collect(),
+                None => vec![],
+            }
+        } else {
+            vec![]
+        };
+        state.engine.set_dir_hints(hints);
+    }
     // Parser first. The 35 MB model is loaded only when the parser has a
     // gap, so ordinary commands never wait for it.
     let mut r = state.engine.handle_with(input, &backend, false, None);

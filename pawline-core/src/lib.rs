@@ -114,6 +114,11 @@ impl Engine {
     }
 
     /// Full pipeline with an optional assist; see `plan_with`.
+    /// Folders (ranked, existing) that may be used to find a destination named in words. Replaced per request.
+    pub fn set_dir_hints(&mut self, hints: Vec<std::path::PathBuf>) {
+        self.validator.dir_hints = hints;
+    }
+
     pub fn handle_with(
         &mut self,
         input: &str,
