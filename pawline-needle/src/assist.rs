@@ -177,6 +177,67 @@ fn one_call(v: &Value) -> Result<Directive, PawError> {
 /// observed good and bad cases; tunable as more data lands.
 pub const MIN_CONFIDENCE: f64 = 0.3;
 
+/// True when `needle` occurs in `hay` as whole words: the characters on both
+/// sides (if any) are not letters or digits. Case-insensitive.
+fn occurs_as_words(hay: &str, needle: &str) -> bool {
+    let h = hay.to_lowercase();
+    let n = needle.trim().to_lowercase();
+    if n.is_empty() {
+        return false;
+    }
+    let mut from = 0;
+    while let Some(i) = h[from..].find(&n) {
+        let a = from + i;
+        let b = a + n.len();
+        let before_ok = h[..a].chars().next_back().map_or(true, |c| !c.is_alphanumeric());
+        let after_ok = h[b..].chars().next().map_or(true, |c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        from = a + h[a..].chars().next().map_or(1, |c| c.len_utf8());
+    }
+    false
+}
+
+/// The model must not invent or clip names: every name or path it proposes
+/// has to appear in the user's own words, as whole words. A name that only
+/// appears inside a longer word ("ets" inside "pets") is rejected. Refusing
+/// is the only response: nothing is corrected or guessed here.
+pub fn check_grounding(input: &str, reply: &str) -> Result<(), PawError> {
+    let v = extract_json(reply)?;
+    let calls: Vec<&Value> = match v.get("function_calls").and_then(Value::as_array) {
+        Some(arr) if !arr.is_empty() => arr.iter().collect(),
+        _ => vec![&v],
+    };
+    for c in calls {
+        let args = match c.get("arguments").or_else(|| c.get("parameters")) {
+            Some(Value::String(s)) => serde_json::from_str::<Value>(s).unwrap_or(Value::Null),
+            Some(o) => o.clone(),
+            None => Value::Null,
+        };
+        let ext = args.get("extension").and_then(Value::as_str).map(|e| e.trim_start_matches('.').to_lowercase());
+        for key in ["path", "new_name", "destination", "name"] {
+            if let Some(val) = args.get(key).and_then(Value::as_str) {
+                let mut cand = val.to_string();
+                if key == "path" {
+                    if let Some(e) = &ext {
+                        let suffix = format!(".{e}");
+                        if cand.to_lowercase().ends_with(&suffix) && !occurs_as_words(input, &cand) {
+                            cand.truncate(cand.len() - suffix.len());
+                        }
+                    }
+                }
+                if !occurs_as_words(input, &cand) {
+                    return Err(PawError::Parse(format!(
+                        "assist proposed the name \"{val}\" but that is not what you wrote. Nothing was planned; please rephrase or use a plain command like: make a folder called <name>"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Assist for NeedleAssist {
     fn propose(&self, input: &str) -> Result<Vec<Directive>, PawError> {
         // Fresh session per user input: cactus keeps conversation state and
@@ -194,6 +255,7 @@ impl Assist for NeedleAssist {
                 )));
             }
         }
+        check_grounding(input, &reply)?;
         parse_tool_calls(&reply)
     }
 }
@@ -288,6 +350,39 @@ mod envelope_tests {
     fn empty_function_calls_falls_back_to_bare_object() {
         let d = parse_tool_call(r#"{"name":"list_items","arguments":{"path":"."}}"#).unwrap();
         assert!(matches!(d, Directive::List { .. }));
+    }
+}
+
+#[cfg(test)]
+mod grounding_tests {
+    use super::*;
+    fn reply(path: &str) -> String {
+        format!(r#"{{"success":true,"function_calls":[{{"name":"create_folder","arguments":{{"path":"{path}"}}}}],"confidence":0.4}}"#)
+    }
+    #[test]
+    fn rejects_clipped_name() {
+        // Observed raw model reply for "...directory named pets..." was path "ets".
+        assert!(check_grounding("could you please set up a new directory named pets for me", &reply("ets")).is_err());
+        assert!(check_grounding("make a directory named pets", &reply("ets")).is_err());
+    }
+    #[test]
+    fn accepts_exact_names() {
+        assert!(check_grounding("set up a new directory named pets for me", &reply("pets")).is_ok());
+        assert!(check_grounding("set up a new directory named Dogs", &reply("dogs")).is_ok());
+        assert!(check_grounding("set up a new directory named kitten paws for me", &reply("kitten paws")).is_ok());
+        assert!(check_grounding("make notes.md here", &reply("notes.md")).is_ok());
+    }
+    #[test]
+    fn rejects_invented_names() {
+        assert!(check_grounding("set up a new directory named dogs", &reply("cats")).is_err());
+        assert!(check_grounding("set up a new directory named dogs", &reply("dogs2")).is_err());
+        assert!(check_grounding("set up a new directory named dogs", &reply("dog")).is_err());
+    }
+    #[test]
+    fn extension_hint_allows_bare_stem() {
+        let r = r#"{"success":true,"function_calls":[{"name":"create_file","arguments":{"path":"ideas.md","extension":"md"}}]}"#;
+        assert!(check_grounding("whip up a file called ideas", r).is_ok());
+        assert!(check_grounding("whip up a file called plans", r).is_err());
     }
 }
 

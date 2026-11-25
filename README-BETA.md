@@ -41,3 +41,7 @@ Pawline works inside your home folder (or the folder in PAWLINE_ROOT).
   the result. qemu proves instruction compatibility only, not speed.
 - The Rust-only Needle engine is experimental and not part of this build.
 - Voice, settings, KDE integration and themes are not built yet.
+
+## Assist limit
+
+The optional model assist can clip or alter a name in its raw output (seen: "pets" came back as "ets"). Pawline now refuses any assist proposal whose path or name is not in your own words, and says so. Nothing is planned or corrected silently. Plain commands ("make a folder called pets") do not use the assist. Every assist plan still needs your explicit confirmation.
