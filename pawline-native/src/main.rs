@@ -347,7 +347,8 @@ impl App {
             let more_below = self.input_top + 6 < all.len();
             let n = lines.len().max(1) as f32;
             let box_h = 20.0 + n * LH;
-            self.bottom = (box_h + 24.0).max(BOTTOM);
+            let hint_rows = if self.voice_origin || more_above || more_below { 16.0 } else { 0.0 };
+            self.bottom = (box_h + 24.0 + hint_rows).max(BOTTOM);
             self.draw_chat(pm, w, h, inner_w);
             fill(pm, &rrect(PAD - 2.0, h - 12.0 - box_h, w - 2.0 * PAD + 4.0, box_h, 12.0), (52, 48, 70, 255));
             let col = if self.busy { (150, 145, 165) } else { (255, 255, 255) };
@@ -362,7 +363,7 @@ impl App {
                 hint.push_str(if more_above && more_below { "more above and below (Up/Down)" } else if more_above { "more above (Up)" } else { "more below (Down)" });
             }
             if !hint.is_empty() {
-                self.text(pm, &hint, PAD + 8.0, h - 14.0 - box_h, 12.0, (190, 185, 215), (0.0, h));
+                self.text(pm, &hint, PAD + 8.0, h - 16.0 - box_h, 12.0, (190, 185, 215), (0.0, h));
             }
         }
     }
@@ -409,8 +410,8 @@ impl App {
         }
         pm.draw_pixmap(0, top as i32, cp.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
         if self.chat_max > 0.0 && self.scroll < self.chat_max - 1.0 {
-            fill(pm, &rrect(PAD, top + 2.0, 190.0, 18.0, 8.0), (30, 28, 40, 230));
-            self.text(pm, "^ older (PageUp / wheel)", PAD + 6.0, top + 15.0, 12.0, (170, 165, 195), (0.0, h));
+            // in the free band under the title, so it never covers message text
+            self.text(pm, "^ older messages above (PageUp / wheel)", PAD + 6.0, top - 4.0, 12.0, (190, 185, 215), (0.0, h));
         }
         if self.scroll > 1.0 {
             fill(pm, &rrect(w - 160.0, bot - 18.0, 146.0, 18.0, 8.0), (30, 28, 40, 230));
