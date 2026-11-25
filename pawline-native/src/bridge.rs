@@ -17,6 +17,49 @@ pub fn request_cancel() {
     CANCEL_UPTO.store(GEN.load(SeqCst), SeqCst);
 }
 
+/// Run one provider request on its own thread so Esc can end the wait now.
+/// Cancel and commit (write/return) arbitrate on one atomic: exactly one wins, and the
+/// provider slot stays held until the thread really ends, even if abandoned.
+fn run_cancellable<T: Send + 'static>(
+    provider: pawline_core::imagegen::ImageProvider,
+    job: impl FnOnce(&dyn Fn() -> bool, &dyn Fn() -> bool) -> Result<T, PawError> + Send + 'static,
+) -> Result<T, PawError> {
+    use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
+    use std::sync::Arc;
+    let ticket = pawline_core::imagegen::GUARD.begin(provider, std::time::Instant::now())?;
+    let my = GEN.fetch_add(1, SeqCst) + 1;
+    // 0 running, 1 cancelled, 2 committed.
+    let state = Arc::new(AtomicU8::new(0));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let st = state.clone();
+    std::thread::spawn(move || {
+        let _ticket = ticket;
+        let r = job(&|| st.load(SeqCst) == 1, &|| st.compare_exchange(0, 2, SeqCst, SeqCst).is_ok());
+        let _ = tx.send(r);
+    });
+    loop {
+        if CANCEL_UPTO.load(SeqCst) >= my && state.compare_exchange(0, 1, SeqCst, SeqCst).is_ok() {
+            return Err(PawError::Exec("Cancelled. Nothing was saved, and a late answer will be discarded.".into()));
+        }
+        // If the commit already happened, cancel lost the race: the real result is reported below.
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(r) => return r,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(_) => return Err(PawError::Exec("The online request stopped unexpectedly; nothing was kept.".into())),
+        }
+    }
+}
+
+fn ask_online(text: &str) -> Result<String, PawError> {
+    let q = text.to_string();
+    // Same Pollinations slot as pictures: one request at a time, 45 s apart.
+    run_cancellable(pawline_core::imagegen::ImageProvider::Pollinations, move |cancelled, commit| {
+        let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(60));
+        pawline_core::textfallback::ask(&http, &q, cancelled, commit)
+    })
+    .map(|a| format!("Pollinations (online, not checked, may be wrong):\n{a}"))
+}
+
 struct UiBackend {
     inner: DirectFsBackend,
 }
@@ -37,43 +80,24 @@ impl ExecutionBackend for UiBackend {
                 .ok_or_else(|| PawError::Exec("HOME is not set; can't pick the Pictures folder".into()))?
                 .join("Pictures")
                 .join("Pawline");
-            use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
-            use std::sync::Arc;
-            // Counts until the network thread really ends, so an abandoned request still holds the slot.
-            let ticket = pawline_core::imagegen::GUARD.begin(*provider, std::time::Instant::now())?;
-            let my = GEN.fetch_add(1, SeqCst) + 1;
             let (provider, prompt) = (*provider, prompt.clone());
-            // 0 running, 1 cancelled, 2 committed to writing. Exactly one of cancel/commit wins.
-            let state = Arc::new(AtomicU8::new(0));
-            let (tx, rx) = std::sync::mpsc::channel();
-            let st = state.clone();
-            std::thread::spawn(move || {
-                let _ticket = ticket;
+            let path = run_cancellable(provider, move |cancelled, commit| {
                 let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(120));
-                let r = pawline_core::imagegen::generate(
+                pawline_core::imagegen::generate(
                     &http,
                     provider,
                     &prompt,
                     &dir,
                     std::time::Duration::from_secs(4),
                     std::time::Duration::from_secs(240),
-                    &|| st.load(SeqCst) == 1,
-                    &|| st.compare_exchange(0, 2, SeqCst, SeqCst).is_ok(),
-                );
-                let _ = tx.send(r);
-            });
-            let path = loop {
-                if CANCEL_UPTO.load(SeqCst) >= my && state.compare_exchange(0, 1, SeqCst, SeqCst).is_ok() {
-                    return Err(PawError::Exec("Cancelled. Nothing was saved, and a late answer will be discarded.".into()));
-                }
-                // If the file write already began, cancel lost the race: report the real result below.
-                match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                    Ok(r) => break r?,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(_) => return Err(PawError::Exec("The picture request stopped unexpectedly; nothing was saved.".into())),
-                }
-            };
+                    cancelled,
+                    commit,
+                )
+            })?;
             return Ok(OpOutcome { op: op.clone(), detail: format!("Saved {}", path.display()) });
+        }
+        if let Operation::AskOnline { text } = op {
+            return Ok(OpOutcome { op: op.clone(), detail: ask_online(text)? });
         }
         if let Operation::OpenApp { argv, .. } = op {
             // Only reached after the plan (with the exact command) was confirmed.
@@ -136,6 +160,38 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             r = state.engine.handle_with(input, &backend, false, Some(a as &dyn pawline_core::assist::Assist));
         }
     }
+    // Online answer for a plain question the parser and the assist could not handle.
+    // Automatic only for clearly general questions; anything else asks first.
+    if matches!(&r, Err(PawError::Parse(_))) {
+        use pawline_core::textfallback::{classify, Class};
+        match classify(input) {
+            Class::Auto => {
+                let q = input.trim().to_string();
+                return match ask_online(&q) {
+                    Ok(a) => reply("message", a),
+                    Err(e) => {
+                        let t = e.to_string();
+                        let t = t.strip_prefix("Execution failed: ").unwrap_or(&t).to_string();
+                        reply(if t.contains("Cancelled.") { "message" } else { "failed" }, t)
+                    }
+                };
+            }
+            Class::Ask => {
+                let op = Operation::AskOnline { text: input.trim().to_string() };
+                let summary = format!("1. {}", op.describe());
+                let plan = Plan {
+                    ops: vec![op],
+                    needs_confirmation: true,
+                    confirmation_reasons: vec!["This would send your text to an online service.".into()],
+                    assist_derived: false,
+                    notes: vec![],
+                };
+                state.pending = Some(plan);
+                return UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) };
+            }
+            Class::No => {}
+        }
+    }
     match r {
         Ok(Response::Executed(ops)) => {
             let done: Vec<String> = ops.iter().map(|o| o.op.describe()).collect();
@@ -149,6 +205,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                     .map(|o| match &o.op {
                         pawline_core::plan::Operation::Search { .. }
                         | pawline_core::plan::Operation::GenerateImage { .. }
+                        | pawline_core::plan::Operation::AskOnline { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)
                         }
@@ -224,6 +281,7 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
                     .map(|o| match &o.op {
                         pawline_core::plan::Operation::Search { .. }
                         | pawline_core::plan::Operation::GenerateImage { .. }
+                        | pawline_core::plan::Operation::AskOnline { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)
                         }
