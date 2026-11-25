@@ -110,6 +110,7 @@ fn percent_of(lower: &str) -> Option<String> {
 fn solve_linear(lower: &str) -> Option<String> {
     let body = lower
         .strip_prefix("solve for x:")
+        .or_else(|| lower.strip_prefix("solve for x,"))
         .or_else(|| lower.strip_prefix("solve for x"))
         .or_else(|| lower.strip_prefix("solve:"))
         .or_else(|| lower.strip_prefix("solve"))?
@@ -139,6 +140,14 @@ fn solve_linear(lower: &str) -> Option<String> {
 /// linear-for-us and is refused.
 fn linear_side(s: &str) -> Option<(f64, f64)> {
     let s = s.replace(' ', "");
+    // a side with no x is a plain constant expression: evaluate it fully
+    // (parentheses, *, /, ^), e.g. "19 - 8 * (4)"
+    if !s.is_empty() && !s.contains('x') && s.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | '*' | '/' | '^' | '%' | '(' | ')')) {
+        let mut p = Parser { chars: s.as_bytes(), pos: 0, div_zero: false };
+        let v = p.expr().ok()?;
+        p.skip_ws();
+        return if p.pos == p.chars.len() { Some((0.0, v)) } else { None };
+    }
     if s.is_empty()
         || !s
             .chars()
@@ -358,6 +367,16 @@ mod tests {
             a("solve x^2 = 4").as_deref(),
             Some("I can only solve linear equations in x so far (like \"solve 2x + 4 = 10\").")
         );
+    }
+
+    #[test]
+    fn user_reported_solve_for_x_equals_expression() {
+        assert_eq!(
+            a("solve for x, x=19 - 8 * (4)").as_deref(),
+            Some("x = 19 - 8 * (4)  =>  x = -13")
+        );
+        assert_eq!(a("solve x = 2 * (3 + 4)").as_deref(), Some("x = 2 * (3 + 4)  =>  x = 14"));
+        assert_eq!(a("solve 2x = 3 * (4)").as_deref(), Some("2x = 3 * (4)  =>  x = 6"));
     }
 
     #[test]
