@@ -886,6 +886,21 @@ mod memory_tests {
     }
 
     #[test]
+    fn undo_organize_keeps_a_moved_file_that_was_edited_since() {
+        let root = org_root("edit");
+        let dl = root.join("Downloads");
+        let mut st = new_state(root.clone());
+        let _ = handle_text(&mut st, "organize downloads");
+        let _ = confirm_exec(&mut st);
+        std::fs::write(dl.join("Images/a.png"), "MY EDITS, MUCH LONGER NOW").unwrap();
+        let u = handle_text(&mut st, "undo organize");
+        assert_eq!(u.kind, "failed", "{}", u.text);
+        assert_eq!(std::fs::read_to_string(dl.join("Images/a.png")).unwrap(), "MY EDITS, MUCH LONGER NOW");
+        assert!(!dl.join("a.png").exists(), "not restored over anything");
+        assert!(u.text.contains("Undid") , "{}", u.text);
+    }
+
+    #[test]
     fn pending_request_is_cleared_on_cancel_and_never_recorded_before_success() {
         let root = std::env::temp_dir().join(format!("pawline-bridge-state-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&root);

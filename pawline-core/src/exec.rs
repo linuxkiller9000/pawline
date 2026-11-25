@@ -134,6 +134,14 @@ impl DirectFsBackend {
         }
     }
 
+    /// mtime + inode + size: changes when the content is edited or the file replaced.
+    fn fingerprint_full(&self, rel: &Path) -> Option<String> {
+        use cap_std::fs::MetadataExt;
+        let m = self.root.symlink_metadata(rel).ok()?;
+        let t = m.modified().ok()?.into_std().duration_since(std::time::UNIX_EPOCH).ok()?;
+        Some(format!("{}:{}:{}", t.as_nanos(), m.ino(), m.len()))
+    }
+
     fn fingerprint(&self, rel: &Path) -> Option<String> {
         use cap_std::fs::MetadataExt;
         let m = self.root.symlink_metadata(rel).ok()?;
@@ -220,14 +228,22 @@ impl DirectFsBackend {
                 if !gone(&a) {
                     return Err(PawError::Validation(format!("~/{} exists again; not overwriting", e.a)));
                 }
-                self.root.rename(&b, &self.root, &a)?;
+                if let Some(want) = &e.meta {
+                    if self.fingerprint_full(&b).as_deref() != Some(want.as_str()) {
+                        return Err(PawError::Validation(format!(
+                            "~/{} was changed (or replaced) after I moved it; leaving it where it is so your edits are kept",
+                            e.b.as_deref().unwrap_or("")
+                        )));
+                    }
+                }
+                rename_noreplace(&self.root, &b, &a)?;
             }
             "copy" => {
                 // Not destroyed: the copy goes to the trash.
                 self.private_dir(crate::journal::TRASH)?;
                 let name = a.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                 self.root.symlink_metadata(&a)?;
-                self.root.rename(&a, &self.root, format!("{}/{}-undo-{name}", crate::journal::TRASH, e.id))?;
+                rename_noreplace(&self.root, &a, Path::new(&format!("{}/{}-undo-{name}", crate::journal::TRASH, e.id)))?;
             }
             "delete" => {
                 let b = b.ok_or_else(damaged)?;
@@ -239,7 +255,7 @@ impl DirectFsBackend {
                         self.root.create_dir_all(parent)?;
                     }
                 }
-                self.root.rename(&b, &self.root, &a)?;
+                rename_noreplace(&self.root, &b, &a)?;
             }
             "wallpaper" => {
                 let prev = b.ok_or_else(|| {
@@ -338,7 +354,7 @@ impl ExecutionBackend for DirectFsBackend {
                     if id != id_hint {
                         return Err(PawError::Exec("journal changed underneath; try again".into()));
                     }
-                    self.root.rename(&rel, &self.root, &stored)?;
+                    rename_noreplace(&self.root, &rel, Path::new(&stored))?;
                     Ok(((), None))
                 })?;
                 Ok(done(op, "moved to the Pawline trash (undo brings it back)"))
@@ -347,9 +363,11 @@ impl ExecutionBackend for DirectFsBackend {
                 refuse_clobber(&self.root, &self.rel(to)?)?;
                 let kind = if matches!(op, Operation::Move { .. }) { "move" } else { "rename" };
                 let (rf, rt) = (self.rel(from)?, self.rel(to)?);
+                // Fingerprint of what is being moved, so undo can tell if the moved file was edited since.
+                let before = self.fingerprint_full(&rf);
                 self.tracked(kind, self.rel_str(from)?, Some(self.rel_str(to)?), |_| {
-                    self.root.rename(&rf, &self.root, &rt)?;
-                    Ok(((), None))
+                    rename_noreplace(&self.root, &rf, &rt)?;
+                    Ok(((), before))
                 })?;
                 Ok(done(op, "done"))
             }
@@ -495,13 +513,51 @@ fn copy_tree(dir: &Dir, from: &Path, to: &Path) -> Result<(), PawError> {
         let target = dir.read_link(from)?;
         dir.symlink(&target, to)?;
     } else {
-        dir.copy(from, dir, to)?;
+        // create_new: a destination that appeared since the check is never overwritten
+        let mut src = dir.open(from)?;
+        let mut dst = dir.open_with(to, cap_std::fs::OpenOptions::new().write(true).create_new(true))?;
+        std::io::copy(&mut src, &mut dst)?;
+        if let Ok(m) = src.metadata() {
+            let _ = dst.set_permissions(m.permissions());
+        }
     }
     Ok(())
 }
 
 /// Last-line guard: never silently overwrite, even if a caller skips
 /// plan-level checks.
+
+/// Rename that can never replace an existing destination: renameat2(RENAME_NOREPLACE) on directory handles
+/// opened through the confined root (no path walk outside it). Unsupported kernels/filesystems fail closed.
+fn rename_noreplace(root: &Dir, from: &Path, to: &Path) -> Result<(), PawError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    fn split(p: &Path) -> Result<(PathBuf, std::ffi::CString), PawError> {
+        let name = p.file_name().ok_or_else(|| PawError::Exec("bad path".into()))?;
+        let c = std::ffi::CString::new(name.as_bytes()).map_err(|_| PawError::Exec("bad name".into()))?;
+        Ok((p.parent().map(|x| x.to_path_buf()).unwrap_or_default(), c))
+    }
+    let open = |d: &Path| -> Result<Dir, PawError> {
+        if d.as_os_str().is_empty() { Ok(root.try_clone()?) } else { Ok(root.open_dir(d)?) }
+    };
+    let (fd_dir, fname) = split(from)?;
+    let (td_dir, tname) = split(to)?;
+    let (fd, td) = (open(&fd_dir)?, open(&td_dir)?);
+    // SAFETY: both fds are live for the call; the names are NUL-terminated and contain no '/'.
+    let r = unsafe { libc::syscall(libc::SYS_renameat2, fd.as_raw_fd(), fname.as_ptr(), td.as_raw_fd(), tname.as_ptr(), 1u32) };
+    if r == 0 {
+        return Ok(());
+    }
+    let e = std::io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::EEXIST) | Some(libc::ENOTEMPTY) => Err(PawError::ConfirmationRequired(format!("{} exists; not overwriting", to.display()))),
+        Some(libc::EINVAL) | Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP) => Err(PawError::Exec(
+            "this system cannot move without risking an overwrite (no-replace rename unsupported); nothing was changed".into(),
+        )),
+        _ => Err(e.into()),
+    }
+}
+
 fn refuse_clobber(dir: &Dir, rel: &Path) -> Result<(), PawError> {
     if dir.try_exists(rel).unwrap_or(false) {
         Err(PawError::ConfirmationRequired(format!(
@@ -533,5 +589,61 @@ impl ExecutionBackend for DryRunBackend {
     fn execute(&self, op: &Operation) -> Result<OpOutcome, PawError> {
         self.log.lock().unwrap().push(op.describe());
         Ok(done(op, "would run"))
+    }
+}
+
+#[cfg(test)]
+mod noreplace_tests {
+    use super::*;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("pawline-nr-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::canonicalize(&d).unwrap()
+    }
+
+    #[test]
+    fn a_competitor_destination_survives_byte_for_byte() {
+        let d = tmp("one");
+        std::fs::write(d.join("src.txt"), "SOURCE").unwrap();
+        std::fs::write(d.join("sub/dst.txt"), "COMPETITOR").unwrap();
+        let root = Dir::open_ambient_dir(&d, cap_std::ambient_authority()).unwrap();
+        // the check-then-rename gap is gone: the kernel refuses at rename time even though no pre-check ran
+        let r = rename_noreplace(&root, Path::new("src.txt"), Path::new("sub/dst.txt"));
+        assert!(r.is_err());
+        assert_eq!(std::fs::read_to_string(d.join("sub/dst.txt")).unwrap(), "COMPETITOR");
+        assert_eq!(std::fs::read_to_string(d.join("src.txt")).unwrap(), "SOURCE");
+        // and a free name works
+        rename_noreplace(&root, Path::new("src.txt"), Path::new("sub/free.txt")).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("sub/free.txt")).unwrap(), "SOURCE");
+        assert!(!d.join("src.txt").exists());
+    }
+
+    #[test]
+    fn racing_creators_never_lose_either_file() {
+        let d = tmp("race");
+        let root = Dir::open_ambient_dir(&d, cap_std::ambient_authority()).unwrap();
+        let mut moved = 0;
+        for i in 0..300 {
+            std::fs::write(d.join("s.txt"), "SOURCE").unwrap();
+            let dst = d.join("sub").join(format!("d{i}.txt"));
+            let dst2 = dst.clone();
+            let t = std::thread::spawn(move || {
+                let _ = std::fs::OpenOptions::new().write(true).create_new(true).open(&dst2).and_then(|mut f| std::io::Write::write_all(&mut f, b"COMP"));
+            });
+            let r = rename_noreplace(&root, Path::new("s.txt"), Path::new(&format!("sub/d{i}.txt")));
+            t.join().unwrap();
+            let got = std::fs::read_to_string(&dst).unwrap_or_default();
+            if r.is_ok() {
+                moved += 1;
+                assert!(got == "SOURCE" || got == "COMP" || got.is_empty(), "{got}");
+                let _ = std::fs::remove_file(&dst);
+            } else {
+                assert_eq!(std::fs::read_to_string(d.join("s.txt")).unwrap(), "SOURCE", "source kept when refused");
+                assert_eq!(got, "COMP", "competitor bytes survive");
+            }
+        }
+        assert!(moved > 0);
     }
 }
