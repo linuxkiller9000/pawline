@@ -11,6 +11,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Searches allowed to run (or be stuck) at once. A hung read keeps its worker, so new searches are refused past this.
+pub const MAX_WORKERS: usize = 2;
+static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+struct Slot;
+impl Drop for Slot {
+    fn drop(&mut self) {
+        ACTIVE.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub const MAX_RESULTS: usize = 30;
 pub const TIME_LIMIT: Duration = Duration::from_secs(2);
 const MAX_FILE: u64 = 2 * 1024 * 1024;
@@ -24,6 +35,8 @@ pub struct Found {
     /// Files not read: over 2 MB, unreadable, or changed into something else while searching.
     pub skipped: usize,
     pub scanned: usize,
+    /// Not run: earlier searches are still stuck on a slow disk.
+    pub busy: bool,
 }
 
 /// Where a search may look. The root is canonical; folders in `exclude` (Pawline's own data) are never entered.
@@ -51,12 +64,18 @@ fn walker(sc: &Scope) -> ignore::Walk {
 /// Run `work` on a worker thread and wait at most the limit (plus a little). The UI never waits on a slow disk:
 /// on a timeout the hits so far are returned, marked incomplete, and the worker is told to stop.
 fn run(sc: &Scope, work: impl FnOnce(&Scope, &AtomicBool, &Mutex<Found>) + Send + 'static) -> Found {
+    if ACTIVE.fetch_add(1, Ordering::SeqCst) >= MAX_WORKERS {
+        ACTIVE.fetch_sub(1, Ordering::SeqCst);
+        return Found { busy: true, ..Found::default() };
+    }
+    let slot = Slot;
     let stop = Arc::new(AtomicBool::new(false));
     let out = Arc::new(Mutex::new(Found::default()));
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     {
         let (sc, stop, out) = (sc.clone(), stop.clone(), out.clone());
         std::thread::spawn(move || {
+            let _slot = slot;
             work(&sc, &stop, &out);
             let _ = tx.send(());
         });
@@ -103,18 +122,17 @@ pub fn find_names(sc: &Scope, words: &[String]) -> Found {
     })
 }
 
-/// Open a regular file without following a symlink and without blocking on a pipe, then check that what we hold
-/// is the same regular file the path names, still inside the root (guards against a swap after the walk).
-fn open_checked(path: &Path, root: &Path) -> Option<std::fs::File> {
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC).open(path).ok()?;
+/// Open a file relative to the root DIRECTORY HANDLE (cap-std: no ".." or symlink can lead outside the root, and a parent
+/// folder swapped for a link cannot escape either, because every step is resolved under the handle), without blocking on
+/// a pipe, and require a regular file of at most 2 MB.
+fn open_checked(root: &cap_std::fs::Dir, path: &Path, root_path: &Path) -> Option<std::fs::File> {
+    use cap_std::fs::OpenOptionsExt;
+    let rel = path.strip_prefix(root_path).ok()?;
+    let mut o = cap_std::fs::OpenOptions::new();
+    o.read(true).custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC);
+    let f = root.open_with(rel, &o).ok()?.into_std();
     let md = f.metadata().ok()?;
-    if !md.is_file() || md.len() > MAX_FILE {
-        return None;
-    }
-    let real = std::fs::canonicalize(path).ok()?;
-    let again = std::fs::metadata(&real).ok()?;
-    (real.starts_with(root) && again.ino() == md.ino() && again.dev() == md.dev()).then_some(f)
+    (md.is_file() && md.len() <= MAX_FILE).then_some(f)
 }
 
 /// Lines containing the text (literal, smart case) in text files up to 2 MB. Binary files (a NUL byte) are skipped.
@@ -127,6 +145,7 @@ pub fn find_text(sc: &Scope, text: &str) -> Found {
         let start = Instant::now();
         let smart = !text.chars().any(|c| c.is_uppercase());
         let Ok(m) = RegexMatcherBuilder::new().case_insensitive(smart).fixed_strings(true).build(&text) else { return };
+        let Ok(rootdir) = cap_std::fs::Dir::open_ambient_dir(&sc.root, cap_std::ambient_authority()) else { return };
         let mut s = SearcherBuilder::new().binary_detection(BinaryDetection::quit(0)).line_number(true).build();
         for ent in walker(sc).flatten() {
             if stop.load(Ordering::SeqCst) || start.elapsed() > sc.limit {
@@ -138,7 +157,7 @@ pub fn find_text(sc: &Scope, text: &str) -> Found {
             if !ent.file_type().is_some_and(|t| t.is_file()) {
                 continue;
             }
-            let Some(file) = open_checked(ent.path(), &sc.root) else {
+            let Some(file) = open_checked(&rootdir, ent.path(), &sc.root) else {
                 if let Ok(mut f) = out.lock() {
                     f.skipped += 1;
                 }
@@ -165,6 +184,9 @@ pub fn find_text(sc: &Scope, text: &str) -> Found {
 }
 
 pub fn render(kind: &str, query: &str, root: &Path, f: &Found) -> String {
+    if f.busy {
+        return format!("{kind}: not run, because earlier searches are still waiting on a slow disk. Try again in a moment.");
+    }
     if f.hits.is_empty() {
         return if f.timed_out {
             format!("{kind} \"{query}\": nothing found yet, but I stopped after 2 seconds, so this search is incomplete. Add a word to narrow it.")
@@ -210,6 +232,7 @@ pub fn parse(input: &str) -> Option<(bool, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static LOCK: Mutex<()> = Mutex::new(());
     fn tmp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("pawline-find-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -218,6 +241,7 @@ mod tests {
     }
     #[test]
     fn names_and_text_respect_limits() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let r = tmp("a");
         std::fs::create_dir_all(r.join("docs/Models")).unwrap();
         std::fs::write(r.join("docs/notes.txt"), "alpha\nNeedle here\n").unwrap();
@@ -244,6 +268,7 @@ mod tests {
 
     #[test]
     fn symlinks_and_excluded_folders_are_never_used() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let r = tmp("b");
         let out = tmp("b-outside");
         std::fs::write(out.join("secret.txt"), "Needle outside").unwrap();
@@ -258,13 +283,16 @@ mod tests {
         assert_eq!(names, vec!["ok.txt"], "{names:?}");
         assert!(find_names(&sc, &["mem".into()]).hits.is_empty());
         assert!(find_names(&sc, &["secret".into()]).hits.is_empty());
-        // a file swapped for a link after the walk is refused by the checked open
-        assert!(open_checked(&r.join("linkfile.txt"), &sc.root).is_none());
-        assert!(open_checked(&r.join("ok.txt"), &sc.root).is_some());
+        // opens are resolved under the root handle: a leaf link to outside, or a parent folder swapped for a link, cannot escape
+        let rd = cap_std::fs::Dir::open_ambient_dir(&sc.root, cap_std::ambient_authority()).unwrap();
+        assert!(open_checked(&rd, &r.join("linkfile.txt"), &sc.root).is_none());
+        assert!(open_checked(&rd, &r.join("linkdir/secret.txt"), &sc.root).is_none());
+        assert!(open_checked(&rd, &r.join("ok.txt"), &sc.root).is_some());
     }
 
     #[test]
     fn a_pipe_does_not_hang_and_time_limit_is_reported() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let r = tmp("c");
         let fifo = r.join("pipe.txt");
         let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
@@ -278,6 +306,18 @@ mod tests {
         zero.limit = Duration::from_secs(0);
         let f = find_names(&zero, &["a".into()]);
         assert!(f.timed_out || f.hits.len() == 1);
+    }
+
+    #[test]
+    fn overload_is_refused_not_queued() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let r = tmp("d");
+        let sc = Scope::new(&r, vec![]).unwrap();
+        ACTIVE.fetch_add(MAX_WORKERS, Ordering::SeqCst); // pretend two searches are stuck
+        let f = find_names(&sc, &["a".into()]);
+        ACTIVE.fetch_sub(MAX_WORKERS, Ordering::SeqCst);
+        assert!(f.busy && render("fd", "a", &r, &f).contains("not run"));
+        assert!(!find_names(&sc, &["a".into()]).busy, "slots are released when workers finish");
     }
 
     #[test]
