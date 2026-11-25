@@ -88,12 +88,12 @@ fn parse_sentence(s: &str, out: &mut Vec<Directive>) -> Result<(), PawError> {
         if loc_words.is_empty() {
             break;
         }
-        let loc = parse_location(&loc_words.join(" "))
-            .unwrap_or_else(|| LocationRef::Named(loc_words.join(" ")));
+        let loc_text = clean_loc_words(&loc_words.join(" "));
+        let loc = parse_location(&loc_text).unwrap_or_else(|| LocationRef::Named(loc_text.clone()));
         base = Some(loc);
         rest = remainder;
         if rest.is_empty() {
-            return Err(PawError::Parse("nothing to do after the location".into()));
+            return Err(PawError::Parse(nothing_after_location(&loc_words)));
         }
     }
 
@@ -104,6 +104,21 @@ fn parse_sentence(s: &str, out: &mut Vec<Directive>) -> Result<(), PawError> {
         out.push(d);
     }
     Ok(())
+}
+
+/// "inside of pawline folder i want to have 3 files.py": the location words swallowed the
+/// whole sentence. Ask a specific question instead of guessing names or counts.
+fn nothing_after_location(loc_words: &[String]) -> String {
+    let joined = loc_words.join(" ");
+    let lw = joined.to_lowercase();
+    if let Some(i) = lw.find(" i want") .or_else(|| lw.find(" i need")).or_else(|| lw.find(" i would like")) {
+        let place = clean_loc_words(&joined[..i]);
+        return format!(
+            "I need the exact file names. \"{}\" doesn't say what to call them or what 3 means here (how many, or part of a name). Tell me the names, e.g. \"make files a.py, b.py, c.py inside {place}\", and I'll show them to you before creating anything. I create empty files only.",
+            joined[i..].trim()
+        );
+    }
+    "Tell me what to do inside that folder, e.g. \"make a file called notes.txt\".".into()
 }
 
 /// Take leading words of `body` as the location until a comma or a verb.
@@ -314,6 +329,92 @@ fn small_talk(lower: &str) -> Option<String> {
     None
 }
 
+/// "a.py inside pawline", "notes in ~", "x inside the pawline folder" -> (names, location).
+/// "inside" is always a location; a bare "in" only when the tail is a well-known place,
+/// so names like "lost in space" stay names.
+fn split_trailing_location(names_part: String) -> (String, Option<LocationRef>) {
+    let lower = names_part.to_ascii_lowercase();
+    if let Some(i) = lower.rfind(" inside ") {
+        let loc = clean_loc_words(&names_part[i + " inside ".len()..]);
+        if !loc.is_empty() && !loc.contains(',') {
+            return (names_part[..i].to_string(), Some(name_to_location(&loc)));
+        }
+    }
+    if let Some((n, l)) = names_part.rsplit_once(" in ") {
+        if parse_location(l).is_some() {
+            return (n.to_string(), parse_location(l));
+        }
+    }
+    (names_part, None)
+}
+
+/// "of the pawline folder" -> "pawline"
+fn clean_loc_words(s: &str) -> String {
+    let mut w: Vec<&str> = s.split_whitespace().collect();
+    if w.first().is_some_and(|x| x.eq_ignore_ascii_case("of")) {
+        w.remove(0);
+    }
+    if w.first().is_some_and(|x| x.eq_ignore_ascii_case("the")) && w.len() > 1 {
+        w.remove(0);
+    }
+    if w.len() > 1 && w.last().is_some_and(|x| x.eq_ignore_ascii_case("folder") || x.eq_ignore_ascii_case("directory")) {
+        w.pop();
+    }
+    w.join(" ")
+}
+
+/// "make a file inside pawline", "create files a.py, b.py in pawline": no "called".
+/// Explicit dotted file names are taken as typed. Anything else asks a specific question;
+/// names and contents are never invented.
+fn parse_create_bare(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawError> {
+    let words: Vec<&str> = cmd.split_whitespace().collect();
+    let mut i = 1;
+    while i < words.len() && matches!(words[i].to_lowercase().as_str(), "a" | "an" | "the" | "new") {
+        i += 1;
+    }
+    let is_file_kind = words.get(i).is_some_and(|w| matches!(w.to_lowercase().as_str(), "file" | "files"));
+    let rest = if is_file_kind { words[i + 1..].join(" ") } else { String::new() };
+    let (names_part, loc) = split_trailing_location(rest.clone());
+    let dotted_all = |t: &str| {
+        let n = split_name_list(t);
+        !n.is_empty() && n.iter().all(|n| n.contains('.') && !n.starts_with('.') && !n.ends_with('.') && !n.contains(' '))
+    };
+    let lower_np = names_part.to_ascii_lowercase();
+    let (names_part, loc) = if loc.is_some() {
+        (names_part, loc)
+    } else if let Some(t) = lower_np.strip_prefix("in ").or_else(|| lower_np.strip_prefix("inside ")) {
+        // "make a file in pawline": a place and no name
+        let at = names_part.len() - t.len();
+        (String::new(), Some(name_to_location(&clean_loc_words(&names_part[at..]))))
+    } else if let Some((h, t)) = names_part.rsplit_once(" in ") {
+        if dotted_all(h) && !t.contains(',') && !t.trim().is_empty() {
+            (h.to_string(), Some(name_to_location(&clean_loc_words(t))))
+        } else {
+            (names_part, None)
+        }
+    } else {
+        (names_part, None)
+    };
+    let names = split_name_list(&names_part);
+    let dotted = !names.is_empty()
+        && names.iter().all(|n| n.contains('.') && !n.starts_with('.') && !n.ends_with('.') && !n.contains(' '));
+    if is_file_kind && dotted {
+        return Ok(Directive::Create {
+            kind: CreateKind::File { ext_hint: None },
+            names,
+            parent: loc.or(base).unwrap_or(LocationRef::CurrentDir),
+        });
+    }
+    let place = match loc.as_ref().or(base.as_ref()) {
+        Some(LocationRef::Named(n)) => format!(" inside {n}"),
+        Some(LocationRef::LastCreated) => " inside that folder".to_string(),
+        _ => String::new(),
+    };
+    Err(PawError::Parse(format!(
+        "What should the file be called? Give me the exact name, e.g. \"make a file called notes.txt{place}\". For several: \"make files a.py, b.py{place}\"."
+    )))
+}
+
 /// Parse a create clause: "<verb> [a] [kind] [in <loc>] called|named <names>"
 fn parse_create(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawError> {
     let lc = cmd.to_ascii_lowercase();
@@ -322,19 +423,12 @@ fn parse_create(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawEr
     let split_at = |kw: &str| lc.find(kw).map(|i| (cmd[..i].to_string(), cmd[i + kw.len()..].to_string()));
     let (names_part, before_names) = match split_at(" called ").or_else(|| split_at(" named ")) {
         Some((b, n)) => (n, b),
-        None => {
-            return Err(PawError::Parse(
-                "tell me what to call it, e.g. \"make a folder called kitten paws\"".into(),
-            ))
-        }
+        None => return parse_create_bare(cmd, base),
     };
 
     // Kind and optional inline location live in the part before "called".
     // A location may also trail the names: "create a directory named notes in ~".
-    let (names_part, mut trailing_loc) = match names_part.rsplit_once(" in ") {
-        Some((n, l)) if parse_location(l).is_some() => (n.to_string(), parse_location(l)),
-        _ => (names_part, None),
-    };
+    let (names_part, mut trailing_loc) = split_trailing_location(names_part);
     let mut kind = CreateKind::Dir;
     let words: Vec<&str> = before_names.split_whitespace().collect();
     let mut loc: Option<LocationRef> = None;
@@ -585,5 +679,31 @@ mod case_tests {
             }
             d => panic!("{d:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod file_request_tests {
+    use super::*;
+    fn q(s: &str) -> String { match parse(s) { Err(PawError::Parse(m)) => m, o => panic!("{o:?}") } }
+
+    #[test]
+    fn explicit_names_inside_a_folder() {
+        for s in ["make a file called a.py inside pawline", "inside pawline make a file called a.py", "make a file a.py in pawline"] {
+            assert_eq!(parse(s).unwrap(), vec![Directive::Create { kind: CreateKind::File { ext_hint: None }, names: vec!["a.py".into()], parent: LocationRef::Named("pawline".into()) }], "{s}");
+        }
+        assert_eq!(parse("create files a.py, b.py in pawline").unwrap(), vec![Directive::Create { kind: CreateKind::File { ext_hint: None }, names: vec!["a.py".into(), "b.py".into()], parent: LocationRef::Named("pawline".into()) }]);
+        assert_eq!(parse("make files a.py, b.py inside the pawline folder").unwrap().len(), 1);
+    }
+    #[test]
+    fn names_with_in_stay_names() {
+        assert_eq!(parse("make a folder called lost in space").unwrap(), vec![Directive::Create { kind: CreateKind::Dir, names: vec!["lost in space".into()], parent: LocationRef::CurrentDir }]);
+    }
+    #[test]
+    fn nameless_file_asks_and_invents_nothing() {
+        let m = q("make a file inside pawline");
+        assert!(m.starts_with("What should the file be called?") && m.contains("inside pawline"), "{m}");
+        let m = q("inside of pawline folder i want to have 3 files.py");
+        assert!(m.contains("exact file names") && m.contains("what 3 means") && m.contains("inside pawline"), "{m}");
     }
 }
