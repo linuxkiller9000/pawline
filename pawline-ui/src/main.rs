@@ -251,7 +251,9 @@ fn main() {
             let gtk_win = win.gtk_window()?;
             let ptr = gtk_win.as_ptr() as *mut c_void;
             let ns = std::ffi::CString::new("pawline").unwrap();
-            let use_layer = std::env::var("PAWLINE_NO_LAYERSHELL").is_err();
+            // Default: plain xdg-toplevel window (the path verified to paint). layer-shell is opt-in
+            // (PAWLINE_LAYERSHELL=1) because it rendered blank in the sandbox sway test.
+            let use_layer = std::env::var("PAWLINE_LAYERSHELL").is_ok();
             unsafe {
                 if use_layer {
                 gtk_layer_init_for_window(ptr);
