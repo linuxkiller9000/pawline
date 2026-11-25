@@ -105,16 +105,15 @@ pub fn parse_exec(line: &str) -> Vec<String> {
 }
 
 fn which(exe: &str, path_env: &str) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
     if exe.contains('/') {
         let p = PathBuf::from(exe);
         let md = std::fs::metadata(&p).ok()?;
-        return (md.is_file() && md.permissions().mode() & 0o111 != 0).then_some(p);
+        return (crate::platform::is_executable(&md)).then_some(p);
     }
     for d in path_env.split(':').filter(|d| !d.is_empty()) {
         let p = Path::new(d).join(exe);
         if let Ok(md) = std::fs::metadata(&p) {
-            if md.is_file() && md.permissions().mode() & 0o111 != 0 {
+            if crate::platform::is_executable(&md) {
                 return Some(p);
             }
         }
@@ -254,11 +253,11 @@ pub fn resolve(spoken: &str) -> Result<AppCandidate, PawError> {
 
 /// Start the reviewed command: no shell, no extra arguments, detached, no inherited stdio.
 pub fn launch(argv: &[String]) -> Result<String, PawError> {
-    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     let (exe, args) = argv.split_first().ok_or_else(|| PawError::Exec("nothing to launch".into()))?;
     let mut cmd = Command::new(exe);
-    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0);
+    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    crate::platform::detach(&mut cmd);
     if let Some(h) = std::env::var_os("HOME") {
         cmd.current_dir(h);
     }

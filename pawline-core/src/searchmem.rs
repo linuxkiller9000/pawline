@@ -78,7 +78,6 @@ pub fn load(path: &Path) -> Vec<Entry> {
 }
 
 fn save(path: &Path, entries: &[Entry]) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
@@ -88,7 +87,7 @@ fn save(path: &Path, entries: &[Entry]) -> std::io::Result<()> {
         .map(|e| json!({"engine": e.engine, "query": e.query, "source": e.source, "text": e.text, "fetched": e.fetched, "hits": e.hits}))
         .collect();
     std::fs::write(&tmp, serde_json::to_vec_pretty(&v).unwrap_or_default())?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    crate::platform::set_private_file(&tmp)?;
     std::fs::rename(&tmp, path)
 }
 
@@ -285,10 +284,13 @@ mod tests {
 
     #[test]
     fn file_is_private_forgettable_and_bad_json_is_ignored() {
-        use std::os::unix::fs::PermissionsExt;
-        let p = tmp("c");
+            let p = tmp("c");
         store(&p, SearchEngine::Web, "one", "t", 1);
-        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         assert!(describe_all(&p).contains("\"one\""));
         assert_eq!(forget_all(&p), 1);
         assert!(!p.exists() && describe_all(&p) == "Search memory is empty.");

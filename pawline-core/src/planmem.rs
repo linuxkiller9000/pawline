@@ -61,7 +61,6 @@ pub fn load(path: &Path) -> Vec<Routine> {
 }
 
 fn save(path: &Path, all: &[Routine]) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
@@ -71,7 +70,7 @@ fn save(path: &Path, all: &[Routine]) -> std::io::Result<()> {
         .map(|r| json!({"key": r.key, "steps": r.steps, "correction": r.correction, "saved": r.saved, "uses": r.uses}))
         .collect();
     std::fs::write(&tmp, serde_json::to_vec_pretty(&v).unwrap_or_default())?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    crate::platform::set_private_file(&tmp)?;
     std::fs::rename(&tmp, path)
 }
 
@@ -207,10 +206,13 @@ mod tests {
 
     #[test]
     fn file_is_private_and_forgettable() {
-        use std::os::unix::fs::PermissionsExt;
-        let p = tmp("d");
+            let p = tmp("d");
         record_success(&p, "a b", &s(&["x"]), 1);
-        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         assert!(describe_all(&p).contains("- x ("));
         assert!(!std::fs::read_to_string(&p).unwrap().contains("a b"), "request wording must not be stored");
         assert_eq!(forget_all(&p), 1);

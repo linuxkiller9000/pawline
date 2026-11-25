@@ -19,6 +19,7 @@ pub mod journal;
 pub mod math;
 pub mod organize;
 pub mod plan;
+pub mod platform;
 pub mod planmem;
 pub mod search;
 pub mod shrink;

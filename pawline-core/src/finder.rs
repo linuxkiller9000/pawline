@@ -220,9 +220,9 @@ pub fn find_names(sc: &Scope, words: &[String]) -> Found {
 /// Open a file by name relative to its parent folder's handle (cap-std: nothing can lead outside), without blocking on
 /// a pipe, and require a regular file of at most 2 MB.
 fn open_in(parent: &cap_std::fs::Dir, name: &std::ffi::OsStr) -> Option<std::fs::File> {
-    use cap_std::fs::OpenOptionsExt;
     let mut o = cap_std::fs::OpenOptions::new();
-    o.read(true).custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC);
+    o.read(true);
+    crate::platform::nonblocking_read(&mut o);
     let f = parent.open_with(name, &o).ok()?.into_std();
     let md = f.metadata().ok()?;
     (md.is_file() && md.len() <= MAX_FILE).then_some(f)

@@ -127,14 +127,13 @@ pub trait WallpaperSetter: Send + Sync {
 /// The image of the single user-owned swaybg process, read from its command
 /// line (`-i <path>`). None when there is no swaybg or more than one.
 pub fn current_swaybg_image() -> Option<PathBuf> {
-    let me = std::fs::metadata("/proc/self").map(|m| { use std::os::unix::fs::MetadataExt; m.uid() }).ok()?;
     let mut found: Vec<PathBuf> = Vec::new();
     for e in std::fs::read_dir("/proc").ok()?.flatten() {
         let n = e.file_name();
         if !n.to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
-        let owned = std::fs::metadata(e.path()).map(|m| { use std::os::unix::fs::MetadataExt; m.uid() == me }).unwrap_or(false);
+        let owned = crate::platform::same_owner_as_self(&e.path()).unwrap_or(false);
         if !owned || std::fs::read_to_string(e.path().join("comm")).map(|c| c.trim() != "swaybg").unwrap_or(true) {
             continue;
         }
@@ -153,7 +152,6 @@ pub fn current_swaybg_image() -> Option<PathBuf> {
 /// under the current user. comm is truncated to 15 chars by the kernel.
 fn process_running(name: &str) -> bool {
     let want: String = name.chars().take(15).collect();
-    let me = std::fs::metadata("/proc/self").map(|m| { use std::os::unix::fs::MetadataExt; m.uid() }).ok();
     let Ok(rd) = std::fs::read_dir("/proc") else { return false };
     rd.flatten().any(|e| {
         let n = e.file_name();
@@ -161,9 +159,7 @@ fn process_running(name: &str) -> bool {
         if !n.bytes().all(|b| b.is_ascii_digit()) {
             return false;
         }
-        let owned = std::fs::metadata(e.path())
-            .map(|m| { use std::os::unix::fs::MetadataExt; Some(m.uid()) == me })
-            .unwrap_or(false);
+        let owned = crate::platform::same_owner_as_self(&e.path()).unwrap_or(false);
         owned
             && std::fs::read_to_string(e.path().join("comm"))
                 .map(|c| c.trim() == want)

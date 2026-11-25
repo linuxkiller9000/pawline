@@ -88,14 +88,13 @@ fn load_own(path: &Path) -> Vec<(PathBuf, u32, u64)> {
 }
 
 fn save_own(path: &Path, all: &[(PathBuf, u32, u64)]) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
     let tmp = path.with_extension("tmp");
     let v: Vec<Value> = all.iter().map(|(p, u, l)| json!({"path": p.to_string_lossy(), "uses": u, "last": l})).collect();
     std::fs::write(&tmp, serde_json::to_vec_pretty(&v).unwrap_or_default())?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    crate::platform::set_private_file(&tmp)?;
     std::fs::rename(&tmp, path)
 }
 
@@ -227,8 +226,11 @@ mod tests {
             assert_eq!(l[0].path, b, "more uses ranks first");
             assert_eq!(l.len(), 2, "relative paths are never stored");
         }
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&own).unwrap().permissions().mode() & 0o777, 0o600);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(std::fs::metadata(&own).unwrap().permissions().mode() & 0o777, 0o600);
+            }
         assert_eq!(forget_own(&own), 2);
         assert!(!own.exists());
     }

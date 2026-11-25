@@ -1,12 +1,19 @@
 # Windows port: status and plan (not a working Windows build)
 
-Status at this commit: `pawline-core` does NOT compile for `x86_64-pc-windows-gnu`. A cross toolchain does work in the
-dev sandbox (rust-std for the target plus mingw-w64 gcc 10 from the Ubuntu pool; third-party crates such as ring build).
-Nothing has run on Windows. A cross-compiled exe would still not be a tested product.
+Status at this commit (cross-compile checks only, nothing has run on Windows):
+- `pawline-core`, `pawline-needle` and `pawline-needle-native` COMPILE for `x86_64-pc-windows-gnu` (library code).
+  Unix-specific code now sits behind `pawline-core/src/platform.rs`. The Unix implementation is the tested one (342 Linux
+  tests pass). The non-Unix versions are scaffolding that REFUSE: no file identity (so undo and copy cleanup cannot
+  verify files and refuse), no move/rename (`rename_noreplace` returns an error), no symlink copy, no shrink (needs /dev/fd),
+  no app launching or wallpaper adapters that work. This is compile scope, not Windows capability.
+- `pawline-native` (the window and the whole UI) does NOT compile for Windows: it is built on Wayland (smithay-client-toolkit)
+  and X11 (x11rb) inside a 1,900-line main.rs that mixes drawing and windowing. A Windows window backend plus separating
+  the tiny-skia renderer from the window code is the next big piece. Core integration tests (tests/wallpaper.rs) still use Unix APIs.
+- Cross toolchain in the dev sandbox: rust-std for the target plus mingw-w64 gcc 10 (Ubuntu pool debs). A cross-compiled exe would still not be a tested product.
 
-Check command: `cargo check -p pawline-core --target x86_64-pc-windows-gnu`
+Check commands: `cargo check -p pawline-core --target x86_64-pc-windows-gnu`; `cargo check -p pawline-native --target x86_64-pc-windows-gnu` (fails at wayland-sys today).
 
-## Unix-only code found by that check (about 50 errors in 8 files)
+## What the Unix-only code was (all now behind platform.rs, refusing on Windows)
 | File | What | Windows plan |
 |---|---|---|
 | exec.rs | dev/ino file identity (undo fingerprints, temp-file identity, copy cleanup) | one `platform::file_id(&File)` (Windows: volume serial + file index via GetFileInformationByHandle) |

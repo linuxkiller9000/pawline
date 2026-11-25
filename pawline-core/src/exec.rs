@@ -16,6 +16,7 @@ use cap_std::fs::Dir;
 
 use crate::error::PawError;
 use crate::plan::Operation;
+use crate::platform::rename_noreplace;
 
 #[derive(Debug)]
 pub struct OpOutcome {
@@ -71,10 +72,7 @@ impl DirectFsBackend {
     }
 
     fn private_dir(&self, rel: &str) -> Result<(), PawError> {
-        use cap_std::fs::{DirBuilder, DirBuilderExt};
-        let mut b = DirBuilder::new();
-        b.recursive(true).mode(0o700);
-        self.root.create_dir_with(rel, &b)?;
+        crate::platform::create_private_dir(&self.root, rel)?;
         // Existing store directories from older runs: tighten if needed.
         Ok(())
     }
@@ -89,13 +87,12 @@ impl DirectFsBackend {
     }
 
     fn append(&self, line: &str) -> Result<(), PawError> {
-        use cap_std::fs::OpenOptionsExt;
         use std::io::Write;
         self.private_dir(crate::journal::STORE)?;
-        let mut f = self.root.open_with(
-            crate::journal::JOURNAL,
-            cap_std::fs::OpenOptions::new().append(true).create(true).mode(0o600),
-        )?;
+        let mut o = cap_std::fs::OpenOptions::new();
+        o.append(true).create(true);
+        crate::platform::private_mode(&mut o);
+        let mut f = self.root.open_with(crate::journal::JOURNAL, &o)?;
         writeln!(f, "{line}")?;
         f.sync_all()?;
         Ok(())
@@ -165,9 +162,8 @@ impl DirectFsBackend {
             let tmp_rel = dir.join(format!(".pawline-shrink-{id}-{}-{nanos}.part", std::process::id()));
             // a unique temporary name only this run owns; the handle stays open for the whole run
             let out = self.root.open_with(&tmp_rel, cap_std::fs::OpenOptions::new().read(true).write(true).create_new(true))?.into_std();
-            let om = out.metadata()?;
-            let mine = (std::os::unix::fs::MetadataExt::dev(&om), std::os::unix::fs::MetadataExt::ino(&om));
-            let is_mine = |root: &Dir| root.symlink_metadata(&tmp_rel).ok().map(|m| (m.dev(), m.ino())) == Some(mine);
+            let mine = crate::platform::id_std(&out.metadata()?).ok_or_else(|| ex("cannot tell files apart on this system, so I did not start".into()))?;
+            let is_mine = |root: &Dir| root.symlink_metadata(&tmp_rel).ok().and_then(|m| crate::platform::id_cap(&m)) == Some(mine);
             let cleanup = |root: &Dir| {
                 // remove only the file this run created, never a replacement made by someone else
                 if is_mine(root) {
@@ -214,7 +210,7 @@ impl DirectFsBackend {
                 return Err(e);
             }
             // confirm what now sits at the final name is the checked file
-            let landed = self.root.symlink_metadata(&rt).ok().map(|m| (m.dev(), m.ino()));
+            let landed = self.root.symlink_metadata(&rt).ok().and_then(|m| crate::platform::id_cap(&m));
             if landed != Some(mine) {
                 return Err(ex("the new file was swapped right after saving; I can't vouch for it, please check it. Your original video was not touched.".into()));
             }
@@ -225,17 +221,17 @@ impl DirectFsBackend {
 
     /// mtime + inode + size: changes when the content is edited or the file replaced.
     fn fingerprint_full(&self, rel: &Path) -> Option<String> {
-        use cap_std::fs::MetadataExt;
         let m = self.root.symlink_metadata(rel).ok()?;
         let t = m.modified().ok()?.into_std().duration_since(std::time::UNIX_EPOCH).ok()?;
-        Some(format!("{}:{}:{}", t.as_nanos(), m.ino(), m.len()))
+        let id = crate::platform::id_cap(&m)?; // no file identity on this system: no fingerprint, so undo refuses
+        Some(format!("{}:{}:{}", t.as_nanos(), id.1, m.len()))
     }
 
     fn fingerprint(&self, rel: &Path) -> Option<String> {
-        use cap_std::fs::MetadataExt;
         let m = self.root.symlink_metadata(rel).ok()?;
         let t = m.modified().ok()?.into_std().duration_since(std::time::UNIX_EPOCH).ok()?;
-        Some(format!("{}:{}", t.as_nanos(), m.ino()))
+        let id = crate::platform::id_cap(&m)?;
+        Some(format!("{}:{}", t.as_nanos(), id.1))
     }
 
     /// Settle journal intents left pending by a crash or a failed write.
@@ -378,10 +374,10 @@ impl DirectFsBackend {
         self.private_dir(crate::journal::WALLPAPERS)?;
         let name = name.replace(['/', ' '], "_");
         let rel = format!("{}/{id}-{name}", crate::journal::WALLPAPERS);
-        let mut out = self.root.open_with(
-            &rel,
-            cap_std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600),
-        )?;
+        let mut o = cap_std::fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        crate::platform::private_mode(&mut o);
+        let mut out = self.root.open_with(&rel, &o)?;
         out.write_all(bytes)?;
         out.sync_all()?;
         Ok(rel)
@@ -604,13 +600,12 @@ impl ExecutionBackend for DirectFsBackend {
 /// Copy one regular file with create_new. If the copy fails, the partial file is removed only when the name still
 /// points at the file this call created. `after_create` lets tests inject a failure at that point.
 fn copy_file(dir: &Dir, from: &Path, to: &Path, after_create: &dyn Fn() -> std::io::Result<()>) -> Result<(), PawError> {
-    use cap_std::fs::MetadataExt;
     let mut src = dir.open(from)?;
     let mut dst = dir.open_with(to, cap_std::fs::OpenOptions::new().write(true).create_new(true))?;
-    let mine = dst.metadata().ok().map(|m| (m.dev(), m.ino()));
+    let mine = dst.metadata().ok().and_then(|m| crate::platform::id_cap(&m));
     let res = after_create().and_then(|_| std::io::copy(&mut src, &mut dst).map(|_| ())).and_then(|_| dst.sync_all());
     if let Err(e) = res {
-        let same = dir.symlink_metadata(to).ok().map(|m| (m.dev(), m.ino()));
+        let same = dir.symlink_metadata(to).ok().and_then(|m| crate::platform::id_cap(&m));
         if mine.is_some() && same == mine {
             let _ = dir.remove_file(to);
         }
@@ -632,7 +627,7 @@ fn copy_tree(dir: &Dir, from: &Path, to: &Path) -> Result<(), PawError> {
         }
     } else if meta.file_type().is_symlink() {
         let target = dir.read_link(from)?;
-        dir.symlink(&target, to)?;
+        crate::platform::symlink(dir, &target, to)?;
     } else {
         copy_file(dir, from, to, &|| Ok(()))?;
     }
@@ -641,37 +636,6 @@ fn copy_tree(dir: &Dir, from: &Path, to: &Path) -> Result<(), PawError> {
 
 /// Last-line guard: never silently overwrite, even if a caller skips
 /// plan-level checks.
-
-/// Rename that can never replace an existing destination: renameat2(RENAME_NOREPLACE) on directory handles
-/// opened through the confined root (no path walk outside it). Unsupported kernels/filesystems fail closed.
-fn rename_noreplace(root: &Dir, from: &Path, to: &Path) -> Result<(), PawError> {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::ffi::OsStrExt;
-    fn split(p: &Path) -> Result<(PathBuf, std::ffi::CString), PawError> {
-        let name = p.file_name().ok_or_else(|| PawError::Exec("bad path".into()))?;
-        let c = std::ffi::CString::new(name.as_bytes()).map_err(|_| PawError::Exec("bad name".into()))?;
-        Ok((p.parent().map(|x| x.to_path_buf()).unwrap_or_default(), c))
-    }
-    let open = |d: &Path| -> Result<Dir, PawError> {
-        if d.as_os_str().is_empty() { Ok(root.try_clone()?) } else { Ok(root.open_dir(d)?) }
-    };
-    let (fd_dir, fname) = split(from)?;
-    let (td_dir, tname) = split(to)?;
-    let (fd, td) = (open(&fd_dir)?, open(&td_dir)?);
-    // SAFETY: both fds are live for the call; the names are NUL-terminated and contain no '/'.
-    let r = unsafe { libc::syscall(libc::SYS_renameat2, fd.as_raw_fd(), fname.as_ptr(), td.as_raw_fd(), tname.as_ptr(), 1u32) };
-    if r == 0 {
-        return Ok(());
-    }
-    let e = std::io::Error::last_os_error();
-    match e.raw_os_error() {
-        Some(libc::EEXIST) | Some(libc::ENOTEMPTY) => Err(PawError::ConfirmationRequired(format!("{} exists; not overwriting", to.display()))),
-        Some(libc::EINVAL) | Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP) => Err(PawError::Exec(
-            "this system cannot move without risking an overwrite (no-replace rename unsupported); nothing was changed".into(),
-        )),
-        _ => Err(e.into()),
-    }
-}
 
 fn refuse_clobber(dir: &Dir, rel: &Path) -> Result<(), PawError> {
     if dir.try_exists(rel).unwrap_or(false) {
