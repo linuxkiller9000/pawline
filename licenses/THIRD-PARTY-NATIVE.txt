@@ -8,9 +8,9 @@ Build inputs, identical (sha256) to the files in these Ubuntu 22.04 packages, ve
  libunwind.a   33fb4fdea2b1a84985531a9dc9f4eb5b731b04feb9354cb7ca787e2d6693fd46   from libunwind-14-dev_14.0.0-1ubuntu1_amd64.deb (73cced4e8db27c6a938840e8b313c3f8a19e5bcaa31362fc84daefd76c26ecd4)
  Licence: Apache-2.0 WITH LLVM-exception (copyright file of these packages follows).
  Source package: llvm-toolchain-14 1:14.0.0-1ubuntu1 (Ubuntu launchpad.net/ubuntu/+source/llvm-toolchain-14).
- PENDING: the source files of that exact version were not retrieved (the main Ubuntu pool now holds
+ Note: the source files of that exact version were not retrieved (the main Ubuntu pool now holds
  14.0.6 only). Apache-2.0/LLVM-exception does not require shipping source, but the exact version
- is recorded here so it can be fetched for the source assets if the owner wants them.
+ is recorded here for anyone who wants to fetch it.
 
 2. CACTUS RUNTIME AND NEEDLE3 WEIGHTS (committed in the repository as pawline-needle/libcactus.a and needle3.cact)
  Both verified byte-for-byte against the publisher's Hugging Face repositories on 2026-11-25:
