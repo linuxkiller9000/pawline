@@ -44,6 +44,20 @@ use tiny_skia::*;
 
 static FONT: &[u8] = include_bytes!("../assets/font.ttf");
 
+/// Typing "/" lists Pawline's built-in skills. Choosing one only fills the input with a starter
+/// phrase; nothing runs until Enter, and anything that changes things still asks first.
+const SKILL_MENU: &[(&str, &str, &str)] = &[
+    ("/files", "make, delete, rename, move, copy, list", "make a folder called "),
+    ("/open", "open an installed app (asks first)", "open "),
+    ("/wallpaper", "set a wallpaper (asks first, undoable)", "set wallpaper to "),
+    ("/search", "search the web or Wikipedia", "search for "),
+    ("/math", "simple math, solve for x", "what is "),
+    ("/picture", "Pollinations or AI Horde (asks first)", "generate a picture of "),
+    ("/ask", "ask an online model (asks first)", "what is "),
+    ("/undo", "undo the last change", "undo"),
+    ("/skills", "list skills", "/skills"),
+];
+
 const W: u32 = 440;
 const H: u32 = 470;
 const COMPACT: u32 = 68;
@@ -118,6 +132,7 @@ struct App {
     /// Pixels scrolled down from the top of the plan panel.
     plan_scroll: f32,
     busy: bool,
+    menu_sel: usize,
     font: fontdue::Font,
     cache: HashMap<(char, u32), (fontdue::Metrics, Vec<u8>)>,
     tx: mpsc::Sender<Req>,
@@ -361,6 +376,7 @@ impl App {
             }
             let col = if self.busy { (150, 145, 165) } else { (255, 255, 255) };
             self.text(pm, &shown, PAD + 8.0, h - 26.0, PX, col, (0.0, h));
+            self.draw_menu(pm, w, h);
         }
     }
 
@@ -487,6 +503,50 @@ impl App {
         self.scroll = 0.0;
     }
 
+    /// Skill-menu rows matching what is typed (only a bare "/word", nothing else on screen).
+    fn menu_rows(&self) -> Vec<usize> {
+        let t = self.input.text();
+        if self.busy || self.confirm.is_some() || !t.starts_with('/') || t.contains(' ') {
+            return vec![];
+        }
+        let t = t.to_ascii_lowercase();
+        SKILL_MENU.iter().enumerate().filter(|(_, m)| m.0.starts_with(&t)).map(|(i, _)| i).collect()
+    }
+
+    /// Fill the input from the highlighted menu row. Returns true if the key was used.
+    fn menu_pick(&mut self) -> bool {
+        let rows = self.menu_rows();
+        if rows.is_empty() {
+            return false;
+        }
+        let i = rows[self.menu_sel.min(rows.len() - 1)];
+        self.input.clear();
+        self.input.insert(SKILL_MENU[i].2);
+        self.menu_sel = 0;
+        true
+    }
+
+    fn draw_menu(&mut self, pm: &mut Pixmap, w: f32, h: f32) {
+        let rows = self.menu_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let rh = 26.0;
+        let n = rows.len() as f32;
+        let top = h - 58.0 - n * rh - 8.0;
+        fill(pm, &rrect(PAD - 2.0, top, w - 2.0 * PAD + 4.0, n * rh + 8.0, 10.0), (36, 33, 58, 255));
+        let sel = self.menu_sel.min(rows.len() - 1);
+        for (k, i) in rows.iter().enumerate() {
+            let y = top + 4.0 + k as f32 * rh;
+            if k == sel {
+                fill(pm, &rrect(PAD + 2.0, y, w - 2.0 * PAD - 4.0, rh - 2.0, 6.0), (92, 80, 170, 255));
+            }
+            let (name, desc, _) = SKILL_MENU[*i];
+            self.text(pm, name, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
+            self.text(pm, desc, PAD + 100.0, y + 18.0, 12.0, (190, 185, 215), (0.0, h));
+        }
+    }
+
     fn submit(&mut self) {
         let t = self.input.text().trim().to_string();
         if t.is_empty() || self.busy {
@@ -560,9 +620,28 @@ impl App {
             Keysym::Escape if self.busy => {
                 bridge::request_cancel();
             }
+            Keysym::Escape if !self.menu_rows().is_empty() => {
+                self.input.clear();
+                self.menu_sel = 0;
+                self.draw();
+            }
             Keysym::Escape => self.set_expanded(false),
+            Keysym::Tab if !self.menu_rows().is_empty() => {
+                self.menu_pick();
+                self.draw();
+            }
+            Keysym::Up | Keysym::Down if !self.menu_rows().is_empty() => {
+                let n = self.menu_rows().len();
+                self.menu_sel = if e.keysym == Keysym::Up { (self.menu_sel + n - 1) % n } else { (self.menu_sel + 1) % n };
+                self.draw();
+            }
             Keysym::Return | Keysym::KP_Enter => {
-                self.submit();
+                // a complete "/skills" runs; a partial "/fi" is completed from the highlighted row first
+                let complete = SKILL_MENU.iter().any(|m| m.0 == "/skills" && self.input.text().eq_ignore_ascii_case(m.0));
+                if !complete && self.menu_pick() {
+                } else {
+                    self.submit();
+                }
                 self.draw();
             }
             Keysym::BackSpace => {
@@ -1088,6 +1167,7 @@ fn main() {
         scroll: 0.0,
         plan_scroll: 0.0,
         busy: false,
+        menu_sel: 0,
         font,
         cache: HashMap::new(),
         tx: req_tx,
