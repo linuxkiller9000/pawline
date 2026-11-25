@@ -122,6 +122,8 @@ pub struct Plan {
     /// require explicit user confirmation before execution — model
     /// confidence is not evidence the user asked for the operation.
     pub assist_derived: bool,
+    /// Plain-language limits the user should see before confirming.
+    pub notes: Vec<String>,
 }
 
 impl Plan {
@@ -129,6 +131,9 @@ impl Plan {
         let mut s = String::new();
         for (i, op) in self.ops.iter().enumerate() {
             s.push_str(&format!("{}. {}\n", i + 1, op.describe()));
+        }
+        for n in &self.notes {
+            s.push_str(&format!("Note: {n}\n"));
         }
         s.trim_end().to_string()
     }

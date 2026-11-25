@@ -308,7 +308,21 @@ impl Validator {
             .filter(|o| o.needs_confirmation())
             .map(|o| o.describe())
             .collect();
+        let mut notes = Vec::new();
+        if ops.iter().any(|o| matches!(o, Operation::SetWallpaper { .. })) {
+            let text = std::fs::read_to_string(self.root.join(crate::journal::JOURNAL)).unwrap_or_default();
+            let known = crate::journal::last_open_of(&text, "wallpaper").is_some()
+                || crate::journal::last_open_of(&text, "wallpaper_base").is_some()
+                || crate::wallpaper::current_swaybg_image().is_some();
+            if !known {
+                notes.push(
+                    "I can't see your current wallpaper, so Undo won't be able to put it back. It can only return to wallpapers I set. Say no if you want to keep it restorable."
+                        .to_string(),
+                );
+            }
+        }
         Ok(Plan {
+            notes,
             assist_derived: false,
             needs_confirmation: !reasons.is_empty(),
             confirmation_reasons: reasons,

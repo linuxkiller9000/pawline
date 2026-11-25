@@ -118,6 +118,35 @@ pub fn extension_ok(p: &Path) -> bool {
 /// tests substitute a recorder.
 pub trait WallpaperSetter: Send + Sync {
     fn set(&self, image: &Path, via: Option<Adapter>) -> Result<String, PawError>;
+    /// The picture currently shown, when it can be read reliably. Default: unknown.
+    fn current(&self) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// The image of the single user-owned swaybg process, read from its command
+/// line (`-i <path>`). None when there is no swaybg or more than one.
+pub fn current_swaybg_image() -> Option<PathBuf> {
+    let me = std::fs::metadata("/proc/self").map(|m| { use std::os::unix::fs::MetadataExt; m.uid() }).ok()?;
+    let mut found: Vec<PathBuf> = Vec::new();
+    for e in std::fs::read_dir("/proc").ok()?.flatten() {
+        let n = e.file_name();
+        if !n.to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let owned = std::fs::metadata(e.path()).map(|m| { use std::os::unix::fs::MetadataExt; m.uid() == me }).unwrap_or(false);
+        if !owned || std::fs::read_to_string(e.path().join("comm")).map(|c| c.trim() != "swaybg").unwrap_or(true) {
+            continue;
+        }
+        let raw = std::fs::read(e.path().join("cmdline")).ok()?;
+        let args: Vec<String> = raw.split(|b| *b == 0).map(|a| String::from_utf8_lossy(a).to_string()).collect();
+        let img = args.iter().position(|a| a == "-i" || a == "--image").and_then(|i| args.get(i + 1));
+        match img {
+            Some(p) => found.push(PathBuf::from(p)),
+            None => return None,
+        }
+    }
+    if found.len() == 1 { found.pop() } else { None }
 }
 
 /// True when a process with this exact name (from /proc/<pid>/comm) runs
@@ -151,6 +180,10 @@ fn in_path(program: &str) -> bool {
 pub struct SystemWallpaper;
 
 impl WallpaperSetter for SystemWallpaper {
+    fn current(&self) -> Option<PathBuf> {
+        current_swaybg_image()
+    }
+
     fn set(&self, image: &Path, via: Option<Adapter>) -> Result<String, PawError> {
         let adapter = choose_active(&in_path, &process_running, via).map_err(PawError::Exec)?;
         run(adapter, image)?;

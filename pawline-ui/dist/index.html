@@ -51,7 +51,7 @@
 </head>
 <body>
 <div id="shell">
-  <div id="compact" title="Click to open Pawline">
+  <div id="compact" title="Click, or press Enter, to open Pawline">
     <div id="dot"></div>
     <div id="hint">Pawline — click and tell me what to do</div>
   </div>
@@ -103,6 +103,7 @@ async function collapse() {
 
 document.getElementById('compact').addEventListener('click', expand);
 document.addEventListener('keydown', e => {
+  if (!body.classList.contains('expanded') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); expand(); return; }
   if (e.key === 'Escape') collapse();
   if (confirmrow.classList.contains('show')) {
     const a = document.activeElement, yes = document.getElementById('yes'), no = document.getElementById('no');
