@@ -225,7 +225,10 @@ mod tests {
     fn roundtrip_and_no_overwrite() {
         let mut all = Vec::new();
         add(&mut all, "one", &cand()).unwrap();
-        assert!(add(&mut all, "ONE", &cand()).is_err());
+        assert!(add(&mut all, "one", &cand()).is_err());
+        // names are case-exact: "ONE" is a different name and is allowed
+        add(&mut all, "ONE", &cand()).unwrap();
+        remove(&mut all, "ONE").unwrap();
         let text = render_file(&all);
         assert_eq!(parse_file(&text), all);
         remove(&mut all, "one").unwrap();
