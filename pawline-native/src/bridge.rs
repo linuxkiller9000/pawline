@@ -37,13 +37,18 @@ impl ExecutionBackend for UiBackend {
                 .ok_or_else(|| PawError::Exec("HOME is not set; can't pick the Pictures folder".into()))?
                 .join("Pictures")
                 .join("Pawline");
-            use std::sync::atomic::Ordering::SeqCst;
+            use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
+            use std::sync::Arc;
+            // Counts until the network thread really ends, so an abandoned request still holds the slot.
+            let ticket = pawline_core::imagegen::GUARD.begin(*provider, std::time::Instant::now())?;
             let my = GEN.fetch_add(1, SeqCst) + 1;
             let (provider, prompt) = (*provider, prompt.clone());
+            // 0 running, 1 cancelled, 2 committed to writing. Exactly one of cancel/commit wins.
+            let state = Arc::new(AtomicU8::new(0));
             let (tx, rx) = std::sync::mpsc::channel();
-            // The request runs on its own thread so Esc can end the wait now; a late
-            // answer from that thread is dropped before anything is written.
+            let st = state.clone();
             std::thread::spawn(move || {
+                let _ticket = ticket;
                 let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(120));
                 let r = pawline_core::imagegen::generate(
                     &http,
@@ -52,14 +57,16 @@ impl ExecutionBackend for UiBackend {
                     &dir,
                     std::time::Duration::from_secs(4),
                     std::time::Duration::from_secs(240),
-                    &|| CANCEL_UPTO.load(SeqCst) >= my,
+                    &|| st.load(SeqCst) == 1,
+                    &|| st.compare_exchange(0, 2, SeqCst, SeqCst).is_ok(),
                 );
                 let _ = tx.send(r);
             });
             let path = loop {
-                if CANCEL_UPTO.load(SeqCst) >= my {
+                if CANCEL_UPTO.load(SeqCst) >= my && state.compare_exchange(0, 1, SeqCst, SeqCst).is_ok() {
                     return Err(PawError::Exec("Cancelled. Nothing was saved, and a late answer will be discarded.".into()));
                 }
+                // If the file write already began, cancel lost the race: report the real result below.
                 match rx.recv_timeout(std::time::Duration::from_millis(100)) {
                     Ok(r) => break r?,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -168,7 +175,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             r
         }
         Ok(Response::Message(m)) => reply("message", m),
-        Ok(Response::Failed { completed, failed, error, remaining }) => reply("failed", fail_text(completed.len(), &failed.to_string(), &error.to_string(), remaining.to_string())),
+        Ok(Response::Failed { completed, failed, error, remaining }) => reply(if error.to_string().contains("Cancelled.") { "message" } else { "failed" }, fail_text(completed.len(), &failed.to_string(), &error.to_string(), remaining.to_string())),
         Err(e) => reply("error", e.to_string()),
     }
 }
@@ -176,6 +183,9 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
 /// A single step that failed with nothing else done reads as one plain sentence.
 fn fail_text(done: usize, failed: &str, error: &str, remaining: String) -> String {
     let plain = error.strip_prefix("Execution failed: ").unwrap_or(error);
+    if plain.starts_with("Cancelled.") {
+        return plain.to_string();
+    }
     if done == 0 && remaining == "0" {
         return plain.to_string();
     }
@@ -224,7 +234,7 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
             };
             reply("executed", body)
         }
-        Ok(Response::Failed { completed, failed, error, remaining }) => reply("failed", fail_text(completed.len(), &failed.to_string(), &error.to_string(), remaining.to_string())),
+        Ok(Response::Failed { completed, failed, error, remaining }) => reply(if error.to_string().contains("Cancelled.") { "message" } else { "failed" }, fail_text(completed.len(), &failed.to_string(), &error.to_string(), remaining.to_string())),
         _ => reply("error", "unexpected state".into()),
     }
 }

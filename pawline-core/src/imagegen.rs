@@ -176,6 +176,7 @@ pub fn generate(
     poll_every: Duration,
     give_up: Duration,
     cancelled: &dyn Fn() -> bool,
+    commit: &dyn Fn() -> bool,
 ) -> Result<PathBuf, PawError> {
     let prompt = clean_prompt(prompt)?;
     let stop = || PawError::Exec("Cancelled. Nothing was saved.".into());
@@ -186,7 +187,12 @@ pub fn generate(
                 return Err(stop());
             }
             match r.status {
-                200 => save(dir, provider, &r.body),
+                200 => {
+                    if !commit() {
+                        return Err(stop());
+                    }
+                    save(dir, provider, &r.body)
+                }
                 402 | 429 => Err(limit_failure(provider, &r)),
                 s => Err(PawError::Exec(format!("Pollinations answered HTTP {s}; nothing was made."))),
             }
@@ -236,7 +242,7 @@ pub fn generate(
                         if img.status != 200 {
                             return Err(PawError::Exec(format!("Could not download the finished image (HTTP {}).", img.status)));
                         }
-                        if cancelled() {
+                        if cancelled() || !commit() {
                             return Err(stop());
                         }
                         return save(dir, provider, &img.body);
@@ -256,6 +262,53 @@ pub fn generate(
         }
     }
 }
+
+/// One request per provider at a time, counted until the network thread really
+/// ends (an abandoned request still counts). Pollinations Classic also asks for
+/// at least 45 s between requests; asking sooner just earns a 402.
+pub struct Guard {
+    state: std::sync::Mutex<[(bool, Option<Instant>); 2]>,
+}
+pub struct Ticket<'a> {
+    guard: &'a Guard,
+    slot: usize,
+}
+impl std::fmt::Debug for Ticket<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Ticket({})", self.slot)
+    }
+}
+impl Drop for Ticket<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.guard.state.lock() {
+            s[self.slot].0 = false;
+        }
+    }
+}
+pub const POLLINATIONS_SPACING: Duration = Duration::from_secs(45);
+impl Guard {
+    pub const fn new() -> Self {
+        Guard { state: std::sync::Mutex::new([(false, None), (false, None)]) }
+    }
+    pub fn begin(&self, provider: ImageProvider, now: Instant) -> Result<Ticket<'_>, PawError> {
+        let slot = match provider { ImageProvider::Pollinations => 0, ImageProvider::Horde => 1 };
+        let mut s = self.state.lock().map_err(|_| PawError::Exec("internal lock problem".into()))?;
+        if s[slot].0 {
+            return Err(PawError::Exec(format!("An earlier {} request is still running (even if you cancelled it). I send one at a time. Try again in a moment; nothing was sent.", provider.label())));
+        }
+        if provider == ImageProvider::Pollinations {
+            if let Some(t) = s[slot].1 {
+                let since = now.saturating_duration_since(t);
+                if since < POLLINATIONS_SPACING {
+                    return Err(PawError::Exec(format!("Pollinations asks for about {} seconds between free requests. Try again in {} seconds; nothing was sent.", POLLINATIONS_SPACING.as_secs(), (POLLINATIONS_SPACING - since).as_secs() + 1)));
+                }
+            }
+        }
+        s[slot] = (true, Some(now));
+        Ok(Ticket { guard: self, slot })
+    }
+}
+pub static GUARD: Guard = Guard::new();
 
 #[cfg(test)]
 mod tests {
@@ -305,7 +358,7 @@ mod tests {
     fn pollinations_saves_png() {
         let d = tmp("p1");
         let h = fake(vec![rep(200, "image/png", PNG)]);
-        let p = generate(&h, ImageProvider::Pollinations, "a red kite", &d, D0, D0, &|| false).unwrap();
+        let p = generate(&h, ImageProvider::Pollinations, "a red kite", &d, D0, D0, &|| false, &|| true).unwrap();
         assert!(p.extension().unwrap() == "png" && std::fs::read(&p).unwrap() == PNG);
         assert!(h.seen.borrow()[0].starts_with("GET https://image.pollinations.ai/prompt/a%20red%20kite"));
     }
@@ -315,7 +368,7 @@ mod tests {
         let mut r = rep(402, "application/json", b"{}");
         r.retry_after = Some(45);
         let h = fake(vec![r]);
-        let e = generate(&h, ImageProvider::Pollinations, "x", &d, D0, D0, &|| false).unwrap_err().to_string();
+        let e = generate(&h, ImageProvider::Pollinations, "x", &d, D0, D0, &|| false, &|| true).unwrap_err().to_string();
         assert!(e.contains("45 seconds") && e.contains("never pay"), "{e}");
         assert_eq!(h.seen.borrow().len(), 1);
         assert!(!d.exists());
@@ -324,7 +377,7 @@ mod tests {
     fn non_image_body_is_refused() {
         let d = tmp("p3");
         let h = fake(vec![rep(200, "image/png", b"<html>nope</html>")]);
-        assert!(generate(&h, ImageProvider::Pollinations, "x", &d, D0, D0, &|| false).is_err());
+        assert!(generate(&h, ImageProvider::Pollinations, "x", &d, D0, D0, &|| false, &|| true).is_err());
         assert!(!d.exists());
     }
     #[test]
@@ -336,7 +389,7 @@ mod tests {
             rep(200, "application/json", br#"{"done":true,"generations":[{"img":"https://r2.example/x.webp"}]}"#),
             rep(200, "image/webp", b"RIFF\x00\x00\x00\x00WEBPxx"),
         ]);
-        let p = generate(&h, ImageProvider::Horde, "a lighthouse", &d, D0, Duration::from_secs(5), &|| false).unwrap();
+        let p = generate(&h, ImageProvider::Horde, "a lighthouse", &d, D0, Duration::from_secs(5), &|| false, &|| true).unwrap();
         assert!(p.extension().unwrap() == "webp");
         let seen = h.seen.borrow();
         assert!(seen[0].contains("key=0000000000") && seen[0].contains("\"prompt\":\"a lighthouse\"") && seen[0].contains("censor_nsfw"));
@@ -348,26 +401,26 @@ mod tests {
         let mut v = vec![rep(202, "application/json", br#"{"id":"q"}"#)];
         for _ in 0..200 { v.push(rep(200, "application/json", br#"{"done":false}"#)); }
         let h = fake(v);
-        let e = generate(&h, ImageProvider::Horde, "x", &d, Duration::from_millis(2), Duration::from_millis(20), &|| false).unwrap_err().to_string();
+        let e = generate(&h, ImageProvider::Horde, "x", &d, Duration::from_millis(2), Duration::from_millis(20), &|| false, &|| true).unwrap_err().to_string();
         assert!(e.contains("had not finished") && !d.exists(), "{e}");
     }
     #[test]
     fn horde_refuses_http_image_link_and_censored() {
         let d = tmp("h3");
         let h = fake(vec![rep(202, "", br#"{"id":"q"}"#), rep(200, "", br#"{"done":true,"generations":[{"img":"http://x/y.png"}]}"#)]);
-        assert!(generate(&h, ImageProvider::Horde, "x", &d, D0, Duration::from_secs(1), &|| false).unwrap_err().to_string().contains("non-https"));
+        assert!(generate(&h, ImageProvider::Horde, "x", &d, D0, Duration::from_secs(1), &|| false, &|| true).unwrap_err().to_string().contains("non-https"));
         let h = fake(vec![rep(202, "", br#"{"id":"q"}"#), rep(200, "", br#"{"done":true,"generations":[{"img":"https://x/y.png","censored":true}]}"#)]);
-        assert!(generate(&h, ImageProvider::Horde, "x", &d, D0, Duration::from_secs(1), &|| false).unwrap_err().to_string().contains("filtered"));
+        assert!(generate(&h, ImageProvider::Horde, "x", &d, D0, Duration::from_secs(1), &|| false, &|| true).unwrap_err().to_string().contains("filtered"));
     }
 
     #[test]
     fn cancel_discards_late_result_and_saves_nothing() {
         let d = tmp("c1");
         let h = fake(vec![rep(200, "image/png", PNG)]);
-        let e = generate(&h, ImageProvider::Pollinations, "x", &d, D0, D0, &|| true).unwrap_err().to_string();
+        let e = generate(&h, ImageProvider::Pollinations, "x", &d, D0, D0, &|| true, &|| true).unwrap_err().to_string();
         assert!(e.contains("Cancelled") && !d.exists(), "{e}");
         let h = fake(vec![rep(202, "", br#"{"id":"q"}"#)]);
-        let e = generate(&h, ImageProvider::Horde, "x", &d, D0, Duration::from_secs(1), &|| true).unwrap_err().to_string();
+        let e = generate(&h, ImageProvider::Horde, "x", &d, D0, Duration::from_secs(1), &|| true, &|| true).unwrap_err().to_string();
         assert!(e.contains("Cancelled") && !d.exists());
     }
     #[test]
@@ -376,13 +429,38 @@ mod tests {
         assert!(e.contains("450") && e.contains("won't cut it"), "{e}");
     }
 
+    #[test]
+    fn guard_one_inflight_and_spacing_even_after_abandon() {
+        let g = Guard::new();
+        let t0 = Instant::now();
+        let t = g.begin(ImageProvider::Pollinations, t0).unwrap();
+        // abandoned by the UI but the thread still runs: a new request is refused
+        assert!(g.begin(ImageProvider::Pollinations, t0).unwrap_err().to_string().contains("still running"));
+        // the other provider is independent
+        let h = g.begin(ImageProvider::Horde, t0).unwrap();
+        drop(t);
+        // thread ended, but spacing still applies
+        let e = g.begin(ImageProvider::Pollinations, t0 + Duration::from_secs(10)).unwrap_err().to_string();
+        assert!(e.contains("36 seconds"), "{e}");
+        assert!(g.begin(ImageProvider::Pollinations, t0 + Duration::from_secs(46)).is_ok());
+        drop(h);
+        assert!(g.begin(ImageProvider::Horde, t0).is_ok());
+    }
+    #[test]
+    fn commit_denied_means_no_file_even_with_a_good_answer() {
+        let d = tmp("c2");
+        let h = fake(vec![rep(200, "image/png", PNG)]);
+        let e = generate(&h, ImageProvider::Pollinations, "x", &d, D0, D0, &|| false, &|| false).unwrap_err().to_string();
+        assert!(e.contains("Cancelled") && !d.exists(), "{e}");
+    }
+
     /// Live smoke, run by hand only: cargo test -p pawline-core live_ -- --ignored --nocapture
     #[test]
     #[ignore]
     fn live_pollinations() {
         let d = tmp("live-p");
         let h = UreqHttp::new(Duration::from_secs(90));
-        let p = generate(&h, ImageProvider::Pollinations, "a small red kite over a green hill", &d, D0, D0, &|| false);
+        let p = generate(&h, ImageProvider::Pollinations, "a small red kite over a green hill", &d, D0, D0, &|| false, &|| true);
         println!("RESULT {:?} {:?}", p, p.as_ref().ok().map(|p| std::fs::metadata(p).map(|m| m.len())));
     }
     #[test]
@@ -390,7 +468,7 @@ mod tests {
     fn live_horde() {
         let d = tmp("live-h");
         let h = UreqHttp::new(Duration::from_secs(90));
-        let p = generate(&h, ImageProvider::Horde, "a small red kite over a green hill", &d, Duration::from_secs(4), Duration::from_secs(100), &|| false);
+        let p = generate(&h, ImageProvider::Horde, "a small red kite over a green hill", &d, Duration::from_secs(4), Duration::from_secs(100), &|| false, &|| true);
         println!("RESULT {:?} {:?}", p, p.as_ref().ok().map(|p| std::fs::metadata(p).map(|m| m.len())));
     }
 }
