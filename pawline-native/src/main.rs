@@ -158,7 +158,7 @@ fn line_of(lines: &[(usize, usize)], caret: usize) -> usize {
 
 /// Lines that carry a path are laid out strictly left to right with every path part in written order.
 fn line_mode(l: &str) -> shape::Mode {
-    if l.contains("~/") || l.starts_with('/') || l.contains(" /home/") || l.contains(":/") {
+    if l.contains("~/") || l.starts_with('/') || l.contains(" /") || l.contains(":/") {
         shape::Mode::Strict
     } else {
         shape::Mode::Auto
