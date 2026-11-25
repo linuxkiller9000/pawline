@@ -16,7 +16,9 @@ Both are used under the terms of the Apache License, Version 2.0
 
 pawline-native (0.2.0-beta) statically links LLVM libc++, libc++abi and libunwind
 (Apache License 2.0 with LLVM Exceptions, https://llvm.org/LICENSE.txt) and embeds
-the Liberation Sans font (SIL Open Font License 1.1, https://openfontlicense.org/).
+the Liberation Sans 2.1.5 font (SIL Open Font License 1.1, https://openfontlicense.org/).
+Correction: builds before this change (including v0.2.1-beta) embedded Liberation Sans 1.07.4, which is
+licensed under the GNU GPL v.2 with Red Hat font exceptions, not the OFL.
 Rust dependencies: smithay-client-toolkit (MIT), tiny-skia (BSD-3-Clause), fontdue (MIT/Apache-2.0).
 
 Design reference (no code or assets copied)
