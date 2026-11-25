@@ -115,7 +115,7 @@ fn walk_dir(sc: &Scope, stop: &AtomicBool, start: Instant, visit: &mut dyn FnMut
     }
     let in_repo = is_repo || !inherited.is_empty();
     for (name, ft) in entries {
-        if stop.load(Ordering::SeqCst) || start.elapsed() > sc.limit {
+        if stop.load(Ordering::SeqCst) || start.elapsed() >= sc.limit {
             return End::Cut;
         }
         if name.to_string_lossy().starts_with('.') || ft.is_symlink() {
@@ -173,8 +173,8 @@ fn run(sc: &Scope, work: impl FnOnce(&Scope, &AtomicBool, &Mutex<Found>) + Send 
     {
         let (sc, stop, out) = (sc.clone(), stop.clone(), out.clone());
         std::thread::spawn(move || {
-            let _slot = slot;
             work(&sc, &stop, &out);
+            drop(slot); // released before the caller is told, so a finished search never blocks the next one
             let _ = tx.send(());
         });
     }
@@ -325,6 +325,12 @@ pub fn parse(input: &str) -> Option<(bool, String)> {
 mod tests {
     use super::*;
     static LOCK: Mutex<()> = Mutex::new(());
+    /// Tests use a generous budget so a loaded machine cannot make them time out; timeouts have their own test.
+    fn test_scope(r: &Path, ex: Vec<PathBuf>) -> Scope {
+        let mut sc = Scope::new(r, ex).unwrap();
+        sc.limit = Duration::from_secs(60);
+        sc
+    }
     fn tmp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("pawline-find-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -343,7 +349,7 @@ mod tests {
         std::fs::write(r.join(".gitignore"), "ignored.txt\n").unwrap();
         std::fs::write(r.join("ignored.txt"), "Needle").unwrap();
         std::fs::write(r.join("big.txt"), "Needle ".repeat(400_000)).unwrap();
-        let sc = Scope::new(&r, vec![]).unwrap();
+        let sc = test_scope(&r, vec![]);
         let f = find_names(&sc, &["models".into()]);
         assert_eq!(f.hits.len(), 1);
         assert!(f.hits[0].1);
@@ -369,7 +375,7 @@ mod tests {
         std::fs::create_dir_all(r.join("pawdata")).unwrap();
         std::fs::write(r.join("pawdata/mem.json"), "Needle private").unwrap();
         std::fs::write(r.join("ok.txt"), "Needle ok").unwrap();
-        let sc = Scope::new(&r, vec![r.join("pawdata")]).unwrap();
+        let sc = test_scope(&r, vec![r.join("pawdata")]);
         let t = find_text(&sc, "needle");
         let names: Vec<String> = t.hits.iter().map(|h| h.0.file_name().unwrap().to_string_lossy().to_string()).collect();
         assert_eq!(names, vec!["ok.txt"], "{names:?}");
@@ -390,14 +396,15 @@ mod tests {
         let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
         std::fs::write(r.join("a.txt"), "Needle").unwrap();
-        let sc = Scope::new(&r, vec![]).unwrap();
+        let sc = test_scope(&r, vec![]);
         let t0 = Instant::now();
         let t = find_text(&sc, "needle");
         assert!(t0.elapsed() < Duration::from_secs(1) && t.hits.len() == 1, "pipe skipped, others searched");
         let mut zero = sc.clone();
         zero.limit = Duration::from_secs(0);
         let f = find_names(&zero, &["a".into()]);
-        assert!(f.timed_out || f.hits.len() == 1);
+        assert!(f.timed_out && f.hits.is_empty(), "a zero budget stops at once and says it is incomplete");
+        assert!(render("fd", "a", &r, &f).contains("incomplete"));
     }
 
     #[test]
@@ -414,7 +421,7 @@ mod tests {
         std::fs::create_dir_all(r.join("plain/build")).unwrap();
         std::fs::write(r.join("plain/.gitignore"), "build/\n").unwrap();
         std::fs::write(r.join("plain/build/p.txt"), "Needle").unwrap();
-        let sc = Scope::new(&r, vec![]).unwrap();
+        let sc = test_scope(&r, vec![]);
         let mut names: Vec<String> = find_text(&sc, "needle").hits.iter().map(|h| h.0.strip_prefix(&r).unwrap().display().to_string()).collect();
         names.sort();
         assert_eq!(names, vec!["plain/build/p.txt", "repo/src/a.txt"]);
@@ -424,7 +431,7 @@ mod tests {
     fn overload_is_refused_not_queued() {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let r = tmp("d");
-        let sc = Scope::new(&r, vec![]).unwrap();
+        let sc = test_scope(&r, vec![]);
         ACTIVE.fetch_add(MAX_WORKERS, Ordering::SeqCst); // pretend two searches are stuck
         let f = find_names(&sc, &["a".into()]);
         ACTIVE.fetch_sub(MAX_WORKERS, Ordering::SeqCst);
