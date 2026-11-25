@@ -1,9 +1,16 @@
 # Pawline
 
 An offline-first desktop assistant for Linux, written in Rust with Tauri.
-A small language model (Needle3) is compiled into the binary along with its
-runtime, so the assistant works with no network, no model files to manage,
-and no accounts.
+
+**Status: early development, not a release.**
+
+**AI status (read this):** Pawline currently loads the Needle3 model weights
+(`needle3.cact`, compiled into the binary) and runs them through the prebuilt
+Cactus inference runtime (`libcactus.a`, statically linked). That means the
+inference code is Cactus's, not Pawline's. The goal is to run Needle with
+inference code written inside Pawline's own Rust codebase, with no separate
+engine. That native port is not done yet. Until it is, this repository does
+not meet that goal.
 
 Target machine: a Dell Inspiron N5010 (i3-M 370, 6 GB RAM) running Arch Linux
 with niri (Wayland). KDE Plasma support is planned alongside niri.
