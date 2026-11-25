@@ -86,6 +86,7 @@ const PAD: f32 = 14.0;
 const CHAT_TOP: f32 = 64.0;
 const BOTTOM: f32 = 64.0;
 const MAX_IN_LINES: usize = 4;
+const REPLY_H: f32 = 22.0;
 const THUMB_W: u32 = 220;
 const THUMB_H: u32 = 150;
 
@@ -168,6 +169,8 @@ struct Msg {
     kind: String,
     text: String,
     thumb: Option<Pixmap>,
+    /// Short preview of the message this one replied to. Local only: never sent to the model or online.
+    quote: Option<String>,
 }
 
 enum Surf {
@@ -235,6 +238,8 @@ struct App {
     dragging: bool,
     bubbles: Vec<((f32, f32, f32, f32), String)>,
     toast: Option<&'static str>,
+    /// Message being replied to: (full text without the Took line, short preview). Local only.
+    reply: Option<(String, String)>,
     /// Max plan_scroll for the current plan panel, set by draw.
     plan_max: f32,
     chat_max: f32,
@@ -448,6 +453,13 @@ impl App {
             let bh = 40.0 + self.input_extra;
             let top = h - 12.0 - bh;
             self.input_box_top = top;
+            if let Some((_, prev)) = &self.reply {
+                let sy = top - REPLY_H;
+                fill(pm, &rrect(PAD - 2.0, sy, w - 2.0 * PAD + 4.0, REPLY_H + 6.0, 8.0), (40, 36, 60, 255));
+                fill(pm, &rrect(PAD + 4.0, sy + 4.0, 3.0, 14.0, 1.5), (34, 211, 238, 255));
+                let label = format!("Reply (local, not sent): {prev}   [x]");
+                self.text(pm, &label, PAD + 12.0, sy + 16.0, 12.0, (200, 195, 225), (0.0, h));
+            }
             fill(pm, &rrect(PAD - 2.0, top, w - 2.0 * PAD + 4.0, bh, 12.0), (52, 48, 70, 255));
             let col = if self.busy { (150, 145, 165) } else { (255, 255, 255) };
             let sel = self.input.sel();
@@ -483,22 +495,22 @@ impl App {
         let hint_top = self.chat_max > 0.0 && self.scroll < self.chat_max - 1.0;
         let hint_bot = self.scroll > 1.0;
         let top0 = CHAT_TOP;
-        let bot0 = h - BOTTOM - self.input_extra + 4.0;
+        let bot0 = h - BOTTOM - self.input_extra + 4.0 - if self.reply.is_some() { REPLY_H } else { 0.0 };
         let top = top0 + if hint_top { 20.0 } else { 0.0 };
         let bot = bot0 - if hint_bot { 20.0 } else { 0.0 };
         // layout all messages
         let bub_w = inner_w - 40.0;
-        let mut items: Vec<(bool, String, Vec<String>, f32, Option<Pixmap>)> = Vec::new();
+        let mut items: Vec<(bool, String, Vec<String>, f32, Option<Pixmap>, Option<String>)> = Vec::new();
         let mut texts: Vec<String> = Vec::new();
         self.bubbles.clear();
         let mut total = 0.0;
-        let msgs: Vec<(bool, String, String, Option<Pixmap>)> = self.msgs.iter().map(|m| (m.user, m.kind.clone(), m.text.clone(), m.thumb.clone())).collect();
-        for (user, kind, text, thumb) in msgs {
+        let msgs: Vec<(bool, String, String, Option<Pixmap>, Option<String>)> = self.msgs.iter().map(|m| (m.user, m.kind.clone(), m.text.clone(), m.thumb.clone(), m.quote.clone())).collect();
+        for (user, kind, text, thumb, quote) in msgs {
             let lines = self.wrap(&text, PX, bub_w - 20.0);
-            let bh = lines.len() as f32 * LH + 14.0 + thumb.as_ref().map_or(0.0, |t| t.height() as f32 + 6.0);
+            let bh = lines.len() as f32 * LH + 14.0 + quote.as_ref().map_or(0.0, |_| 18.0) + thumb.as_ref().map_or(0.0, |t| t.height() as f32 + 6.0);
             total += bh + 8.0;
             texts.push(text.clone());
-            items.push((user, kind, lines, bh, thumb));
+            items.push((user, kind, lines, bh, thumb, quote));
         }
         let view = bot - top;
         self.chat_max = (total - view).max(0.0);
@@ -508,8 +520,8 @@ impl App {
         // y of content start so that the bottom aligns with `bot` + scroll
         let mut cp = Pixmap::new(w as u32, view as u32).unwrap();
         let mut y = view - total + self.scroll;
-        for (idx, (user, kind, lines, bh, thumb)) in items.into_iter().enumerate() {
-            let bw = lines.iter().map(|l| l.chars().map(|c| self.adv(c, PX)).sum::<f32>()).fold(0.0, f32::max).max(thumb.as_ref().map_or(0.0, |t| t.width() as f32)) + 20.0;
+        for (idx, (user, kind, lines, bh, thumb, quote)) in items.into_iter().enumerate() {
+            let bw = lines.iter().map(|l| l.chars().map(|c| self.adv(c, PX)).sum::<f32>()).fold(0.0, f32::max).max(quote.as_ref().map_or(0.0, |q| (q.chars().map(|c| self.adv(c, 12.0)).sum::<f32>() + 8.0).min(bub_w - 20.0))).max(thumb.as_ref().map_or(0.0, |t| t.width() as f32)) + 20.0;
             let bx = if user { w - PAD - bw } else { PAD };
             if y + bh > 0.0 && y < view {
                 self.bubbles.push(((bx, top + y.max(0.0), bw, (bh).min(view - y.max(0.0)).min(y + bh)), texts[idx].clone()));
@@ -521,11 +533,16 @@ impl App {
                     (46, 42, 64, 255)
                 };
                 fill(&mut cp, &rrect(bx, y, bw, bh, 12.0), col);
+                let qh = quote.as_ref().map_or(0.0, |_| 18.0);
+                if let Some(q) = &quote {
+                    fill(&mut cp, &rrect(bx + 8.0, y + 7.0, 3.0, 14.0, 1.5), (34, 211, 238, 255));
+                    self.text(&mut cp, q, bx + 16.0, y + 18.0, 12.0, (170, 165, 195), (0.0, view));
+                }
                 for (i, l) in lines.iter().enumerate() {
-                    self.text(&mut cp, l, bx + 10.0, y + 7.0 + (i as f32 + 1.0) * LH - 5.0, PX, (235, 232, 245), (0.0, view));
+                    self.text(&mut cp, l, bx + 10.0, y + qh + 7.0 + (i as f32 + 1.0) * LH - 5.0, PX, (235, 232, 245), (0.0, view));
                 }
                 if let Some(t) = &thumb {
-                    let ty = y + 7.0 + lines.len() as f32 * LH + 2.0;
+                    let ty = y + qh + 7.0 + lines.len() as f32 * LH + 2.0;
                     cp.draw_pixmap((bx + 10.0) as i32, ty as i32, t.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
                 }
             }
@@ -600,9 +617,9 @@ impl App {
         self.draw();
     }
 
-    fn push(&mut self, user: bool, kind: &str, text: String) {
+    fn push(&mut self, user: bool, kind: &str, text: String, quote: Option<String>) {
         let thumb = if user { None } else { saved_picture(&text).and_then(|p| thumb::load(&p, THUMB_W, THUMB_H)) };
-        self.msgs.push(Msg { user, kind: kind.into(), text, thumb });
+        self.msgs.push(Msg { user, kind: kind.into(), text, thumb, quote });
         self.scroll = 0.0;
     }
 
@@ -655,9 +672,32 @@ impl App {
             return;
         }
         self.input.clear();
-        self.push(true, "user", t.clone());
+        let rep = self.reply.take();
+        let quote = rep.as_ref().map(|r| r.1.clone());
+        // Local follow-up that really uses the reply: "copy" copies the quoted message. Nothing is sent anywhere.
+        if let Some((full, _)) = &rep {
+            if matches!(t.to_lowercase().trim_end_matches(['.', '!']), "copy" | "copy this" | "copy that" | "copy it") {
+                self.push(true, "user", t.clone(), quote);
+                let ok = self.clip_copy(full.clone());
+                self.push(false, "message", if ok { "Copied that message.".into() } else { "No clipboard here, nothing copied.".into() }, None);
+                self.draw();
+                return;
+            }
+        }
+        self.push(true, "user", t.clone(), quote);
         self.busy = true;
         let _ = self.tx.send(Req::Text(t));
+    }
+
+    fn set_reply(&mut self, text: &str) {
+        let full = strip_took(text);
+        let one: String = full.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut prev: String = one.chars().take(60).collect();
+        if one.chars().count() > 60 {
+            prev.push_str("...");
+        }
+        self.reply = Some((full, prev));
+        self.draw();
     }
 
     fn decide(&mut self, yes: bool) {
@@ -675,7 +715,7 @@ impl App {
 
     fn on_reply(&mut self, r: UiReply) {
         self.busy = false;
-        self.push(false, &r.kind, r.text.clone());
+        self.push(false, &r.kind, r.text.clone(), None);
         if r.kind == "confirm" {
             self.confirm = Some(r.text);
             self.focus = Btn::No; // Cancel is focused by default
@@ -719,6 +759,15 @@ impl App {
             return;
         }
         match e.keysym {
+            Keysym::r | Keysym::R if self.ctrl && !self.busy => {
+                if let Some(t) = self.msgs.last().map(|m| m.text.clone()) {
+                    self.set_reply(&t);
+                }
+            }
+            Keysym::Escape if self.reply.is_some() && !self.busy && self.menu_rows().is_empty() => {
+                self.reply = None;
+                self.draw();
+            }
             Keysym::Escape if self.busy => {
                 bridge::request_cancel();
             }
@@ -840,6 +889,16 @@ impl App {
         ls + pick_in_line(&widths, target)
     }
 
+    fn right_click(&mut self) {
+        if !self.expanded || self.confirm.is_some() || self.busy {
+            return;
+        }
+        let pos = self.ptr_pos;
+        if let Some(t) = self.bubbles.iter().find(|(r, _)| inside(*r, pos)).map(|(_, t)| t.clone()) {
+            self.set_reply(&t);
+        }
+    }
+
     fn click(&mut self) {
         if !self.expanded {
             self.set_expanded(true);
@@ -857,6 +916,11 @@ impl App {
                 self.input.set_caret(i, self.shift);
                 self.dragging = true;
                 self.toast = None;
+                self.draw();
+                return;
+            }
+            if self.reply.is_some() && inside((PAD - 2.0, self.input_box_top - REPLY_H, w - 2.0 * PAD + 4.0, REPLY_H), self.ptr_pos) {
+                self.reply = None;
                 self.draw();
                 return;
             }
@@ -973,6 +1037,7 @@ impl PointerHandler for App {
         for e in evs {
             self.ptr_pos = e.position;
             match e.kind {
+                PointerEventKind::Press { button: 273, .. } => self.right_click(),
                 PointerEventKind::Press { .. } => self.click(),
                 PointerEventKind::Release { .. } => self.dragging = false,
                 PointerEventKind::Motion { .. } if self.dragging => {
@@ -1271,7 +1336,8 @@ fn main() {
         dragging: false,
         bubbles: Vec::new(),
         toast: None,
-        msgs: vec![Msg { user: false, kind: "message".into(), text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it.".into(), thumb: None }],
+        reply: None,
+        msgs: vec![Msg { user: false, kind: "message".into(), text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it. Right-click a message (or Ctrl+R) to reply to it.".into(), thumb: None, quote: None }],
         confirm: None,
         focus: Btn::No,
         scroll: 0.0,
