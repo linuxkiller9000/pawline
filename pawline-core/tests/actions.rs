@@ -118,3 +118,69 @@ fn no_overwrite_and_store_is_private() {
     assert_eq!(m, 0o600);
     assert_eq!(actions::parse_meta("list saved actions"), Some(Meta::List));
 }
+
+#[test]
+fn copy_template_revalidates_paths_not_content() {
+    // A saved copy is a fixed template: same source PATH and destination PATH.
+    // If the source file's content changed since saving, the steps are the
+    // same and the run is allowed (after confirmation); it copies what is
+    // there now. If the source is gone or the target exists, validation fails.
+    let root = sandbox("copy");
+    std::fs::write(root.join("src.txt"), "v1").unwrap();
+    std::fs::create_dir(root.join("bak")).unwrap();
+    let mut e = Engine::new(root.clone());
+    let r = run(&mut e, &root, &format!("copy {}/src.txt to {}/bak", root.display(), root.display()));
+    assert!(matches!(r, Response::Executed(_)), "copy should run");
+    save(&e, &root, "cp").unwrap();
+    let saved = load(&root).remove(0);
+    std::fs::remove_file(root.join("bak/src.txt")).unwrap();
+    std::fs::write(root.join("src.txt"), "v2 changed since save").unwrap();
+    let plan = Engine::new(root.clone()).plan_saved(&saved).unwrap();
+    assert!(plan.needs_confirmation);
+    let b = DirectFsBackend::new(&root).unwrap();
+    Engine::new(root.clone()).execute_plan(plan, &b).unwrap();
+    assert_eq!(std::fs::read_to_string(root.join("bak/src.txt")).unwrap(), "v2 changed since save");
+    // source removed: refused by validation, nothing changes
+    std::fs::remove_file(root.join("bak/src.txt")).unwrap();
+    std::fs::remove_file(root.join("src.txt")).unwrap();
+    assert!(Engine::new(root.clone()).plan_saved(&saved).is_err());
+    // source replaced by a symlink pointing outside the root: refused
+    let outside = sandbox("copy-out");
+    std::fs::write(outside.join("secret"), "x").unwrap();
+    std::os::unix::fs::symlink(outside.join("secret"), root.join("src.txt")).unwrap();
+    assert!(Engine::new(root.clone()).plan_saved(&saved).is_err());
+    assert!(!root.join("bak/src.txt").exists());
+}
+
+#[test]
+fn symlinked_store_cannot_escape_the_root() {
+    use std::os::unix::fs::symlink;
+    let root = sandbox("lnk");
+    let outside = sandbox("lnk-out");
+    let b = DirectFsBackend::new(&root).unwrap();
+    let mut e = Engine::new(root.clone());
+    run(&mut e, &root, "make a folder called s1");
+    save(&e, &root, "first").unwrap();
+    // 1. actions.tsv replaced by a symlink to an outside file: not read, not written through
+    std::fs::write(outside.join("evil.tsv"), "evil\tmake a folder called evil\tCreate folder /x\n").unwrap();
+    std::fs::remove_file(root.join(actions::ACTIONS)).unwrap();
+    symlink(outside.join("evil.tsv"), root.join(actions::ACTIONS)).unwrap();
+    assert!(b.read_store_text(actions::ACTIONS).is_err() || b.read_store_text(actions::ACTIONS).unwrap().is_empty());
+    let before = std::fs::read_to_string(outside.join("evil.tsv")).unwrap();
+    let _ = b.write_store_text(actions::ACTIONS, "rewritten\n");
+    assert_eq!(std::fs::read_to_string(outside.join("evil.tsv")).unwrap(), before, "outside file untouched");
+    // 2. a pre-planted symlink at the temp name is replaced, not followed
+    std::fs::remove_file(root.join(actions::ACTIONS)).ok();
+    let tmp = format!("{}.tmp", actions::ACTIONS);
+    symlink(outside.join("tmp-target"), root.join(&tmp)).unwrap();
+    b.write_store_text(actions::ACTIONS, "ok\tmake a folder called a\tCreate folder /a\n").unwrap();
+    assert!(!outside.join("tmp-target").exists(), "temp symlink was not followed");
+    // 3. the store directory itself replaced by a symlink to outside
+    let root2 = sandbox("lnk2");
+    std::fs::create_dir_all(root2.join(".local/share")).unwrap();
+    std::fs::create_dir_all(outside.join("pl")).unwrap();
+    symlink(outside.join("pl"), root2.join(".local/share/pawline")).unwrap();
+    let b2 = DirectFsBackend::new(&root2).unwrap();
+    let _ = b2.write_store_text(actions::ACTIONS, "x\ty\tz\n");
+    assert!(!outside.join("pl/actions.tsv").exists(), "store symlink was not followed out of the root");
+}

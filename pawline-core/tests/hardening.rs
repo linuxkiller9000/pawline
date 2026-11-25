@@ -158,3 +158,90 @@ fn symlink_swap_between_plan_and_execute_is_confined() {
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&outside);
 }
+
+mod case_sensitivity {
+    use pawline_core::exec::DirectFsBackend;
+    use pawline_core::plan::Operation;
+    use pawline_core::{Engine, Response};
+
+    fn sandbox(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("pawline-case-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+    fn plan_paths(e: &Engine, cmd: &str) -> Result<Vec<Operation>, String> {
+        e.plan(cmd).map(|p| p.ops).map_err(|x| x.to_string())
+    }
+
+    #[test]
+    fn both_case_variants_coexist_and_the_exact_one_is_chosen() {
+        let root = sandbox("both");
+        std::fs::create_dir(root.join("Pets")).unwrap();
+        std::fs::create_dir(root.join("pets")).unwrap();
+        let e = Engine::new(root.clone());
+        let ops = plan_paths(&e, "delete Pets").unwrap();
+        assert_eq!(ops, vec![Operation::Delete { path: root.join("Pets").canonicalize().unwrap() }]);
+        let ops = plan_paths(&e, "delete pets").unwrap();
+        assert_eq!(ops, vec![Operation::Delete { path: root.join("pets").canonicalize().unwrap() }]);
+        // and the confirmation names the exact path
+        let p = e.plan("delete Pets").unwrap();
+        assert!(p.needs_confirmation);
+        assert!(p.summary().contains("/Pets"), "{}", p.summary());
+        assert!(!p.summary().contains("/pets"), "{}", p.summary());
+    }
+
+    #[test]
+    fn no_silent_nearest_match_and_a_hint_is_given() {
+        let root = sandbox("near");
+        std::fs::create_dir(root.join("Pets")).unwrap();
+        let e = Engine::new(root.clone());
+        let err = plan_paths(&e, "delete pets").unwrap_err();
+        assert!(err.contains("case-sensitive") && err.contains("Pets"), "{err}");
+        let err = plan_paths(&e, "copy PETS to Documents").unwrap_err();
+        assert!(err.contains("PETS"), "{err}");
+        for cmd in ["delete pets", "rename pets to x", "move pets to Documents"] {
+            assert!(e.plan(cmd).is_err(), "{cmd} must not touch Pets");
+        }
+    }
+
+    #[test]
+    fn non_ascii_input_never_panics() {
+        let root = sandbox("uni");
+        let e = Engine::new(root);
+        for cmd in ["make a folder called \u{c9}COLE and then make a folder called \u{e4}\u{f6}", "delete \u{c9}COLE", "copy \u{df}x to \u{fc}y", "rename \u{130}stanbul to X"] {
+            let _ = e.plan(cmd); // refusing is fine; panicking is not
+        }
+    }
+
+    #[test]
+    fn explicit_paths_and_created_names_keep_case_and_spaces() {
+        let root = sandbox("explicit");
+        let mut e = Engine::new(root.clone());
+        let b = DirectFsBackend::new(&root).unwrap();
+        for cmd in [
+            "make a folder called Kitten Paws",
+            "make a folder called \"My Pets\"",
+            "make a folder called \u{c9}COLE",
+            "create a file called Notes.MD",
+        ] {
+            assert!(matches!(e.handle(cmd, &b, false).unwrap(), Response::Executed(_)), "{cmd}");
+        }
+        let mut names: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|d| d.file_name().to_string_lossy().to_string())
+            .filter(|n| !n.starts_with('.'))
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["Kitten Paws", "My Pets", "Notes.MD", "\u{c9}COLE"]);
+        let ops = plan_paths(&e, &format!("copy {}/Notes.MD to {}/Kitten Paws", root.display(), root.display())).unwrap();
+        match &ops[0] {
+            Operation::Copy { from, to } => {
+                assert!(from.ends_with("Notes.MD"), "{from:?}");
+                assert!(to.ends_with("Kitten Paws/Notes.MD"), "{to:?}");
+            }
+            o => panic!("{o:?}"),
+        }
+    }
+}

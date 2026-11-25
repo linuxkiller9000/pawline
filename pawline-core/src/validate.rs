@@ -137,7 +137,21 @@ impl Validator {
                 } else {
                     None
                 }
-            }).ok_or_else(|| PawError::UnknownReference(name.clone()))?,
+            }).ok_or_else(|| {
+                // Names are case-sensitive and never matched loosely. If a
+                // differently-cased entry exists, say so instead of using it.
+                let other = std::fs::read_dir(&self.root).ok().and_then(|rd| {
+                    rd.flatten()
+                        .map(|e| e.file_name().to_string_lossy().to_string())
+                        .find(|n| n != name && n.to_lowercase() == name.to_lowercase())
+                });
+                match other {
+                    Some(o) => PawError::UnknownReference(format!(
+                        "{name}\" (names are case-sensitive; there is a different item called \"{o}\", say its exact name if you mean that one"
+                    )),
+                    None => PawError::UnknownReference(name.clone()),
+                }
+            })?,
             // Bare creates land at the root: predictable beats clever here.
             // Context-driven placement happens through "inside it"/names instead.
             LocationRef::CurrentDir => self.root.clone(),
@@ -166,6 +180,19 @@ impl Validator {
         crate::journal::last_open_of(&text, "wallpaper").is_some()
             || crate::journal::last_open_of(&text, "wallpaper_base").is_some()
             || crate::wallpaper::current_swaybg_image().is_some()
+    }
+
+    /// A rename, move or copy needs something to act on: it must exist on
+    /// disk now (a dangling symlink does not count) or be made earlier in the
+    /// same plan. Checked at planning time so a stale plan is refused before
+    /// the confirmation card, not after.
+    fn require_source(&self, from: &Path, will_exist: &HashSet<PathBuf>) -> Result<(), PawError> {
+        let on_disk = from.exists();
+        if on_disk || will_exist.contains(from) {
+            Ok(())
+        } else {
+            Err(PawError::Validation(format!("{} doesn't exist", from.display())))
+        }
     }
 
     pub fn build_plan(
@@ -238,6 +265,7 @@ impl Validator {
                 }
                 Directive::Rename { target, new_name } => {
                     let from = self.resolve_location(target, &sim)?;
+                    self.require_source(&from, &will_exist)?;
                     if new_name.contains('/') || new_name.is_empty() {
                         return Err(PawError::UnsafePath("a new name is a name, not a path".into()));
                     }
@@ -253,6 +281,7 @@ impl Validator {
                 Directive::Move { target, dest } | Directive::Copy { target, dest } => {
                     let from = self.resolve_location(target, &sim)?;
                     let dest_dir = self.resolve_location(dest, &sim)?;
+                    self.require_source(&from, &will_exist)?;
                     let name = from
                         .file_name()
                         .ok_or_else(|| PawError::Validation("can't move the root".into()))?;

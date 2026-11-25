@@ -78,7 +78,7 @@ fn parse_sentence(s: &str, out: &mut Vec<Directive>) -> Result<(), PawError> {
     // "inside <ref>, <command>" / "in <ref> <command>" prefixes re-target the clause.
     let mut base: Option<LocationRef> = None;
     loop {
-        let lower = rest.to_lowercase();
+        let lower = rest.to_ascii_lowercase();
         let stripped = lower.strip_prefix("inside ").or_else(|| lower.strip_prefix("in "));
         let Some(after) = stripped else { break };
         // find where the location words end: a comma, or the next command verb.
@@ -132,8 +132,13 @@ fn split_clauses(s: &str) -> Vec<&str> {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
+        // Names may hold non-ASCII letters: never slice inside a character.
+        if !s.is_char_boundary(i) {
+            i += 1;
+            continue;
+        }
         for sep in [" then ", " and then ", " and "] {
-            if s[i..].to_lowercase().starts_with(sep) {
+            if s[i..].to_ascii_lowercase().starts_with(sep) {
                 let after = &s[i + sep.len()..];
                 let next_word = after.split_whitespace().next().unwrap_or("").to_lowercase();
                 if is_verb(&next_word) {
@@ -164,7 +169,9 @@ fn split_clauses(s: &str) -> Vec<&str> {
 }
 
 fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawError> {
-    let lower = cmd.to_lowercase();
+    // ASCII lowercase keeps byte offsets identical to `cmd`, so slices of
+    // `lower` can be mapped back to the user's exact letters.
+    let lower = cmd.to_ascii_lowercase();
     for (pre, engine) in [
         ("search the web for ", crate::plan::SearchEngine::Web),
         ("search online for ", crate::plan::SearchEngine::Web),
@@ -192,7 +199,7 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
     if let Some(d) = parse_wallpaper(cmd) {
         return d;
     }
-    let lower = cmd.to_lowercase();
+    let lower = cmd.to_ascii_lowercase();
     let first = lower.split_whitespace().next().unwrap_or("");
 
     if CREATE_VERBS.contains(&first) || lower.starts_with("create ") || lower.starts_with("make ") {
@@ -215,7 +222,7 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
             .trim_start_matches("named ")
             .trim();
         return Ok(Directive::Delete {
-            target: name_to_location(target_words),
+            target: place_ref(original_case(cmd, &lower, target_words)),
         });
     }
     if first == "rename" {
@@ -225,7 +232,7 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
             .split_once(" to ")
             .ok_or_else(|| PawError::Parse("rename needs \"... to <new name>\"".into()))?;
         return Ok(Directive::Rename {
-            target: name_to_location(&t.to_lowercase()),
+            target: place_ref(t),
             new_name: n.trim().to_string(),
         });
     }
@@ -234,8 +241,8 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
         let (t, d) = body
             .split_once(" to ")
             .ok_or_else(|| PawError::Parse(format!("{first} needs \"... to <place>\"")))?;
-        let target = name_to_location(&t.to_lowercase());
-        let dest = parse_location(d).unwrap_or_else(|| name_to_location(&d.to_lowercase()));
+        let target = place_ref(t);
+        let dest = parse_location(d).unwrap_or_else(|| place_ref(d));
         return Ok(if first == "move" {
             Directive::Move { target, dest }
         } else {
@@ -255,7 +262,8 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
             LocationRef::CurrentDir
         } else {
             let b = body.trim_start_matches("me ").trim_start_matches("the contents of ").trim();
-            parse_location(b).unwrap_or_else(|| name_to_location(b))
+            let b = original_case(cmd, &lower, b);
+            parse_location(b).unwrap_or_else(|| place_ref(b))
         };
         return Ok(Directive::List { target });
     }
@@ -266,16 +274,17 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
 
 /// Parse a create clause: "<verb> [a] [kind] [in <loc>] called|named <names>"
 fn parse_create(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawError> {
-    let (names_part, before_names) = match cmd.to_lowercase().split_once(" called ") {
-        Some((b, n)) => (n.to_string(), b.to_string()),
-        None => match cmd.to_lowercase().split_once(" named ") {
-            Some((b, n)) => (n.to_string(), b.to_string()),
-            None => {
-                return Err(PawError::Parse(
-                    "tell me what to call it, e.g. \"make a folder called kitten paws\"".into(),
-                ))
-            }
-        },
+    let lc = cmd.to_ascii_lowercase();
+    // Split on the keyword found case-insensitively, but keep the user's own
+    // letters on both sides (a folder called "Pets" is not "pets").
+    let split_at = |kw: &str| lc.find(kw).map(|i| (cmd[..i].to_string(), cmd[i + kw.len()..].to_string()));
+    let (names_part, before_names) = match split_at(" called ").or_else(|| split_at(" named ")) {
+        Some((b, n)) => (n, b),
+        None => {
+            return Err(PawError::Parse(
+                "tell me what to call it, e.g. \"make a folder called kitten paws\"".into(),
+            ))
+        }
     };
 
     // Kind and optional inline location live in the part before "called".
@@ -359,6 +368,27 @@ fn split_name_list(s: &str) -> Vec<String> {
         .map(|n| n.trim().trim_matches('"').trim_matches('\'').trim().to_string())
         .filter(|n| !n.is_empty())
         .collect()
+}
+
+
+/// Names and paths are case-sensitive on Linux: "Pets" and "pets" are
+/// different files. Every name keeps exactly the letters the user typed and
+/// is looked up that way; there is no case-insensitive nearest match.
+fn place_ref(s: &str) -> LocationRef {
+    name_to_location(s)
+}
+
+/// `piece` was cut from `lower` (the lowercased `cmd`); give back the same
+/// text with the user's own letter case when the two lengths line up.
+fn original_case<'a>(cmd: &'a str, lower: &str, piece: &'a str) -> &'a str {
+    if cmd.len() == lower.len() {
+        if let Some(i) = lower.find(piece) {
+            if cmd.is_char_boundary(i) && cmd.is_char_boundary(i + piece.len()) {
+                return &cmd[i..i + piece.len()];
+            }
+        }
+    }
+    piece
 }
 
 /// Well-known location words.
@@ -459,4 +489,59 @@ fn parse_wallpaper(cmd: &str) -> Option<Result<Directive, PawError>> {
         return Some(Err(PawError::Parse("which picture should be the wallpaper?".into())));
     }
     Some(Ok(Directive::SetWallpaper { image: name_to_location(target), via, no_backup_ok }))
+}
+
+#[cfg(test)]
+mod case_tests {
+    use super::*;
+    fn one(s: &str) -> Directive {
+        parse(s).unwrap().remove(0)
+    }
+    #[test]
+    fn explicit_paths_keep_their_case() {
+        match one("copy /Tmp/Foo/Src.TXT to /Tmp/Bar") {
+            Directive::Copy { target, dest } => {
+                assert_eq!(target, LocationRef::Explicit("/Tmp/Foo/Src.TXT".into()));
+                assert_eq!(dest, LocationRef::Explicit("/Tmp/Bar".into()));
+            }
+            d => panic!("{d:?}"),
+        }
+        match one("move ~/Docs/A.md to ~/Docs/Old") {
+            Directive::Move { target, .. } => assert_eq!(target, LocationRef::Explicit("~/Docs/A.md".into())),
+            d => panic!("{d:?}"),
+        }
+        match one("rename /Tmp/Old.TXT to New.TXT") {
+            Directive::Rename { target, new_name } => {
+                assert_eq!(target, LocationRef::Explicit("/Tmp/Old.TXT".into()));
+                assert_eq!(new_name, "New.TXT");
+            }
+            d => panic!("{d:?}"),
+        }
+        match one("delete /Tmp/Foo/Bar") {
+            Directive::Delete { target } => assert_eq!(target, LocationRef::Explicit("/Tmp/Foo/Bar".into())),
+            d => panic!("{d:?}"),
+        }
+        match one("list /Tmp/Foo") {
+            Directive::List { target } => assert_eq!(target, LocationRef::Explicit("/Tmp/Foo".into())),
+            d => panic!("{d:?}"),
+        }
+    }
+    #[test]
+    fn bare_names_keep_their_exact_case() {
+        match one("delete Pics") {
+            Directive::Delete { target } => assert_eq!(target, LocationRef::Named("Pics".into())),
+            d => panic!("{d:?}"),
+        }
+        match one("DELETE Pics") {
+            Directive::Delete { target } => assert_eq!(target, LocationRef::Named("Pics".into())),
+            d => panic!("{d:?}"),
+        }
+        match one("copy Pics to Documents") {
+            Directive::Copy { target, dest } => {
+                assert_eq!(target, LocationRef::Named("Pics".into()));
+                assert_eq!(dest, LocationRef::Documents);
+            }
+            d => panic!("{d:?}"),
+        }
+    }
 }
