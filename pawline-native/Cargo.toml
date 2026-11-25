@@ -19,3 +19,5 @@ pawline-needle = { path = "../pawline-needle" }
 jpeg-decoder = { version = "0.3", default-features = false }
 png = "0.17"
 image-webp = { version = "0.2", default-features = false }
+rustybuzz = "0.20"
+unicode-bidi = "0.3"

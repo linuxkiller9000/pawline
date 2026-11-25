@@ -95,21 +95,27 @@ impl Xb {
         let shared = Arc::new(Shared { clip: Mutex::new(String::new()), owned: AtomicBool::new(false), paste: Mutex::new(None) });
         // keyboard map for keycode -> keysym
         let (min, max) = (setup.min_keycode, setup.max_keycode);
-        let km = conn.get_keyboard_mapping(min, max - min + 1).map_err(|e| e.to_string())?.reply().map_err(|e| e.to_string())?;
-        let per = km.keysyms_per_keycode as usize;
-        let syms = km.keysyms;
+        let load = move |c: &RustConnection| -> Result<(usize, Vec<u32>), String> {
+            let km = c.get_keyboard_mapping(min, max - min + 1).map_err(|e| e.to_string())?.reply().map_err(|e| e.to_string())?;
+            Ok((km.keysyms_per_keycode as usize, km.keysyms))
+        };
+        let (mut per, mut syms) = load(&conn)?;
         let (c2, a2, s2, sh2) = (conn.clone(), atoms.clone(), shared.clone(), win);
         std::thread::spawn(move || {
             while let Ok(ev) = c2.wait_for_event() {
                 match ev {
+                    // the layout changed (another group, setxkbmap, a tool remapping keys): read the map again
+                    Event::MappingNotify(m) if m.request == Mapping::KEYBOARD => {
+                        if let Ok((p, sy)) = load(&c2) {
+                            per = p;
+                            syms = sy;
+                        }
+                    }
                     Event::KeyPress(k) => {
                         let st = u16::from(k.state);
                         let i = (k.detail.saturating_sub(min)) as usize * per;
-                        let col = (if st & 1 != 0 { 1 } else { 0 }) + if st & 0x80 != 0 && per >= 4 { 2 } else { 0 };
-                        let mut sym = syms.get(i + col).copied().unwrap_or(0);
-                        if sym == 0 {
-                            sym = syms.get(i).copied().unwrap_or(0);
-                        }
+                        let sym = pick_keysym(&syms[i.min(syms.len())..(i + per).min(syms.len())], st);
+                        let mut sym = sym;
                         // Caps Lock: capitalise plain letters
                         if st & 2 != 0 && st & 1 == 0 && (0x61..=0x7a).contains(&sym) {
                             sym -= 0x20;
@@ -315,5 +321,49 @@ impl Xb {
     #[allow(dead_code)]
     pub fn root(&self) -> Window {
         self.root
+    }
+}
+
+/// Keysym for a key from its row of the keyboard map and the event state. Columns are
+/// [group1 base, group1 shift, group2 base, group2 shift, level3 base, level3 shift, ...]; the group is state bits 13-14
+/// (that is how an Arabic layout in the second group is reached), level 3 is Mod5 (AltGr).
+pub fn pick_keysym(row: &[u32], st: u16) -> u32 {
+    let shift = (st & 1) as usize;
+    let group = ((st >> 13) & 3) as usize;
+    let mut cols: Vec<usize> = Vec::new();
+    if st & 0x80 != 0 && row.len() >= 6 {
+        cols.push(4 + shift);
+    }
+    if row.len() >= 2 * group + 2 {
+        cols.push(2 * group + shift);
+    }
+    cols.push(shift);
+    cols.push(0);
+    for c in cols {
+        if let Some(&k) = row.get(c) {
+            if k != 0 {
+                return k;
+            }
+        }
+    }
+    0
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    #[test]
+    fn group_two_reaches_the_second_layout_and_shift_picks_the_second_column() {
+        // key with a=Latin a/A and Arabic ش/ال in the second group
+        let row = [0x61, 0x41, 0x1000634, 0x1000644, 0, 0];
+        assert_eq!(pick_keysym(&row, 0), 0x61);
+        assert_eq!(pick_keysym(&row, 1), 0x41);
+        assert_eq!(pick_keysym(&row, 1 << 13), 0x1000634);
+        assert_eq!(pick_keysym(&row, (1 << 13) | 1), 0x1000644);
+        // a short row falls back to the first group
+        assert_eq!(pick_keysym(&[0x62, 0x42], 1 << 13), 0x62);
+        // an empty slot falls back to the base symbol
+        assert_eq!(pick_keysym(&[0x63, 0, 0, 0], 1), 0x63);
+        assert_eq!(pick_keysym(&[], 0), 0);
     }
 }

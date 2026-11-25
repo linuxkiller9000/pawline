@@ -3,6 +3,7 @@
 //! OpenGL, EGL, GTK or WebKit is loaded.
 mod bridge;
 mod edit;
+mod shape;
 mod thumb;
 
 mod ctl;
@@ -45,7 +46,6 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use tiny_skia::*;
 
-static FONT: &[u8] = include_bytes!("../assets/font.ttf");
 
 /// Typing "/" lists Pawline's built-in skills. Choosing one only fills the input with a starter
 /// phrase; nothing runs until Enter, and anything that changes things still asks first.
@@ -156,6 +156,15 @@ fn line_of(lines: &[(usize, usize)], caret: usize) -> usize {
     lines.len() - 1
 }
 
+/// Lines that carry a path are laid out strictly left to right with every path part in written order.
+fn line_mode(l: &str) -> shape::Mode {
+    if l.contains("~/") || l.starts_with('/') || l.contains(" /home/") || l.contains(":/") {
+        shape::Mode::Strict
+    } else {
+        shape::Mode::Auto
+    }
+}
+
 enum Req {
     Text(String),
     Confirm,
@@ -230,8 +239,8 @@ struct App {
     /// Folders from the last "zi" reply (inside the home area only); a click or Tab fills the input with "list <path>".
     zi_rows: Vec<String>,
     zi_sel: usize,
-    font: fontdue::Font,
-    cache: HashMap<(char, u32), (fontdue::Metrics, Vec<u8>)>,
+    shaper: shape::Shaper,
+    input_w: f32,
     tx: mpsc::Sender<Req>,
     exit: bool,
     /// Panel-only: no orb. The surface is unmapped until a panel widget (or Pawline's own key) opens the card.
@@ -301,17 +310,13 @@ fn stroke(pm: &mut Pixmap, path: &Path, c: (u8, u8, u8, u8), w: f32) {
 }
 
 impl App {
-    fn glyph(&mut self, ch: char, px: f32) -> &(fontdue::Metrics, Vec<u8>) {
-        let key = (ch, px.to_bits());
-        if !self.cache.contains_key(&key) {
-            let g = self.font.rasterize(ch, px);
-            self.cache.insert(key, g);
-        }
-        &self.cache[&key]
+    fn adv(&mut self, ch: char, px: f32) -> f32 {
+        let mut b = [0u8; 4];
+        self.shaper.measure(ch.encode_utf8(&mut b), px, shape::Mode::Auto)
     }
 
-    fn adv(&mut self, ch: char, px: f32) -> f32 {
-        self.glyph(ch, px).0.advance_width
+    fn measure(&mut self, text: &str, px: f32, mode: shape::Mode) -> f32 {
+        self.shaper.measure(text, px, mode)
     }
 
     /// Word-wrap `text` to `maxw` pixels. Long words are split. Newlines kept.
@@ -321,7 +326,7 @@ impl App {
             let mut line = String::new();
             let mut lw = 0.0;
             for word in para.split(' ') {
-                let ww: f32 = word.chars().map(|c| self.adv(c, px)).sum();
+                let ww: f32 = self.measure(word, px, shape::Mode::Auto);
                 let sp = if line.is_empty() { 0.0 } else { self.adv(' ', px) };
                 if !line.is_empty() && lw + sp + ww > maxw {
                     out.push(std::mem::take(&mut line));
@@ -353,12 +358,28 @@ impl App {
     }
 
     fn text(&mut self, pm: &mut Pixmap, s: &str, x: f32, base_y: f32, px: f32, c: (u8, u8, u8), clip: (f32, f32)) {
-        let mut cx = x;
+        self.text_m(pm, s, x, base_y, px, c, clip, shape::Mode::Auto);
+    }
+
+    /// A line of body text inside a box `w` wide: right-to-left lines are right-aligned, everything else left.
+    /// Returns the x of the line's left edge (callers use it for carets and hit tests).
+    #[allow(clippy::too_many_arguments)]
+    fn para(&mut self, pm: &mut Pixmap, s: &str, x: f32, w: f32, base_y: f32, px: f32, c: (u8, u8, u8), clip: (f32, f32), mode: shape::Mode) -> f32 {
+        let laid = self.shaper.layout(s, px, mode);
+        let x0 = if laid.rtl { x + (w - laid.width).max(0.0) } else { x };
+        self.text_m(pm, s, x0, base_y, px, c, clip, mode);
+        x0
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn text_m(&mut self, pm: &mut Pixmap, s: &str, x: f32, base_y: f32, px: f32, c: (u8, u8, u8), clip: (f32, f32), mode: shape::Mode) {
+        let laid = self.shaper.layout(s, px, mode);
         let (pw, ph) = (pm.width() as i32, pm.height() as i32);
-        for ch in s.chars() {
+        for g in &laid.glyphs {
+            let cx = x + g.x;
             let (m, bm) = {
-                let g = self.glyph(ch, px);
-                (g.0, g.1.clone())
+                let r = self.shaper.glyph(g.font, g.gid, px);
+                (r.0, r.1.clone())
             };
             let gy = base_y as i32 - m.height as i32 - m.ymin;
             for yy in 0..m.height as i32 {
@@ -368,7 +389,7 @@ impl App {
                 }
                 for xx in 0..m.width as i32 {
                     let a = bm[(yy as usize) * m.width + xx as usize] as u32;
-                    let X = cx as i32 + m.xmin + xx;
+                    let X = cx.round() as i32 + m.xmin + xx;
                     if a == 0 || X < 0 || X >= pw {
                         continue;
                     }
@@ -381,7 +402,6 @@ impl App {
                     d[i + 3] = 255;
                 }
             }
-            cx += m.advance_width;
         }
     }
 
@@ -484,7 +504,9 @@ impl App {
             // input box: wraps onto up to MAX_IN_LINES lines, then scrolls by line
             let wmax = inner_w - 30.0;
             let chars: Vec<char> = self.input.text().chars().collect();
-            let widths: Vec<f32> = chars.iter().map(|c| self.adv(*c, PX)).collect();
+            self.input_w = wmax;
+            let full = self.shaper.layout(&self.input.text(), PX, shape::Mode::Auto);
+            let widths: Vec<f32> = full.ext.iter().map(|e| (e.1 - e.0).max(0.0)).collect();
             let spaces: Vec<bool> = chars.iter().map(|c| *c == ' ').collect();
             let lines = wrap_ranges(&widths, wmax, &spaces);
             let nl = lines.len().clamp(1, MAX_IN_LINES);
@@ -515,19 +537,21 @@ impl App {
                 let li = self.input_top + k;
                 let (ls, le) = lines[li];
                 let ly = top + 6.0 + k as f32 * LH;
+                let text: String = chars[ls..le].iter().collect();
+                let laid = self.shaper.layout(&text, PX, shape::Mode::Auto);
+                let x0 = PAD + 8.0 + if laid.rtl { (wmax - laid.width).max(0.0) } else { 0.0 };
                 if let Some((sa, sb)) = sel {
                     let (a, b) = (sa.max(ls), sb.min(le));
                     if b > a {
-                        let x0: f32 = widths[ls..a].iter().sum();
-                        let x1: f32 = widths[ls..b].iter().sum();
-                        fill(pm, &rrect(PAD + 8.0 + x0, ly, x1 - x0, LH, 3.0), (92, 80, 170, 255));
+                        for (l, r) in laid.sel_rects(a - ls, b - ls) {
+                            fill(pm, &rrect(x0 + l, ly, r - l, LH, 3.0), (92, 80, 170, 255));
+                        }
                     }
                 }
-                let text: String = chars[ls..le].iter().collect();
-                self.text(pm, &text, PAD + 8.0, ly + 15.0, PX, col, (0.0, h));
+                self.text(pm, &text, x0, ly + 15.0, PX, col, (0.0, h));
                 if li == cl {
-                    let cx: f32 = widths[ls..caret.min(le)].iter().sum();
-                    fill(pm, &rrect(PAD + 8.0 + cx, ly + 1.0, 2.0, LH - 2.0, 1.0), (255, 255, 255, 255));
+                    let cx = laid.caret_x(caret.min(le) - ls);
+                    fill(pm, &rrect(x0 + cx, ly + 1.0, 2.0, LH - 2.0, 1.0), (255, 255, 255, 255));
                 }
             }
             self.input_lines = lines;
@@ -570,7 +594,15 @@ impl App {
         let mut cp = Pixmap::new(w as u32, view as u32).unwrap();
         let mut y = view - total + self.scroll;
         for (idx, (user, kind, lines, bh, thumb, quote)) in items.into_iter().enumerate() {
-            let bw = lines.iter().map(|l| l.chars().map(|c| self.adv(c, PX)).sum::<f32>()).fold(0.0, f32::max).max(quote.as_ref().map_or(0.0, |q| (q.chars().map(|c| self.adv(c, 12.0)).sum::<f32>() + 8.0).min(bub_w - 20.0))).max(thumb.as_ref().map_or(0.0, |t| t.width() as f32)) + 20.0;
+            let mut bw0 = 0.0f32;
+            for l in &lines {
+                bw0 = bw0.max(self.measure(l, PX, line_mode(l)));
+            }
+            let qw = match &quote {
+                Some(q) => (self.measure(q, 12.0, shape::Mode::Auto) + 8.0).min(bub_w - 20.0),
+                None => 0.0,
+            };
+            let bw = bw0.max(qw).max(thumb.as_ref().map_or(0.0, |t| t.width() as f32)) + 20.0;
             let bx = if user { w - PAD - bw } else { PAD };
             if y + bh > 0.0 && y < view {
                 self.bubbles.push(((bx, top + y.max(0.0), bw, (bh).min(view - y.max(0.0)).min(y + bh)), texts[idx].clone()));
@@ -588,7 +620,7 @@ impl App {
                     self.text(&mut cp, q, bx + 16.0, y + 18.0, 12.0, (170, 165, 195), (0.0, view));
                 }
                 for (i, l) in lines.iter().enumerate() {
-                    self.text(&mut cp, l, bx + 10.0, y + qh + 7.0 + (i as f32 + 1.0) * LH - 5.0, PX, (235, 232, 245), (0.0, view));
+                    self.para(&mut cp, l, bx + 10.0, bw - 20.0, y + qh + 7.0 + (i as f32 + 1.0) * LH - 5.0, PX, (235, 232, 245), (0.0, view), line_mode(l));
                 }
                 if let Some(t) = &thumb {
                     let ty = y + qh + 7.0 + lines.len() as f32 * LH + 2.0;
@@ -613,6 +645,11 @@ impl App {
         let panel = rrect(PAD - 4.0, top, w - 2.0 * PAD + 8.0, bot - top, 14.0);
         fill(pm, &panel, (29, 20, 64, 255));
         stroke(pm, &panel, (124, 58, 237, 255), 1.5);
+        let text = if shape::has_bidi_control(&text) {
+            format!("WARNING: a name below contains hidden text-direction characters (shown as a replacement mark). Check the full path carefully.\n{text}")
+        } else {
+            text
+        };
         let lines = self.wrap(&text, PX, inner_w - 16.0);
         let total = lines.len() as f32 * LH + 16.0;
         let view = bot - top - 6.0;
@@ -622,7 +659,7 @@ impl App {
         }
         for (i, l) in lines.iter().enumerate() {
             let y = top + 8.0 + (i as f32 + 1.0) * LH - 5.0 - self.plan_scroll;
-            self.text(pm, l, PAD + 4.0, y, PX, (235, 230, 255), (top + 3.0, bot - 3.0));
+            self.text_m(pm, l, PAD + 4.0, y, PX, (235, 230, 255), (top + 3.0, bot - 3.0), shape::Mode::Strict);
         }
         let can_yes = self.can_approve();
         if self.plan_max > 0.0 && !can_yes {
@@ -708,7 +745,8 @@ impl App {
             self.text(pm, "Ask Pawline...", 40.0, h / 2.0 + 5.0, PX, (150, 145, 175), (0.0, w));
             return;
         }
-        let widths: Vec<f32> = chars.iter().map(|c| self.adv(*c, PX)).collect();
+        let full = self.shaper.layout(&self.input.text(), PX, shape::Mode::Auto);
+        let widths: Vec<f32> = full.ext.iter().map(|e| (e.1 - e.0).max(0.0)).collect();
         let avail = w - 40.0 - 12.0;
         let caret = self.input.caret().min(chars.len());
         let mut start = 0;
@@ -722,9 +760,11 @@ impl App {
             end += 1;
         }
         let shown: String = chars[start..end].iter().collect();
-        self.text(pm, &shown, 40.0, h / 2.0 + 5.0, PX, (255, 255, 255), (0.0, w));
-        let cx: f32 = widths[start..caret.min(end)].iter().sum();
-        fill(pm, &rrect(40.0 + cx, h / 2.0 - 9.0, 2.0, 18.0, 1.0), (255, 255, 255, 255));
+        let laid = self.shaper.layout(&shown, PX, shape::Mode::Auto);
+        let x0 = 40.0 + if laid.rtl { (avail - laid.width).max(0.0) } else { 0.0 };
+        self.text(pm, &shown, x0, h / 2.0 + 5.0, PX, (255, 255, 255), (0.0, w));
+        let cx = laid.caret_x(caret.min(end) - start);
+        fill(pm, &rrect(x0 + cx, h / 2.0 - 9.0, 2.0, 18.0, 1.0), (255, 255, 255, 255));
     }
 
     fn push(&mut self, user: bool, kind: &str, text: String, quote: Option<String>) {
@@ -794,7 +834,7 @@ impl App {
                 fill(pm, &rrect(PAD + 2.0, y, w - 2.0 * PAD - 4.0, rh - 2.0, 6.0), (92, 80, 170, 255));
             }
             let shown = if p.chars().count() > 44 { format!("...{}", p.chars().rev().take(41).collect::<Vec<_>>().into_iter().rev().collect::<String>()) } else { p.clone() };
-            self.text(pm, &shown, PAD + 10.0, y + 18.0, 13.0, (255, 255, 255), (0.0, h));
+            self.text_m(pm, &shown, PAD + 10.0, y + 18.0, 13.0, (255, 255, 255), (0.0, h), shape::Mode::Strict);
         }
         self.text(pm, "Up/Down choose, Tab fills, Esc closes, Enter runs", PAD + 10.0, top + 4.0 + rows_h + 15.0, 11.0, (190, 185, 215), (0.0, h));
     }
@@ -982,8 +1022,8 @@ impl App {
             Keysym::Left | Keysym::Right | Keysym::Home | Keysym::End => {
                 let (sh, word) = (self.shift, self.ctrl);
                 match (e.keysym, word) {
-                    (Keysym::Left, false) => self.input.left(sh),
-                    (Keysym::Right, false) => self.input.right(sh),
+                    (Keysym::Left, false) => self.step_visual(true, sh),
+                    (Keysym::Right, false) => self.step_visual(false, sh),
                     (Keysym::Left, true) => self.input.word_left(sh),
                     (Keysym::Right, true) => self.input.word_right(sh),
                     (Keysym::Home, _) => self.input.home(sh),
@@ -1061,8 +1101,33 @@ impl App {
         let k = (((y - self.input_box_top - 6.0) / LH).floor().max(0.0) as usize).min(vis - 1);
         let (ls, le) = self.input_lines.get(self.input_top + k).copied().unwrap_or((0, chars.len()));
         let (ls, le) = (ls.min(chars.len()), le.min(chars.len()));
-        let widths: Vec<f32> = chars[ls..le].iter().map(|c| self.adv(*c, PX)).collect();
-        ls + pick_in_line(&widths, target)
+        let text: String = chars[ls..le].iter().collect();
+        let laid = self.shaper.layout(&text, PX, shape::Mode::Auto);
+        let off = if laid.rtl { (self.input_w - laid.width).max(0.0) } else { 0.0 };
+        ls + laid.index_at(target - off).min(le - ls)
+    }
+
+    /// Left/Right move the caret the way the text looks, so inside Arabic text Left goes to the next letter.
+    fn step_visual(&mut self, left: bool, extend: bool) {
+        if !extend && self.input.sel().is_some() {
+            return if left { self.input.left(false) } else { self.input.right(false) };
+        }
+        let chars: Vec<char> = self.input.text().chars().collect();
+        let caret = self.input.caret();
+        let k = line_of(&self.input_lines, caret).min(self.input_lines.len().saturating_sub(1));
+        let (ls, le) = self.input_lines.get(k).copied().unwrap_or((0, chars.len()));
+        let (ls, le) = (ls.min(chars.len()), le.min(chars.len()));
+        let text: String = chars[ls..le].iter().collect();
+        let laid = self.shaper.layout(&text, PX, shape::Mode::Auto);
+        match laid.step(caret.clamp(ls, le) - ls, left) {
+            Some(i) => self.input.set_caret(ls + i, extend),
+            None => {
+                // edge of the visual line: continue into the neighbouring line. The left edge of a right-to-left
+                // line is its END, so there Left goes forward in the text and Right goes back.
+                let back = left != laid.rtl;
+                if back { self.input.left(extend) } else { self.input.right(extend) }
+            }
+        }
     }
 
     fn right_click(&mut self) {
@@ -1692,7 +1757,6 @@ fn main() {
     } else {
         None
     };
-    let font = fontdue::Font::from_bytes(FONT, fontdue::FontSettings::default()).unwrap();
 
     let (req_tx, req_rx) = mpsc::channel::<Req>();
     let (back_tx, back_rx) = channel::channel::<UiReply>();
@@ -1746,8 +1810,8 @@ fn main() {
         menu_sel: 0,
         zi_rows: vec![],
         zi_sel: 0,
-        font,
-        cache: HashMap::new(),
+        shaper: shape::Shaper::new(),
+        input_w: 300.0,
         tx: req_tx,
         exit: false,
         panel_only,
@@ -1825,6 +1889,15 @@ fn main() {
 #[cfg(test)]
 mod wrap_tests {
     use super::*;
+    #[test]
+    fn path_lines_are_laid_out_strictly_and_prose_is_not() {
+        assert_eq!(line_mode("1. Move /tmp/ah/Downloads/\u{62a}\u{642}.txt to"), shape::Mode::Strict);
+        assert_eq!(line_mode("~/Documents/\u{62a}"), shape::Mode::Strict);
+        assert_eq!(line_mode("/home/u/x"), shape::Mode::Strict);
+        assert_eq!(line_mode("\u{645}\u{631}\u{62d}\u{628}\u{627} \u{628}\u{627}\u{644}\u{639}\u{627}\u{644}\u{645}"), shape::Mode::Auto);
+        assert_eq!(line_mode("open Downloads"), shape::Mode::Auto);
+    }
+
     #[test]
     fn wraps_by_width_and_places_caret() {
         let w = vec![10.0; 25];
