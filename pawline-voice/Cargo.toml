@@ -1,0 +1,10 @@
+[package]
+name = "pawline-voice"
+version = "0.1.0"
+edition = "2021"
+description = "Optional push-to-talk voice input: bounded in-memory capture and Moonshine transcription. Off by default; produces text for preview only."
+license = "GPL-3.0-only"
+
+[dependencies]
+pulseaudio = "0.3.2"
+sha2 = "0.10"

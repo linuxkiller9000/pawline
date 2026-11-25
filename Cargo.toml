@@ -1,5 +1,5 @@
 [workspace]
-members = ["pawline-core", "pawline-needle", "pawline-native", "pawline-needle-native", "vendor/needle-rs/needle-core", "vendor/needle-rs/needle-infer"]
+members = ["pawline-voice", "pawline-core", "pawline-needle", "pawline-native", "pawline-needle-native", "vendor/needle-rs/needle-core", "vendor/needle-rs/needle-infer"]
 resolver = "2"
 
 [profile.release]
