@@ -25,11 +25,13 @@ pub const THEMES: [Theme; 4] = [
 pub struct Settings {
     pub theme: usize,
     pub drift: bool,
+    /// Speak Pawline's plain answers aloud with a local engine. Off until switched on.
+    pub speak: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: 0, drift: true }
+        Settings { theme: 0, drift: true, speak: false }
     }
 }
 
@@ -44,6 +46,7 @@ pub fn load(path: &Path) -> Settings {
                     }
                 }
                 Some(("drift", v)) => s.drift = v.trim() != "off",
+                Some(("speak", v)) => s.speak = v.trim() == "on",
                 _ => {}
             }
         }
@@ -55,7 +58,7 @@ pub fn save(path: &Path, s: &Settings) -> std::io::Result<()> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
-    std::fs::write(path, format!("theme={}\ndrift={}\n", THEMES[s.theme.min(THEMES.len() - 1)].name, if s.drift { "on" } else { "off" }))
+    std::fs::write(path, format!("theme={}\ndrift={}\nspeak={}\n", THEMES[s.theme.min(THEMES.len() - 1)].name, if s.drift { "on" } else { "off" }, if s.speak { "on" } else { "off" }))
 }
 
 /// Gradient offset along the diagonal for a moment in time: a slow back-and-forth, 0 when drift is off.
@@ -74,10 +77,10 @@ mod tests {
         let d = std::env::temp_dir().join(format!("pawline-theme-{}", std::process::id()));
         let f = d.join("ui-settings.txt");
         assert_eq!(load(&f), Settings::default());
-        save(&f, &Settings { theme: 2, drift: false }).unwrap();
-        assert_eq!(load(&f), Settings { theme: 2, drift: false });
-        std::fs::write(&f, "theme=Nope\ndrift=maybe\njunk").unwrap();
-        assert_eq!(load(&f), Settings { theme: 0, drift: true });
+        save(&f, &Settings { theme: 2, drift: false, speak: true }).unwrap();
+        assert_eq!(load(&f), Settings { theme: 2, drift: false, speak: true });
+        std::fs::write(&f, "theme=Nope\ndrift=maybe\nspeak=maybe\njunk").unwrap();
+        assert_eq!(load(&f), Settings { theme: 0, drift: true, speak: false });
         let t = std::fs::read_to_string(&f).unwrap();
         assert!(!t.contains("request"));
         assert_eq!(drift_offset(5.0, 300.0, false), 0.0);

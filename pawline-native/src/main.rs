@@ -225,6 +225,16 @@ struct Msg {
     quote: Option<String>,
 }
 
+enum VState {
+    Idle,
+    Listening { child: std::process::Child, path: std::path::PathBuf, since: std::time::Instant },
+    Working,
+}
+
+enum VEv {
+    Text(Result<String, String>),
+}
+
 enum Surf {
     Layer(LayerSurface),
     Win(Window),
@@ -293,6 +303,13 @@ struct App {
     r_skill_name: (f32, f32, f32, f32),
     searcher: Option<fsearch::Searcher>,
     pill_gen: u64,
+    stt_cmd: Option<voice::Cmd>,
+    vstate: VState,
+    voice_tx: Option<channel::Sender<VEv>>,
+    speaking: Option<std::process::Child>,
+    r_mic: (f32, f32, f32, f32),
+    r_vstop: (f32, f32, f32, f32),
+    r_vcancel: (f32, f32, f32, f32),
     pill_wait: bool,
     /// Show the chip's full path (inspect without sending anything).
     pill_show: bool,
@@ -574,14 +591,19 @@ impl App {
     }
 
     fn settings_rows(&self) -> usize {
-        theme::THEMES.len() + 1
+        theme::THEMES.len() + 2
     }
 
     fn apply_setting(&mut self, row: usize) {
         if row < theme::THEMES.len() {
             self.settings.theme = row;
-        } else {
+        } else if row == theme::THEMES.len() {
             self.settings.drift = !self.settings.drift;
+        } else {
+            self.settings.speak = !self.settings.speak;
+            if !self.settings.speak {
+                self.stop_speaking();
+            }
         }
         if let Some(p) = settings_path() {
             let _ = theme::save(&p, &self.settings);
@@ -611,6 +633,9 @@ impl App {
                 if k == self.settings.theme {
                     self.text(pm, "selected", w - PAD - 74.0, y + 22.0, 12.0, (150, 230, 180), (0.0, h));
                 }
+            } else if k == theme::THEMES.len() + 1 {
+                let label = format!("Speak replies aloud (local engine): {}", if self.settings.speak { "on" } else { "off" });
+                self.text(pm, &label, PAD + 10.0, y + 22.0, 14.0, (255, 255, 255), (0.0, h));
             } else {
                 let label = format!("Colours drift slowly: {}", if self.settings.drift { "on" } else { "off" });
                 self.text(pm, &label, PAD + 10.0, y + 22.0, 14.0, (255, 255, 255), (0.0, h));
@@ -709,6 +734,7 @@ impl App {
             self.draw_zi(pm, w, h);
             self.draw_pill_rows(pm, w, h);
             self.draw_pill(pm, h);
+            self.draw_voice(pm, w, h);
         }
     }
 
@@ -1027,6 +1053,149 @@ impl App {
         true
     }
 
+    fn vcmds(&self) -> Result<(voice::Cmd, voice::Cmd, std::path::PathBuf), String> {
+        let wav = voice::temp_wav();
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+        let has = &voice::has_in_path;
+        let rec = voice::recorder(std::env::var("PAWLINE_REC_CMD").ok().as_deref(), has, &wav)?;
+        let model = voice::find_model(std::env::var("PAWLINE_WHISPER_MODEL").ok().as_deref(), &home);
+        let st = voice::stt(std::env::var("PAWLINE_STT_CMD").ok().as_deref(), has, model, &wav)?;
+        Ok((rec, st, wav))
+    }
+
+    /// Microphone button: start listening. Everything needed is checked first; nothing records if something is missing.
+    fn start_listening(&mut self) {
+        if !matches!(self.vstate, VState::Idle) || self.busy {
+            return;
+        }
+        match self.vcmds().and_then(|(rec, st, wav)| voice::start_recording(&rec, &wav).map(|c| (c, st, wav))) {
+            Ok((child, st, wav)) => {
+                self.stt_cmd = Some(st);
+                self.vstate = VState::Listening { child, path: wav, since: std::time::Instant::now() };
+            }
+            Err(e) => self.push(false, "error", format!("Voice input is not available: {e}"), None),
+        }
+        self.draw();
+    }
+
+    /// Stop recording and turn the audio into text on this computer (off the UI thread). The text goes into the draft.
+    fn stop_listening(&mut self) {
+        let VState::Listening { child, path, .. } = std::mem::replace(&mut self.vstate, VState::Working) else {
+            return;
+        };
+        let (Some(st), Some(tx)) = (self.stt_cmd.clone(), self.voice_tx.clone()) else {
+            voice::cancel_recording(child, &path);
+            self.vstate = VState::Idle;
+            return;
+        };
+        std::thread::spawn(move || {
+            voice::stop_recording(child);
+            let r = voice::transcribe(&st, &path, voice::STT_TIMEOUT);
+            let _ = tx.send(VEv::Text(r));
+        });
+        self.draw();
+    }
+
+    /// Cancel: the recorder is killed and the audio file deleted; nothing is transcribed or added.
+    fn cancel_listening(&mut self) {
+        if let VState::Listening { child, path, .. } = std::mem::replace(&mut self.vstate, VState::Idle) {
+            voice::cancel_recording(child, &path);
+            self.toast = Some("Recording discarded");
+        }
+        self.draw();
+    }
+
+    fn on_voice(&mut self, ev: VEv) {
+        self.vstate = VState::Idle;
+        match ev {
+            VEv::Text(Ok(t)) => {
+                let cur = self.input.text();
+                if !cur.is_empty() && !cur.ends_with(' ') {
+                    self.input.insert(" ");
+                }
+                self.input.insert(&t);
+                self.toast = Some("Check the text, then press Enter");
+            }
+            VEv::Text(Err(e)) => self.push(false, "error", e, None),
+        }
+        self.draw();
+    }
+
+    fn stop_speaking(&mut self) {
+        if let Some(mut c) = self.speaking.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+
+    fn speak_reply(&mut self, text: &str) {
+        self.stop_speaking();
+        let t = voice::clean_for_speech(text);
+        if t.is_empty() {
+            return;
+        }
+        match voice::tts(std::env::var("PAWLINE_TTS_CMD").ok().as_deref(), &voice::has_in_path).and_then(|c| voice::speak(&c, &t)) {
+            Ok(ch) => self.speaking = Some(ch),
+            Err(e) => self.push(false, "error", format!("Spoken replies are on but: {e}"), None),
+        }
+    }
+
+    /// Once a second: update the timer, stop a recording at the time limit, notice that speech finished.
+    fn voice_tick(&mut self) {
+        let mut redraw = false;
+        if let VState::Listening { since, .. } = &self.vstate {
+            redraw = true;
+            if since.elapsed() >= voice::MAX_RECORD {
+                self.stop_listening();
+            }
+        }
+        if let Some(c) = self.speaking.as_mut() {
+            if matches!(c.try_wait(), Ok(Some(_)) | Err(_)) {
+                self.speaking = None;
+            }
+            redraw = true;
+        }
+        if redraw {
+            self.draw();
+        }
+    }
+
+    fn draw_voice(&mut self, pm: &mut Pixmap, w: f32, h: f32) {
+        let mx = w - PAD - 26.0;
+        let my = self.input_box_top + 9.0;
+        self.r_mic = (mx, my, 22.0, 22.0);
+        let listening = matches!(self.vstate, VState::Listening { .. });
+        fill(pm, &rrect(mx, my, 22.0, 22.0, 11.0), if listening { (200, 50, 60) } else { self.th().accent }.rgba());
+        fill(pm, &rrect(mx + 8.0, my + 4.0, 6.0, 9.0, 3.0), (255, 255, 255, 255));
+        fill(pm, &rrect(mx + 10.5, my + 14.0, 1.2, 4.0, 0.5), (255, 255, 255, 255));
+        fill(pm, &rrect(mx + 7.0, my + 17.5, 8.0, 1.2, 0.5), (255, 255, 255, 255));
+        self.r_vstop = (0.0, 0.0, 0.0, 0.0);
+        self.r_vcancel = (0.0, 0.0, 0.0, 0.0);
+        let bar_y = self.input_box_top - 34.0;
+        let bw = w - 2.0 * PAD + 4.0;
+        let label = match &self.vstate {
+            VState::Listening { since, .. } => Some(format!("Listening {}:{:02}  (on this computer, not uploaded)", since.elapsed().as_secs() / 60, since.elapsed().as_secs() % 60)),
+            VState::Working => Some("Turning speech into text on this computer...".to_string()),
+            VState::Idle if self.speaking.is_some() => Some("Speaking...".to_string()),
+            VState::Idle => None,
+        };
+        let Some(label) = label else { return };
+        fill(pm, &rrect(PAD - 2.0, bar_y, bw, 28.0, 10.0), (60, 24, 32, 255));
+        fill(pm, &rrect(PAD + 6.0, bar_y + 10.0, 8.0, 8.0, 4.0), (240, 70, 80, 255));
+        self.text(pm, &label, PAD + 20.0, bar_y + 19.0, 12.0, (255, 255, 255), (0.0, h));
+        let (sx, cx) = (w - PAD - 130.0, w - PAD - 64.0);
+        if listening {
+            fill(pm, &rrect(sx, bar_y + 4.0, 60.0, 20.0, 8.0), (46, 125, 80, 255));
+            self.text(pm, "Stop", sx + 15.0, bar_y + 18.0, 12.0, (255, 255, 255), (0.0, h));
+            self.r_vstop = (sx, bar_y + 4.0, 60.0, 20.0);
+        }
+        if listening || self.speaking.is_some() {
+            fill(pm, &rrect(cx, bar_y + 4.0, 60.0, 20.0, 8.0), (110, 50, 60, 255));
+            self.text(pm, if listening { "Cancel" } else { "Stop" }, cx + 12.0, bar_y + 18.0, 12.0, (255, 255, 255), (0.0, h));
+            self.r_vcancel = (cx, bar_y + 4.0, 60.0, 20.0);
+        }
+    }
+
     fn chip_h(&self) -> f32 {
         if self.pill.is_some() || self.skill.is_some() {
             28.0
@@ -1333,6 +1502,10 @@ impl App {
                 m.md = true;
             }
         }
+        if self.settings.speak && (r.kind == "md" || r.kind == "executed") {
+            let t = r.text.clone();
+            self.speak_reply(&t);
+        }
         self.zi_rows = if r.kind == "message" { r.plan.as_deref().map(|p| p.lines().map(String::from).collect()).unwrap_or_default() } else { vec![] };
         self.zi_sel = 0;
         if r.kind == "confirm" {
@@ -1349,6 +1522,19 @@ impl App {
             if matches!(e.keysym, Keysym::Return | Keysym::KP_Enter | Keysym::space) {
                 self.set_expanded(true);
             }
+            return;
+        }
+        if matches!(self.vstate, VState::Listening { .. }) {
+            match e.keysym {
+                Keysym::Escape => self.cancel_listening(),
+                Keysym::Return | Keysym::KP_Enter => self.stop_listening(),
+                _ => {}
+            }
+            return;
+        }
+        if self.speaking.is_some() && e.keysym == Keysym::Escape {
+            self.stop_speaking();
+            self.draw();
             return;
         }
         let page = 200.0;
@@ -1630,6 +1816,27 @@ impl App {
         if self.confirm.is_none() {
             let (px, py) = self.ptr_pos;
             let w = self.w as f32;
+            if inside(self.r_vstop, self.ptr_pos) && matches!(self.vstate, VState::Listening { .. }) {
+                self.stop_listening();
+                return;
+            }
+            if inside(self.r_vcancel, self.ptr_pos) {
+                if matches!(self.vstate, VState::Listening { .. }) {
+                    self.cancel_listening();
+                } else {
+                    self.stop_speaking();
+                    self.draw();
+                }
+                return;
+            }
+            if inside(self.r_mic, self.ptr_pos) {
+                match self.vstate {
+                    VState::Idle => self.start_listening(),
+                    VState::Listening { .. } => self.stop_listening(),
+                    VState::Working => {}
+                }
+                return;
+            }
             if self.skill.is_some() && !self.busy && inside(self.r_skill_x, self.ptr_pos) {
                 self.skill = None;
                 self.draw();
@@ -2263,6 +2470,7 @@ fn main() {
 
     let (req_tx, req_rx) = mpsc::channel::<Req>();
     let (back_tx, back_rx) = channel::channel::<UiReply>();
+    let (voice_tx, voice_rx) = channel::channel::<VEv>();
     let (search_tx, search_rx) = channel::channel::<(u64, String, Vec<std::path::PathBuf>)>();
     std::thread::spawn(move || worker(req_rx, back_tx));
 
@@ -2325,6 +2533,12 @@ fn main() {
         r_skill_x: (0.0, 0.0, 0.0, 0.0),
         r_skill_name: (0.0, 0.0, 0.0, 0.0),
         pill_gen: 0,
+        stt_cmd: None,
+        vstate: VState::Idle,
+        speaking: None,
+        r_mic: (0.0, 0.0, 0.0, 0.0),
+        r_vstop: (0.0, 0.0, 0.0, 0.0),
+        r_vcancel: (0.0, 0.0, 0.0, 0.0),
         pill_wait: false,
         pill_show: false,
         r_pill_name: (0.0, 0.0, 0.0, 0.0),
@@ -2336,6 +2550,7 @@ fn main() {
         r_gear: (0.0, 0.0, 0.0, 0.0),
         input_w: 300.0,
         tx: req_tx,
+        voice_tx: Some(voice_tx),
         searcher: {
             let root = work_root();
             let tx = search_tx.clone();
@@ -2397,6 +2612,13 @@ fn main() {
         })
         .unwrap();
     handle
+        .insert_source(voice_rx, |ev, _, app: &mut App| {
+            if let channel::Event::Msg(e) = ev {
+                app.on_voice(e);
+            }
+        })
+        .unwrap();
+    handle
         .insert_source(search_rx, |ev, _, app: &mut App| {
             if let channel::Event::Msg((g, q, rows)) = ev {
                 app.on_search(g, q, rows);
@@ -2425,6 +2647,7 @@ fn main() {
                 if app.settings.drift && app.expanded && !app.hidden && app.confirm.is_none() {
                     app.draw();
                 }
+                app.voice_tick();
                 smithay_client_toolkit::reexports::calloop::timer::TimeoutAction::ToDuration(std::time::Duration::from_millis(1000))
             },
         )
