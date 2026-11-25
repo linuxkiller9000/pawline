@@ -2,6 +2,7 @@
 //! buffers on a Wayland layer-shell surface (xdg-toplevel fallback). No
 //! OpenGL, EGL, GTK or WebKit is loaded.
 mod bridge;
+mod voice_cfg;
 
 use bridge::UiReply;
 use smithay_client_toolkit::{
@@ -47,6 +48,8 @@ const CHAT_TOP: f32 = 64.0;
 const BOTTOM: f32 = 64.0;
 
 enum Req {
+    VoiceCheck,
+    Voice(Vec<f32>),
     Text(String),
     Confirm,
     Cancel,
@@ -117,6 +120,12 @@ struct App {
     /// Max plan_scroll for the current plan panel, set by draw.
     plan_max: f32,
     chat_max: f32,
+    /// Optional voice (off by default). `voice_on` is set only after the runtime verified.
+    voice_on: bool,
+    voice_pending: bool,
+    cap: Option<pawline_voice::capture::Capture>,
+    voice_status: String,
+    voice_preview: bool,
 }
 
 fn inside(r: (f32, f32, f32, f32), p: (f64, f64)) -> bool {
@@ -295,8 +304,8 @@ impl App {
         let (w, h) = (self.w as f32, self.h as f32);
         fill(pm, &rrect(0.0, 0.0, w, h, 18.0), (30, 28, 40, 245));
         self.orb(pm, 34.0, 32.0, 17.0, self.busy);
-        let title = if self.busy { "Pawline  (thinking...)" } else { "Pawline" };
-        self.text(pm, title, 62.0, 38.0, 18.0, (235, 230, 250), (0.0, h));
+        let title = if !self.voice_status.is_empty() { format!("Pawline  ({})", self.voice_status) } else if self.busy { "Pawline  (thinking...)".to_string() } else { "Pawline".to_string() };
+        self.text(pm, &title, 62.0, 38.0, 18.0, (235, 230, 250), (0.0, h));
         // collapse button
         self.r_collapse = (w - 44.0, 14.0, 30.0, 30.0);
         fill(pm, &rrect(self.r_collapse.0, self.r_collapse.1, 30.0, 30.0, 8.0), (52, 48, 70, 255));
@@ -413,6 +422,9 @@ impl App {
     }
 
     fn set_expanded(&mut self, exp: bool) {
+        if !exp {
+            self.cancel_voice("");
+        }
         self.expanded = exp;
         if exp {
             self.w = W;
@@ -431,6 +443,49 @@ impl App {
         self.draw();
     }
 
+    /// Close the mic and throw the audio away (focus loss, collapse, other key, device change).
+    fn cancel_voice(&mut self, why: &str) {
+        if let Some(c) = self.cap.take() {
+            let _ = c.stop();
+            self.voice_status.clear();
+            if !why.is_empty() {
+                self.push(false, "message", format!("Voice cancelled ({why}). Nothing was kept."));
+            }
+        }
+    }
+
+    fn voice_start(&mut self) {
+        if !self.voice_on || self.cap.is_some() || self.busy || self.confirm.is_some() || !self.expanded {
+            return;
+        }
+        match pawline_voice::capture::Capture::start(pawline_voice::capture::Limits::default()) {
+            Ok(c) => {
+                self.cap = Some(c);
+                self.voice_status = "listening, release F9".into();
+            }
+            Err(e) => self.push(false, "error", e.to_string()),
+        }
+    }
+
+    fn voice_release(&mut self) {
+        let Some(c) = self.cap.take() else { return };
+        let rec = c.stop(); // mic closed here
+        self.voice_status.clear();
+        use pawline_voice::capture::StopReason as R;
+        if rec.reason == R::DeviceError {
+            self.push(false, "error", "The microphone stream stopped unexpectedly. Nothing was kept.".into());
+        } else if rec.samples.len() < 4000 {
+            self.push(false, "message", "Too short, nothing heard. Hold F9 while you talk.".into());
+        } else {
+            if rec.reason == R::WallCap || rec.reason == R::SampleCap {
+                self.push(false, "message", "Reached the 15 second limit; using what was recorded.".into());
+            }
+            self.busy = true;
+            self.voice_status = "transcribing".into();
+            let _ = self.tx.send(Req::Voice(rec.samples));
+        }
+    }
+
     fn push(&mut self, user: bool, kind: &str, text: String) {
         self.msgs.push(Msg { user, kind: kind.into(), text });
         self.scroll = 0.0;
@@ -442,6 +497,7 @@ impl App {
             return;
         }
         self.input.clear();
+        self.voice_preview = false;
         self.push(true, "user", t.clone());
         self.busy = true;
         let _ = self.tx.send(Req::Text(t));
@@ -461,6 +517,29 @@ impl App {
     }
 
     fn on_reply(&mut self, r: UiReply) {
+        if r.kind == "voice-ready" || r.kind == "voice-error" {
+            self.voice_pending = false;
+            self.voice_status.clear();
+            self.voice_on = r.kind == "voice-ready";
+            self.push(false, if self.voice_on { "message" } else { "error" }, r.text);
+            self.draw();
+            return;
+        }
+        if r.kind == "voice-text" || r.kind == "voice-fail" {
+            self.busy = false;
+            self.voice_status.clear();
+            if r.kind == "voice-text" {
+                // Preview only: the text goes into the input box. Nothing is sent
+                // until the user presses Enter, and any plan still needs Do it.
+                self.input = r.text;
+                self.voice_preview = true;
+                self.push(false, "message", "Voice transcript is in the box below. Edit it if needed, then press Enter to send. Nothing runs until you confirm a plan.".into());
+            } else {
+                self.push(false, "error", r.text);
+            }
+            self.draw();
+            return;
+        }
         self.busy = false;
         self.push(false, &r.kind, r.text.clone());
         if r.kind == "confirm" {
@@ -479,6 +558,31 @@ impl App {
             return;
         }
         let page = 200.0;
+        if self.cap.is_some() {
+            // Any key other than the held F9 cancels listening.
+            if e.keysym != Keysym::F9 {
+                self.cancel_voice("another key was pressed");
+                self.draw();
+            }
+            return;
+        }
+        if self.confirm.is_none() && e.keysym == Keysym::F8 {
+            if self.voice_on {
+                self.voice_on = false;
+                self.push(false, "message", "Voice is off.".into());
+            } else if !self.voice_pending && !self.busy {
+                self.voice_pending = true;
+                self.voice_status = "checking voice files".into();
+                let _ = self.tx.send(Req::VoiceCheck);
+            }
+            self.draw();
+            return;
+        }
+        if e.keysym == Keysym::F9 {
+            self.voice_start();
+            self.draw();
+            return;
+        }
         if self.confirm.is_some() {
             // Typing never approves. Only Left/Right/Tab, Enter on the
             // focused button, `y` while Do it is focused, `n`, Esc.
@@ -586,6 +690,7 @@ impl OutputHandler for App {
 }
 impl LayerShellHandler for App {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {
+        self.cancel_voice("");
         self.exit = true;
     }
     fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface, _: LayerSurfaceConfigure, _: u32) {
@@ -594,6 +699,7 @@ impl LayerShellHandler for App {
 }
 impl WindowHandler for App {
     fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window) {
+        self.cancel_voice("");
         self.exit = true;
     }
     fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window, _: WindowConfigure, _: u32) {
@@ -618,6 +724,7 @@ impl SeatHandler for App {
         // new_capability binds a fresh one.
         if cap == Capability::Keyboard {
             self.kb = None;
+            self.cancel_voice("keyboard removed");
         }
         if cap == Capability::Pointer {
             self.ptr = None;
@@ -627,11 +734,19 @@ impl SeatHandler for App {
 }
 impl KeyboardHandler for App {
     fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32, _: &[u32], _: &[Keysym]) {}
-    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32) {}
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32) {
+        self.cancel_voice("window lost focus");
+        self.draw();
+    }
     fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, e: KeyEvent) {
         self.key(e);
     }
-    fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent) {}
+    fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, e: KeyEvent) {
+        if e.keysym == Keysym::F9 {
+            self.voice_release();
+            self.draw();
+        }
+    }
     fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: Modifiers, _: u32) {}
 }
 impl PointerHandler for App {
@@ -741,6 +856,30 @@ fn run_terminal() {
     }
 }
 
+/// Reads the pinned libs into memory, verifies them, loads from memory. Fails closed.
+fn voice_runtime() -> Result<pawline_voice::runtime::Runtime, String> {
+    let dir = voice_cfg::voice_dir();
+    let model = voice_cfg::model_dir();
+    if !model.join("encoder.ort").exists() {
+        return Err(format!("Voice is not set up: no speech model found in {}. It is optional; Pawline works without it.", model.display()));
+    }
+    let mut bytes = Vec::new();
+    for (name, _) in voice_cfg::LIBS {
+        let f = dir.join("lib").join(name);
+        let md = std::fs::symlink_metadata(&f).map_err(|_| format!("Voice is not set up: {} is missing in {}.", name, dir.join("lib").display()))?;
+        if !md.file_type().is_file() || md.len() > 64 << 20 {
+            return Err(format!("Voice refused: {name} is not a plain file of a sane size."));
+        }
+        bytes.push(std::fs::read(&f).map_err(|e| format!("Could not read {name}: {e}"))?);
+    }
+    let libs: Vec<pawline_voice::runtime::PinnedLib> = voice_cfg::LIBS
+        .iter()
+        .zip(bytes.iter())
+        .map(|((n, h), b)| pawline_voice::runtime::PinnedLib { name: n, bytes: b, sha256_hex: h })
+        .collect();
+    pawline_voice::runtime::Runtime::load(&libs).map_err(|e| e.to_string())
+}
+
 fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
     let root = work_root();
     let mut st = bridge::new_state(root);
@@ -749,8 +888,24 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
         let n = st.notes.drain(..).collect::<Vec<_>>().join("\n");
         let _ = back.send(bridge::reply("error", format!("After an interrupted run I checked the undo journal:\n{n}")));
     }
+    let mut vrt: Option<pawline_voice::runtime::Runtime> = None;
     while let Ok(req) = rx.recv() {
         let r = match req {
+            Req::VoiceCheck => match voice_runtime() {
+                Ok(rt) => {
+                    vrt = Some(rt);
+                    bridge::reply("voice-ready", "Voice is on. Hold F9 and talk, release to get a transcript to review. F8 turns it off. Audio stays in memory and is not saved.".into())
+                }
+                Err(e) => bridge::reply("voice-error", e),
+            },
+            Req::Voice(samples) => match &vrt {
+                None => bridge::reply("voice-fail", "Voice is not loaded. Press F8 to turn it on.".into()),
+                Some(rt) => match rt.transcribe(&voice_cfg::model_dir().to_string_lossy(), &samples) {
+                    Ok(t) if t.trim().is_empty() => bridge::reply("voice-fail", "I did not catch any words. Try again.".into()),
+                    Ok(t) => bridge::reply("voice-text", t),
+                    Err(e) => bridge::reply("voice-fail", e.to_string()),
+                },
+            },
             Req::Text(t) => {
                 st.pending = None;
                 let r = bridge::handle_text(&mut st, &t);
@@ -850,6 +1005,11 @@ fn main() {
         ptr_pos: (0.0, 0.0),
         plan_max: 0.0,
         chat_max: 0.0,
+        voice_on: false,
+        voice_pending: false,
+        cap: None,
+        voice_status: String::new(),
+        voice_preview: false,
     };
     if std::env::var("PAWLINE_START_EXPANDED").is_ok() {
         app.expanded = true;

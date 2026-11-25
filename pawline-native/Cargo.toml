@@ -15,3 +15,4 @@ tiny-skia = "0.11"
 fontdue = "0.9"
 pawline-core = { path = "../pawline-core" }
 pawline-needle = { path = "../pawline-needle" }
+pawline-voice = { path = "../pawline-voice" }
