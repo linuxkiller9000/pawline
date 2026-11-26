@@ -848,6 +848,10 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     }
     if matches!(&r, Err(PawError::Parse(_))) {
         use pawline_core::textfallback::{classify, Class};
+        // Questions only Pawline or the user can answer get a plain reply, never an online offer.
+        if let Some(msg) = pawline_core::textfallback::offline_answer_instead(input) {
+            return reply("message", msg.into());
+        }
         match classify(input) {
             Class::Ask | Class::Auto => {
                 let op = Operation::AskOnline { text: input.trim().to_string() };
