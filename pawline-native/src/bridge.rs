@@ -1199,6 +1199,8 @@ fn finish(state: &mut UiState, r: UiReply, spent: std::time::Duration) -> UiRepl
 
 #[cfg(test)]
 mod memory_tests {
+    /// Deck tests share the in-memory draft, so they run one at a time.
+    static DECK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use super::*;
     #[test]
     fn zi_command_uses_zoxide_then_own_list_and_ignores_other_text() {
@@ -1277,6 +1279,7 @@ mod memory_tests {
 
     #[test]
     fn written_presentation_needs_disclosure_then_review_then_a_second_card_to_save() {
+        let _deck_guard = DECK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = org_root("deckwrite");
         let mut st = new_state(root.clone());
         *DECK_DRAFT.lock().unwrap() = None;
@@ -1301,6 +1304,7 @@ mod memory_tests {
 
     #[test]
     fn editing_the_draft_shows_it_again_drops_the_old_save_card_and_saves_the_edited_text() {
+        let _deck_guard = DECK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = org_root("deckedit");
         let mut st = new_state(root.clone());
         *DECK_DRAFT.lock().unwrap() = None;
@@ -1324,6 +1328,7 @@ mod memory_tests {
 
     #[test]
     fn stale_or_failed_drafts_are_never_savable() {
+        let _deck_guard = DECK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut st = new_state(org_root("deckstale"));
         *DECK_DRAFT.lock().unwrap() = Some("# Old\n## A\n- x\n## B\n- y\n## C\n- z\n".into());
         let g1 = deck_draft_begin();
@@ -1838,6 +1843,7 @@ mod memory_tests {
 
     #[test]
     fn presentation_from_outline_previews_publishes_without_overwrite_and_undoes() {
+        let _deck_guard = DECK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = org_root("deck");
         let dl = root.join("Downloads");
         let md = dl.join("talk.md");
@@ -1874,6 +1880,7 @@ mod memory_tests {
 
     #[test]
     fn presentation_with_a_picture_previews_it_reads_only_inside_home_and_writes_nothing_on_refusal() {
+        let _deck_guard = DECK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = org_root("deckpic");
         let dl = root.join("Downloads");
         let png: Vec<u8> = vec![137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 0, 0, 3, 1, 1, 0, 201, 254, 146, 239, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130];
