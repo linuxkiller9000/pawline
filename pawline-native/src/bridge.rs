@@ -173,16 +173,19 @@ impl ExecutionBackend for UiBackend {
         if let Operation::DeckDraft { topic } = op {
             // Only reached after the disclosure card was confirmed. Same Pollinations slot as questions and pictures.
             let t = topic.clone();
+            let gen = deck_draft_begin();
             let outline = run_cancellable(pawline_core::imagegen::ImageProvider::Pollinations, move |cancelled, commit| {
                 let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(90));
                 pawline_core::deck::author(&http, &t, cancelled, commit)
             })?;
             let (slides, rep) = pawline_core::deck::compose(&outline).map_err(PawError::Validation)?;
             let review = pawline_core::deck::review_text(&slides, &rep);
-            *DECK_DRAFT.lock().unwrap() = Some(outline);
+            if !deck_draft_finish(gen, outline) {
+                return Err(PawError::Exec("A newer request replaced this one. The older draft was discarded and nothing was kept.".into()));
+            }
             return Ok(OpOutcome {
                 op: op.clone(),
-                detail: format!("Draft written by an online AI model (Pollinations, unchecked, may contain mistakes). NOTHING IS SAVED YET.\n{review}\n\nRead it. Say \"save the presentation\" to see the file name and confirm, or ignore it and nothing is kept (it is held in memory only)."),
+                detail: format!("Draft written by an online AI model (Pollinations, unchecked, may contain mistakes). NOTHING IS SAVED YET.\n{review}\n\nRead it. Say \"save the presentation\" to see the file name and confirm. The draft is not written to disk by Pawline: it lives in memory and in this chat window until you close Pawline, and a new request replaces it."),
             });
         }
         if let Operation::Shrink { from, to } = op {
@@ -197,7 +200,11 @@ impl ExecutionBackend for UiBackend {
             let detail = pawline_core::apps::launch(argv)?;
             return Ok(OpOutcome { op: op.clone(), detail });
         }
-        self.inner.execute(op)
+        let r = self.inner.execute(op);
+        if matches!(op, Operation::DeckText { .. }) && r.is_ok() {
+            *DECK_DRAFT.lock().unwrap() = None; // saved: the draft is used up
+        }
+        r
     }
     fn name(&self) -> &'static str {
         "ui"
@@ -321,7 +328,7 @@ pub fn task_memory_command(input: &str, path: Option<&std::path::Path>) -> Optio
 /// Answers, searches, online asks, pictures, undo and list are never remembered. Returns whether it saved.
 pub fn remember_steps(path: &std::path::Path, request: &str, ops: &[Operation], now: u64) -> bool {
     use pawline_core::plan::Operation as O;
-    if ops.is_empty() || ops.iter().any(|o| matches!(o, O::Answer { .. } | O::Search { .. } | O::Weather { .. } | O::AskOnline { .. } | O::GenerateImage { .. } | O::Undo { .. } | O::List { .. })) {
+    if ops.is_empty() || ops.iter().any(|o| matches!(o, O::Answer { .. } | O::Search { .. } | O::Weather { .. } | O::AskOnline { .. } | O::DeckDraft { .. } | O::DeckText { .. } | O::GenerateImage { .. } | O::Undo { .. } | O::List { .. })) {
         return false;
     }
     let steps: Vec<String> = ops.iter().map(|o| o.describe()).collect();
@@ -644,6 +651,26 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
 /// "make a presentation from <outline file>": local, deterministic, never changes the outline.
 /// The reviewed outline text from "write a presentation about ...". Memory only; replaced by the next draft, cleared once saved.
 static DECK_DRAFT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// Bumped when a draft request starts. A result may only become the draft if no newer request started meanwhile.
+static DECK_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A new draft request invalidates any earlier draft at once, so a failed, cancelled or abandoned request cannot leave an old one savable.
+fn deck_draft_begin() -> u64 {
+    use std::sync::atomic::Ordering::SeqCst;
+    *DECK_DRAFT.lock().unwrap() = None;
+    DECK_GEN.fetch_add(1, SeqCst) + 1
+}
+
+/// Keep a finished draft only when it is still the newest request. Returns whether it was kept.
+fn deck_draft_finish(gen: u64, outline: String) -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    let mut d = DECK_DRAFT.lock().unwrap();
+    if DECK_GEN.load(SeqCst) != gen {
+        return false;
+    }
+    *d = Some(outline);
+    true
+}
 
 /// "write a presentation about <topic>": a disclosure card first. Nothing leaves the machine until it is confirmed.
 fn deck_write_command(state: &mut UiState, input: &str) -> Option<UiReply> {
@@ -1095,6 +1122,28 @@ mod memory_tests {
         let n = std::fs::read_dir(&root).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "pptx")).count();
         assert_eq!(n, 0, "nothing is written before the card is confirmed");
         assert!(cancel(&mut st).text.contains("Nothing was done"));
+    }
+
+    #[test]
+    fn stale_or_failed_drafts_are_never_savable() {
+        let mut st = new_state(org_root("deckstale"));
+        *DECK_DRAFT.lock().unwrap() = Some("# Old\n## A\n- x\n## B\n- y\n## C\n- z\n".into());
+        let g1 = deck_draft_begin();
+        assert!(DECK_DRAFT.lock().unwrap().is_none(), "starting a request drops the old draft: failure/cancel leaves nothing");
+        assert!(handle_text(&mut st, "save the presentation").text.contains("no reviewed draft"));
+        let g2 = deck_draft_begin(); // a newer request started while the first was still out
+        assert!(!deck_draft_finish(g1, "# Late\n## A\n- x\n".into()), "a late older result is discarded");
+        assert!(DECK_DRAFT.lock().unwrap().is_none());
+        assert!(deck_draft_finish(g2, "# New\n## A\n- x\n## B\n- y\n## C\n- z\n".into()));
+        assert!(handle_text(&mut st, "save the presentation").kind == "confirm");
+        cancel(&mut st);
+        // nothing about a deck is ever recorded in task memory
+        let dir = std::env::temp_dir().join("pawline-deckmem");
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("task-memory.json");
+        let _ = std::fs::remove_file(&f);
+        assert!(!remember_steps(&f, "write a presentation about X", &[Operation::DeckDraft { topic: "X".into() }], 1));
+        assert!(!f.exists());
     }
 
     #[test]
