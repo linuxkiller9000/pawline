@@ -748,7 +748,7 @@ impl App {
     }
 
     fn settings_rows(&self) -> usize {
-        THEME_ROWS + 10
+        THEME_ROWS + 11
     }
 
     /// The drift animation runs only when its own switch is on and reduced motion is off (item 13).
@@ -790,6 +790,8 @@ impl App {
         } else if row == THEME_ROWS + 9 {
             self.settings.files_blocked = !self.settings.files_blocked;
             pawline_core::filesgate::set_read_only(self.settings.files_blocked);
+        } else if row == THEME_ROWS + 10 {
+            self.settings.voice = (self.settings.voice + 1) % theme::VOICES.len();
         } else {
             let i = theme::TEXT_SIZES.iter().position(|p| *p == self.settings.text_pct).unwrap_or(0);
             self.settings.text_pct = theme::TEXT_SIZES[(i + 1) % theme::TEXT_SIZES.len()];
@@ -884,6 +886,9 @@ impl App {
                 self.settings_fill(pm, PAD + 66.0, y + 4.0, 18.0, 18.0, 9.0, (t.accent.0, t.accent.1, t.accent.2, 255));
                 let label = format!("Theme: {} (Enter for next)", t.name);
                 self.text(pm, &label, PAD + 96.0, y + 18.0, 14.0, (255, 255, 255), clip);
+            } else if k == THEME_ROWS + 10 {
+                let label = format!("Voice (espeak voices only): {} (Enter to change)", theme::VOICES[self.settings.voice.min(theme::VOICES.len() - 1)].0);
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
             } else if k == THEME_ROWS + 9 {
                 let label = format!("File changes: {}", if self.settings.files_blocked { "BLOCKED (Pawline stays read-only)" } else { "allowed" });
                 self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
@@ -1985,7 +1990,8 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
             return;
         }
         let wpm = theme::SPEECH_RATES[self.settings.speech_rate.min(theme::SPEECH_RATES.len() - 1)].1;
-        match voice::tts(std::env::var("PAWLINE_TTS_CMD").ok().as_deref(), &voice::has_in_path, wpm).and_then(|c| voice::speak(&c, &t)) {
+        let vname = theme::VOICES[self.settings.voice.min(theme::VOICES.len() - 1)].1;
+        match voice::tts(std::env::var("PAWLINE_TTS_CMD").ok().as_deref(), &voice::has_in_path, wpm, vname).and_then(|c| voice::speak(&c, &t)) {
             Ok(ch) => self.speaking = Some(ch),
             Err(e) => self.push(false, "error", format!("Spoken replies are on but: {e}"), None),
         }

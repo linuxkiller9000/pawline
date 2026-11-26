@@ -146,16 +146,26 @@ pub fn find_model(env: Option<&str>, home: &Path) -> Option<PathBuf> {
 /// `rate_wpm` is the words-per-minute the settings row chose (item 20); a custom PAWLINE_TTS_CMD
 /// is passed through unchanged, because its own flags are the user's to set. flite has no wpm
 /// flag, so it gets duration_stretch relative to espeak's 175 default.
-pub fn tts(env_override: Option<&str>, has: &dyn Fn(&str) -> bool, rate_wpm: u32) -> Result<Cmd, String> {
+/// `voice` is the espeak voice name from the settings row ("" = engine default, no -v flag; item 20).
+/// It applies to espeak/espeak-ng only: flite keeps its own default voice and a custom
+/// PAWLINE_TTS_CMD is passed through unchanged, because its own flags are the user's to set.
+pub fn tts(env_override: Option<&str>, has: &dyn Fn(&str) -> bool, rate_wpm: u32, voice: &str) -> Result<Cmd, String> {
     if let Some(c) = env_override.and_then(split_env) {
         return Ok(c);
     }
     let wpm = rate_wpm.max(1);
+    let mut vargs: Vec<String> = Vec::new();
+    if !voice.is_empty() {
+        vargs.push("-v".into());
+        vargs.push(voice.into());
+    }
     if has("espeak-ng") {
-        return Ok(Cmd { program: "espeak-ng".into(), args: vec!["-s".into(), wpm.to_string(), "--stdin".into()], env: vec![] });
+        vargs.extend(["-s".into(), wpm.to_string(), "--stdin".into()]);
+        return Ok(Cmd { program: "espeak-ng".into(), args: vargs, env: vec![] });
     }
     if has("espeak") {
-        return Ok(Cmd { program: "espeak".into(), args: vec!["-s".into(), wpm.to_string(), "--stdin".into()], env: vec![] });
+        vargs.extend(["-s".into(), wpm.to_string(), "--stdin".into()]);
+        return Ok(Cmd { program: "espeak".into(), args: vargs, env: vec![] });
     }
     if has("flite") {
         return Ok(Cmd { program: "flite".into(), args: vec!["-f".into(), "/dev/stdin".into(), "-setf".into(), format!("duration_stretch={:.2}", 175.0 / wpm as f64)], env: vec![] });
@@ -612,25 +622,45 @@ mod tests {
 
     #[test]
     fn tts_detection_and_missing_message() {
-        assert_eq!(tts(None, &|b| b == "espeak-ng", 175).unwrap().program, "espeak-ng");
-        assert_eq!(tts(None, &|b| b == "flite", 175).unwrap().program, "flite");
-        assert!(tts(None, &|_| false, 175).unwrap_err().contains("espeak-ng"));
-        assert_eq!(tts(Some("say-it"), &|_| false, 175).unwrap().program, "say-it");
+        assert_eq!(tts(None, &|b| b == "espeak-ng", 175, "").unwrap().program, "espeak-ng");
+        assert_eq!(tts(None, &|b| b == "flite", 175, "").unwrap().program, "flite");
+        assert!(tts(None, &|_| false, 175, "").unwrap_err().contains("espeak-ng"));
+        assert_eq!(tts(Some("say-it"), &|_| false, 175, "").unwrap().program, "say-it");
+    }
+
+    #[test]
+    #[test]
+    fn tts_voice_flag_only_for_espeak_and_never_for_custom_or_default() {
+        // espeak-ng gets -v before -s
+        let c = tts(None, &|b| b == "espeak-ng", 175, "en-us").unwrap();
+        assert_eq!(c.args, vec!["-v", "en-us", "-s", "175", "--stdin"]);
+        let c = tts(None, &|b| b == "espeak", 120, "en+f3").unwrap();
+        assert_eq!(c.args, vec!["-v", "en+f3", "-s", "120", "--stdin"]);
+        // the default voice passes no -v flag at all
+        let c = tts(None, &|b| b == "espeak", 175, "").unwrap();
+        assert_eq!(c.args, vec!["-s", "175", "--stdin"]);
+        // flite keeps its own default voice (its voices are a different set)
+        let c = tts(None, &|b| b == "flite", 175, "en-us").unwrap();
+        assert!(!c.args.iter().any(|a| a == "-v"), "flite args: {:?}", c.args);
+        // a custom command is passed through unchanged
+        let c = tts(Some("say-it --flag"), &|_| false, 175, "en-us").unwrap();
+        assert_eq!(c.program, "say-it");
+        assert_eq!(c.args, vec!["--flag"]);
     }
 
     #[test]
     fn tts_rate_flags_per_engine_and_custom_untouched() {
-        let c = tts(None, &|b| b == "espeak-ng", 120).unwrap();
+        let c = tts(None, &|b| b == "espeak-ng", 120, "").unwrap();
         assert_eq!(c.args, vec!["-s", "120", "--stdin"], "espeak-ng takes -s wpm");
-        let c = tts(None, &|b| b == "espeak", 260).unwrap();
+        let c = tts(None, &|b| b == "espeak", 260, "").unwrap();
         assert_eq!(c.args, vec!["-s", "260", "--stdin"]);
-        let c = tts(None, &|b| b == "flite", 120).unwrap();
+        let c = tts(None, &|b| b == "flite", 120, "").unwrap();
         assert_eq!(c.args, vec!["-f", "/dev/stdin", "-setf", "duration_stretch=1.46"], "flite slows by stretch");
-        let c = tts(None, &|b| b == "flite", 260).unwrap();
+        let c = tts(None, &|b| b == "flite", 260, "").unwrap();
         assert_eq!(c.args, vec!["-f", "/dev/stdin", "-setf", "duration_stretch=0.67"]);
-        let c = tts(Some("say-it --flag"), &|_| false, 120).unwrap();
+        let c = tts(Some("say-it --flag"), &|_| false, 120, "").unwrap();
         assert_eq!(c.args, vec!["--flag"], "a custom command keeps exactly its own flags");
-        let c = tts(None, &|b| b == "espeak-ng", 0).unwrap();
+        let c = tts(None, &|b| b == "espeak-ng", 0, "").unwrap();
         assert_eq!(c.args[1], "1", "a zero rate can never reach the engine");
     }
 
@@ -716,7 +746,7 @@ mod tests {
         let out = std::env::temp_dir().join(format!("pawline-spoken-{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&out);
         let s = script("spk", &format!("cat > {}", out.display()));
-        let c = tts(Some(&s.to_string_lossy()), &|_| false, 175).unwrap();
+        let c = tts(Some(&s.to_string_lossy()), &|_| false, 175, "").unwrap();
         let mut ch = speak(&c, "hello there").unwrap();
         ch.wait().unwrap();
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "hello there");
