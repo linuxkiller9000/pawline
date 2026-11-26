@@ -274,3 +274,14 @@ how many. The Settings disclosure names archives explicitly. Live proofs (Xvfb, 
 dh2_donec (deleted, 3 files), tog_offc (toggle removed 2 archives), st3_settingsc (disclosure text).
 Behavioural test: bridge::memory_tests::delete_saved_history_asks_and_deletes_nothing_by_itself.
 Still open for item 19: context limits for very long conversations.
+
+2026-11-26 item 19 context limits: every conversation context layer is now bounded and documented. Offline chat
+memory: 8 turns (chat.rs MAX_TURNS). Online chat context: CHAT_CONTEXT_LINES, per-line cut. Saved history file:
+newest 100 lines, 4000 chars/line, 1 MB file cap (history.rs). Restored-on-launch: same 100-line cap. The one
+unbounded layer was the GUI's visible bubble list: new App::MAX_VIEW (200) cap drops the oldest VIEW bubbles,
+keeps the welcome line, inserts an in-view marker saying what happened, and adjusts the history watermark so the
+saved file's newest-100 policy is unaffected (the marker itself is never saved). Unit tests:
+view_cap_tests (3). Verified live: the file cap (a session with 100 seeded + 43 typed exchanges kept exactly the
+newest 100 lines). NOT done: a live 200-bubble GUI soak - the Xvfb debug driver needs ~2s/exchange and twice ran
+past the 110s harness window around bubble ~190; the slowing itself is what the cap bounds. Unit tests cover the
+cap logic; marker rendering reuses the proven "restored" bubble style.

@@ -92,6 +92,55 @@ fn menu_filter(t: &str) -> Vec<usize> {
 }
 
 #[cfg(test)]
+mod view_cap_tests {
+    use super::*;
+
+    fn msg(kind: &str, text: &str) -> Msg {
+        Msg { user: kind == "user", kind: kind.into(), text: text.into(), md: false, thumb: None, quote: None }
+    }
+
+    #[test]
+    fn under_the_cap_nothing_changes() {
+        let mut v = vec![msg("welcome", "w"), msg("user", "a"), msg("message", "b")];
+        let mut h = 1usize;
+        App::cap_view(&mut v, &mut h);
+        assert_eq!(v.len(), 3);
+        assert_eq!(h, 1);
+    }
+
+    #[test]
+    fn over_the_cap_drops_oldest_keeps_welcome_marks_and_adjusts_the_watermark() {
+        let mut v: Vec<Msg> = std::iter::once(msg("welcome", "w"))
+            .chain((0..App::MAX_VIEW + 10).map(|i| msg("user", &format!("line {i}"))))
+            .collect();
+        let mut h = 30usize;
+        App::cap_view(&mut v, &mut h);
+        assert_eq!(v[0].kind, "welcome");
+        // drop = 11 (welcome line is extra), plus one marker inserted
+        assert_eq!(v.len(), App::MAX_VIEW + 1);
+        assert_eq!(v[1].kind, "restored", "a marker explains the drop");
+        assert!(v[1].text.contains("Dropped 11 older bubbles"), "{}", v[1].text);
+        assert_eq!(v[2].text, "line 11", "the eleven oldest went");
+        // watermark: 30 - 11 drained + 1 marker inserted
+        assert_eq!(h, 20);
+        // The newest lines survive
+        assert_eq!(v.last().unwrap().text, format!("line {}", App::MAX_VIEW + 9));
+        // The marker itself is never saved to the history file
+        assert!(!crate::history::keep_kind(v[1].user, &v[1].kind));
+    }
+
+    #[test]
+    fn a_zero_watermark_stays_zero() {
+        let mut v: Vec<Msg> = std::iter::once(msg("welcome", "w"))
+            .chain((0..App::MAX_VIEW + 3).map(|i| msg("user", &format!("x{i}"))))
+            .collect();
+        let mut h = 0usize;
+        App::cap_view(&mut v, &mut h);
+        assert_eq!(h, 0);
+    }
+}
+
+#[cfg(test)]
 mod menu_tests {
     use super::*;
     #[test]
@@ -1305,6 +1354,39 @@ impl App {
         }
     }
 
+/// The visible bubble list is the one unbounded conversation structure (item 19): a long session
+/// would grow it forever. Cap it well above the history file's own newest-100 policy, so dropping
+/// old VIEW bubbles can never lose anything the saved file would have kept (persist_history saves
+/// from the same list and history::save keeps at most MAX_MSGS). The welcome line always stays,
+/// and each drop says what happened in the view itself.
+const MAX_VIEW: usize = 200;
+
+fn cap_view(msgs: &mut Vec<Msg>, hist_from: &mut usize) {
+    if msgs.len() <= App::MAX_VIEW {
+        return;
+    }
+    let drop = msgs.len() - App::MAX_VIEW;
+    // Never eat the welcome line (index 0); drop the oldest after it.
+    let end = (1 + drop).min(msgs.len());
+    msgs.drain(1..end);
+    let gone = end - 1;
+    if *hist_from > 0 {
+        *hist_from = hist_from.saturating_sub(gone).max(1);
+    }
+    msgs.insert(1, Msg {
+        user: false,
+        kind: "restored".into(),
+        text: format!("Dropped {gone} older bubbles from this view to keep Pawline responsive. Nothing was deleted: the saved conversation file (when on) keeps the newest lines, and this only trims what you see."),
+        md: false,
+        thumb: None,
+        quote: None,
+    });
+    // The marker added one back; the watermark moved one down with the drain, so balance it.
+    if *hist_from > 0 {
+        *hist_from += 1;
+    }
+}
+
 /// Messages the history file may hold, from index `from` on. The welcome line, cards, errors and
 /// anything before a mid-session ON are left out.
 fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
@@ -1316,6 +1398,7 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
         self.msgs.push(Msg { user, kind: kind.into(), text, md: false, thumb, quote });
         self.scroll = 0.0;
         self.persist_history();
+        Self::cap_view(&mut self.msgs, &mut self.hist_from);
     }
 
     /// Skill-menu rows matching what is typed (only a bare "/word", nothing else on screen).
