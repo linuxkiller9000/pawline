@@ -122,6 +122,77 @@ pub fn delete(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Render the saved conversation and every archived copy in `dir` as plain readable text
+/// (item 19: export). Returns the text and the number of saved lines; empty text when nothing
+/// is saved. Read-only: files are read through `load`, which skips missing/oversized/corrupt ones.
+pub fn render_export(dir: &Path) -> (String, usize) {
+    let mut files: Vec<(bool, std::path::PathBuf)> = Vec::new();
+    let cur = dir.join("history.txt");
+    if cur.symlink_metadata().map(|m| m.is_file()).unwrap_or(false) {
+        files.push((false, cur));
+    }
+    let mut arch: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("history-archived-") && n.ends_with(".txt"))
+                .unwrap_or(false)
+        })
+        .collect();
+    arch.sort();
+    files.extend(arch.into_iter().map(|p| (true, p)));
+    let mut out = String::new();
+    let mut total = 0usize;
+    for (archived, f) in files {
+        if archived {
+            out.push_str(&format!("--- archived copy: {} ---\n", f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+        }
+        for l in load(&f) {
+            total += 1;
+            out.push_str(if l.user { "You: " } else { "Pawline: " });
+            out.push_str(&l.text);
+            out.push('\n');
+        }
+    }
+    (out, total)
+}
+
+/// Write `text` to `target` without ever replacing an existing file: a temporary sibling is written
+/// and flushed, hard-linked into place (fails cleanly when the name is taken), then removed.
+/// Ok(true) = written, Ok(false) = the name was taken and nothing was written.
+pub fn write_no_replace(target: &Path, text: &str) -> std::io::Result<bool> {
+    let tmp = target.with_file_name(format!(".{}.tmp-{}", target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), std::process::id()));
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        use std::io::Write;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    match std::fs::hard_link(&tmp, target) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&tmp);
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(&tmp);
+            Ok(false)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
 pub const SEARCH_MAX_HITS: usize = 10;
 pub const SEARCH_HIT_MAX: usize = 100;
 
@@ -172,6 +243,40 @@ pub fn search_dir(dir: &Path, query: &str) -> (Vec<Hit>, usize) {
         }
     }
     (hits, total)
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    #[test]
+    fn render_export_labels_speakers_and_archives_and_counts_lines() {
+        let d = std::env::temp_dir().join(format!("pawline-exp-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        save(&d.join("history.txt"), &[Line { user: true, text: "hi".into() }, Line { user: false, text: "hello".into() }]).unwrap();
+        save(&d.join("history-archived-1000.txt"), &[Line { user: true, text: "old question".into() }]).unwrap();
+        let (text, total) = render_export(&d);
+        assert_eq!(total, 3);
+        assert!(text.starts_with("You: hi\nPawline: hello\n"), "{text}");
+        assert!(text.contains("--- archived copy: history-archived-1000.txt ---\nYou: old question\n"), "{text}");
+        let missing = d.join("nope");
+        assert_eq!(render_export(&missing), (String::new(), 0), "missing dir renders nothing");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn write_no_replace_never_overwrites_and_cleans_up() {
+        let d = std::env::temp_dir().join(format!("pawline-wr-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let t = d.join("out.txt");
+        assert_eq!(write_no_replace(&t, "first").unwrap(), true);
+        assert_eq!(std::fs::read_to_string(&t).unwrap(), "first");
+        assert_eq!(write_no_replace(&t, "second").unwrap(), false, "taken name: nothing written");
+        assert_eq!(std::fs::read_to_string(&t).unwrap(), "first", "the existing file is untouched");
+        let leftovers: Vec<_> = std::fs::read_dir(&d).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with('.')).collect();
+        assert!(leftovers.is_empty(), "no temp files left behind: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
 
 #[cfg(test)]

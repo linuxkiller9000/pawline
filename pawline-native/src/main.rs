@@ -294,6 +294,9 @@ fn line_mode(l: &str) -> shape::Mode {
 /// data, not a confined filesystem plan, so it cannot ride the engine's confirm path.
 enum AppAction {
     DeleteHistory(Vec<std::path::PathBuf>),
+    /// Chosen target path and the already-rendered text (rendered when the card is shown,
+    /// so the card's line count is exactly what is written).
+    ExportHistory { target: std::path::PathBuf, text: String },
 }
 
 enum Req {
@@ -1432,6 +1435,50 @@ impl App {
         self.draw();
     }
 
+    /// "export history": write the saved conversation and archived copies to ONE readable text file
+    /// in Documents (or home), after a card showing the exact path. Never overwrites (item 19).
+    fn ask_export_history(&mut self) {
+        let Some(dir) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
+            self.push(false, "message", "There is no data folder to export from.".into(), None);
+            self.draw();
+            return;
+        };
+        let (text, total) = history::render_export(&dir);
+        if total == 0 {
+            self.push(false, "message", "There is no saved conversation to export: history keeping is off or nothing is saved. Turn it on in Settings first. Nothing was written.".into(), None);
+            self.draw();
+            return;
+        }
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("/"));
+        let docs = home.join("Documents");
+        let base = if docs.is_dir() { docs } else { home };
+        let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let mut target = base.join(format!("pawline-history-{epoch}.txt"));
+        for i in 1..10 {
+            if !target.exists() {
+                break;
+            }
+            target = base.join(format!("pawline-history-{epoch}-{i}.txt"));
+        }
+        if target.exists() {
+            self.push(false, "error", "Every export name tried already exists; nothing was written. Rename or move the older exports first.".into(), None);
+            self.draw();
+            return;
+        }
+        let archives = Self::history_archives().len();
+        let mut card = format!("Export your saved conversation to:\n{}", target.display());
+        card.push_str(&format!("\n- {total} saved lines in total"));
+        if archives > 0 {
+            card.push_str(&format!("\n- includes {archives} archived conversation file(s), labelled in the export"));
+        }
+        card.push_str("\nThe file is plain readable text. A new file is written; existing files are never overwritten, and the originals stay as they are.");
+        self.confirm = Some(card);
+        self.app_pending = Some(AppAction::ExportHistory { target, text });
+        self.focus = Btn::No;
+        self.plan_scroll = 0.0;
+        self.draw();
+    }
+
     /// "New conversation": drop every bubble but the welcome line. The saved history file is NOT
     /// erased silently: with history ON its earlier lines are moved aside to a dated archive name
     /// first, so nothing the user chose to keep is lost (item 19).
@@ -2037,11 +2084,26 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
         if let Some(act) = self.app_pending.take() {
             // App-level action: runs here, never reaches the engine.
             if !yes {
-                self.push(false, "message", "Cancelled. Nothing was deleted.".into(), None);
+                let msg = match &act {
+                    AppAction::ExportHistory { .. } => "Cancelled. Nothing was written.",
+                    AppAction::DeleteHistory(_) => "Cancelled. Nothing was deleted.",
+                };
+                self.push(false, "message", msg.into(), None);
                 self.draw();
                 return;
             }
             match act {
+                AppAction::ExportHistory { target, text, .. } => {
+                    match history::write_no_replace(&target, &text) {
+                        Ok(true) => {
+                            let n = text.lines().filter(|l| l.starts_with("You: ") || l.starts_with("Pawline: ")).count();
+                            self.push(false, "message", format!("Exported {n} saved lines to {}. The originals are untouched.", target.display()), None);
+                        }
+                        Ok(false) => self.push(false, "error", format!("Nothing was written: {} already exists (it appeared after the card was shown). Ask again for a fresh name.", target.display()), None),
+                        Err(e) => self.push(false, "error", format!("The export could not be written ({e}). Nothing was changed."), None),
+                    }
+                    self.draw();
+                }
                 AppAction::DeleteHistory(paths) => {
                     let mut gone = 0usize;
                     let mut failed: Vec<String> = Vec::new();
@@ -2081,6 +2143,10 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
         }
         if r.kind == "histsearch" {
             self.reply_history_search(r.plan.as_deref().unwrap_or(""));
+            return;
+        }
+        if r.kind == "exphist" {
+            self.ask_export_history();
             return;
         }
         self.push(false, &r.kind, r.text.clone(), None);

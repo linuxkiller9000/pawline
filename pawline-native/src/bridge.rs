@@ -501,6 +501,10 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             // Terminal mode keeps no history file, so say so instead of pretending.
             return reply("delhist", "The app will list the saved conversation file and any archived copies and ask before deleting. (Terminal sessions keep no history file.)".into());
         }
+        if matches!(low, "export history" | "export my history" | "export saved history" | "export my saved history" | "export saved conversation" | "export saved conversations" | "export my saved conversation" | "export my saved conversations" | "export chat history") {
+            // The window owns the history files: it shows the exact target path and asks first.
+            return reply("exphist", "The app will show where the export would be written and ask first. (Terminal sessions keep no history file.)".into());
+        }
         // History search (item 19). The query travels BYTE FOR BYTE from the original input in
         // `plan`: lowercasing and typo tolerance must never touch what the user wants to find.
         if let Some(q) = history_search_query(input) {
@@ -1773,6 +1777,18 @@ mod memory_tests {
         assert_eq!(r.kind, "message", "empty query asks instead of searching: {}", r.text);
         let r = handle_text(&mut st, "search my files for cmake");
         assert_ne!(r.kind, "histsearch", "ordinary file search is untouched");
+    }
+
+    #[test]
+    fn export_history_phrases_are_app_level_and_file_export_is_untouched() {
+        let root = org_root("exphist");
+        let mut st = new_state(root);
+        for p in ["export history", "export my saved conversations", "export chat history", "EXPORT HISTORY"] {
+            let r = handle_text(&mut st, p);
+            assert_eq!(r.kind, "exphist", "{p}: {}", r.text);
+        }
+        let r = handle_text(&mut st, "export my files to usb");
+        assert_ne!(r.kind, "exphist", "not a history phrase: {}", r.text);
     }
 
     #[test]
