@@ -60,6 +60,47 @@ fn ask_online(text: &str) -> Result<String, PawError> {
     .map(|a| format!("Pollinations (online, not checked, may be wrong):\n{a}"))
 }
 
+/// Places offered by the weather chooser, waiting for a number. Memory only; any other input clears it.
+static WEATHER_PICK: std::sync::Mutex<Option<Vec<pawline_core::weather::Place>>> = std::sync::Mutex::new(None);
+
+/// A typed number while a weather chooser is open fetches that place's forecast; anything else cancels the chooser.
+pub fn weather_pick(input: &str) -> Option<UiReply> {
+    let opts = WEATHER_PICK.lock().unwrap().take()?;
+    let n: usize = input.trim().trim_end_matches('.').parse().ok().filter(|n| (1..=opts.len()).contains(n))?;
+    let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(20));
+    Some(match pawline_core::weather::forecast(&http, &opts[n - 1]) {
+        Ok(t) => reply("executed", t),
+        Err(e) => {
+            let t = e.to_string();
+            reply("failed", t.strip_prefix("Execution failed: ").unwrap_or(&t).to_string())
+        }
+    })
+}
+
+pub fn weather_pick_open() -> bool {
+    WEATHER_PICK.lock().unwrap().is_some()
+}
+
+/// Online prose (Wikipedia, web instant answer, Pollinations) is drawn as Markdown, with a plain heading.
+/// Weather and anything with files or paths stays raw.
+fn online_md(ops: &[OpOutcome]) -> Option<String> {
+    use pawline_core::plan::Operation as O;
+    if ops.is_empty() {
+        return None;
+    }
+    let mut parts = vec![];
+    for o in ops {
+        let (head, body) = match &o.op {
+            O::Search { engine: SearchEngine::Wiki, .. } => ("Wikipedia (online)".to_string(), o.detail.clone()),
+            O::Search { .. } => ("Web instant answer (online, may be out of date)".to_string(), o.detail.clone()),
+            O::AskOnline { .. } => ("Pollinations answer (online, not checked, may be wrong)".to_string(), o.detail.split_once('\n').map(|x| x.1.to_string()).unwrap_or_else(|| o.detail.clone())),
+            _ => return None,
+        };
+        parts.push(format!("**{head}**\n\n{body}"));
+    }
+    Some(parts.join("\n\n"))
+}
+
 static FORCE_REFRESH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Explicit search with a small local memory of past answers (see pawline_core::searchmem).
@@ -81,7 +122,9 @@ impl ExecutionBackend for UiBackend {
     fn execute(&self, op: &Operation) -> Result<OpOutcome, PawError> {
         if let Operation::Weather { place } = op {
             let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(20));
-            let text = pawline_core::weather::weather(&http, place)?;
+            let mut pend = None;
+            let text = pawline_core::weather::weather(&http, place, &mut pend)?;
+            *WEATHER_PICK.lock().unwrap() = pend;
             return Ok(OpOutcome { op: op.clone(), detail: text });
         }
         if let Operation::Search { engine, query } = op {
@@ -261,6 +304,9 @@ pub fn remember_steps(path: &std::path::Path, request: &str, ops: &[Operation], 
 }
 
 fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
+    if let Some(r) = weather_pick(input) {
+        return r;
+    }
     // Local, offline controls for the search memory (Pawline's own file, nothing leaves the machine).
     {
         use pawline_core::searchmem as sm;
@@ -407,6 +453,12 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             if let Some(p) = pawline_core::planmem::default_path() {
                 remember_steps(&p, input, &ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>(), pawline_core::searchmem::now_secs());
             }
+            if ops.len() == 1 && matches!(ops[0].op, pawline_core::plan::Operation::Weather { .. }) && weather_pick_open() {
+                return reply("message", ops[0].detail.clone());
+            }
+            if let Some(md) = online_md(&ops) {
+                return reply("md", md);
+            }
             let answer_only = ops.len() == 1 && matches!(ops[0].op, pawline_core::plan::Operation::Answer { .. });
             let body = if answer_only {
                 done.join("\n")
@@ -418,8 +470,8 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                             format!("Picture ready ({})\n{}", provider.label(), o.detail)
                         }
                         pawline_core::plan::Operation::Shrink { .. } | pawline_core::plan::Operation::Deck { .. } => o.detail.clone(),
+                        pawline_core::plan::Operation::Weather { .. } => o.detail.clone(),
                         pawline_core::plan::Operation::Search { .. }
-                        | pawline_core::plan::Operation::Weather { .. }
                         | pawline_core::plan::Operation::AskOnline { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)
@@ -489,6 +541,12 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
     state.notes.extend(backend.inner.recovery_notes().iter().cloned());
     match state.engine.execute_plan(plan, &backend) {
         Ok(Response::Executed(ops)) => {
+            if ops.len() == 1 && matches!(ops[0].op, pawline_core::plan::Operation::Weather { .. }) && weather_pick_open() {
+                return reply("message", ops[0].detail.clone());
+            }
+            if let Some(md) = online_md(&ops) {
+                return reply("md", md);
+            }
             state.undo_batch = organize_n;
             // Recorded only after the confirmed plan fully succeeded (cancelled and failed plans arrive as Failed).
             if let Some(p) = pawline_core::dirs::own_path() {
@@ -510,8 +568,8 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
                             format!("Picture ready ({})\n{}", provider.label(), o.detail)
                         }
                         pawline_core::plan::Operation::Shrink { .. } => o.detail.clone(),
+                        pawline_core::plan::Operation::Weather { .. } => o.detail.clone(),
                         pawline_core::plan::Operation::Search { .. }
-                        | pawline_core::plan::Operation::Weather { .. }
                         | pawline_core::plan::Operation::AskOnline { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)
@@ -934,7 +992,7 @@ mod memory_tests {
         ] {
             let r = handle_text(&mut st, q);
             assert_eq!(r.kind, "confirm", "{q}: {}", r.text);
-            assert!(r.text.contains(host) && r.text.contains("IP address") && r.text.contains("Nothing else is sent"), "{q}: {}", r.text);
+            assert!(r.text.contains(host) && r.text.contains("IP address") && r.text.contains("does not send your files"), "{q}: {}", r.text);
             assert!(st.pending.is_some());
             let c = cancel(&mut st);
             assert!(c.text.contains("Nothing was done") && st.pending.is_none(), "{q}");
@@ -942,6 +1000,36 @@ mod memory_tests {
         // no place: asks, no card, nothing sent
         let r = handle_text(&mut st, "what is the weather");
         assert!(r.text.contains("Which place") && st.pending.is_none());
+    }
+
+    #[test]
+    fn weather_chooser_pick_and_cancel_state() {
+        use pawline_core::weather::Place;
+        let mut st = new_state(org_root("wpick"));
+        let opts = vec![Place { label: "A, X".into(), lat: 1.0, lon: 2.0 }, Place { label: "A, Y".into(), lat: 3.0, lon: 4.0 }];
+        // a non-number cancels the chooser and is then handled as normal input
+        *WEATHER_PICK.lock().unwrap() = Some(opts.clone());
+        assert!(weather_pick_open());
+        assert!(weather_pick("never mind").is_none() && !weather_pick_open(), "any other text closes it");
+        // an out-of-range number also closes it without any request
+        *WEATHER_PICK.lock().unwrap() = Some(opts.clone());
+        assert!(weather_pick("7").is_none() && !weather_pick_open());
+        // with no chooser open a number is just text
+        let r = handle_text(&mut st, "2");
+        assert!(!r.text.contains("Weather for"), "a bare number is not a weather pick: {}", r.text);
+        assert!(!weather_pick_open());
+    }
+
+    #[test]
+    fn online_prose_is_markdown_and_weather_stays_raw() {
+        use pawline_core::plan::{Operation as O, SearchEngine};
+        let o = |op: O, d: &str| OpOutcome { op, detail: d.into() };
+        let md = online_md(&[o(O::Search { engine: SearchEngine::Wiki, query: "q".into() }, "Wikipedia - Tux: a **penguin**\nSource: https://en.wikipedia.org/wiki/Tux")]).unwrap();
+        assert!(md.starts_with("**Wikipedia (online)**\n\n") && md.contains("Source: https://en.wikipedia.org/wiki/Tux"));
+        let md = online_md(&[o(O::AskOnline { text: "q".into() }, "Pollinations (online, not checked, may be wrong):\nHello")]).unwrap();
+        assert!(md.contains("may be wrong)**\n\nHello") && !md.contains("Pollinations (online"));
+        assert!(online_md(&[o(O::Weather { place: "x".into() }, "d")]).is_none());
+        assert!(online_md(&[o(O::Answer { text: "x".into() }, "d")]).is_none());
     }
 
     fn org_root(tag: &str) -> std::path::PathBuf {

@@ -56,7 +56,7 @@ fn enc_query(s: &str) -> String {
 
 fn get_json(url: &str) -> Result<serde_json::Value, PawError> {
     let body = ureq::get(url)
-        .header("User-Agent", "Pawline/0.1 (personal desktop assistant)")
+        .header("User-Agent", "Pawline/0.1 (personal desktop assistant; https://github.com/linuxkiller9000/pawline)")
         .call()
         .map_err(|e| PawError::Exec(format!("search request failed: {e}")))?
         .body_mut()

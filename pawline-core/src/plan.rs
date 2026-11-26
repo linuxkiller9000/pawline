@@ -110,19 +110,19 @@ impl Operation {
             },
             Operation::Answer { text } => text.clone(),
             Operation::GenerateImage { provider, prompt } => format!(
-                "Make a picture of \"{prompt}\" with {}: this {}. Nothing else is sent. It is saved in ~/Pictures/Pawline.",
+                "Make a picture of \"{prompt}\" with {}: this {}. Pawline sends only that prompt, plus the usual web details (IP address, a \"Pawline\" user-agent). It is saved in ~/Pictures/Pawline.",
                 provider.label(),
                 provider.disclosure()
             ),
             Operation::AskOnline { text } => format!(
-                "Ask Pollinations (online) \"{text}\": this sends your question text and your IP address to text.pollinations.ai (free, no account). Nothing else is sent: no files, no history. The answer is only shown, never run, and may be wrong."
+                "Ask Pollinations (online) \"{text}\": this is the free \"Classic\" service: no account, best effort, about one request per 45 seconds per IP address. Pawline puts your question text in the web address it requests from text.pollinations.ai, plus the usual web details (your IP address, a \"Pawline\" user-agent). Pollinations says the same address returns the same cached answer to anyone who has it. Pawline does not send your files, chat history or location. What Pollinations keeps is its own policy. The answer is only shown, never run, and may be wrong."
             ),
             Operation::Search { engine, query } => match engine {
                 SearchEngine::Web => format!(
-                    "Search the web for \"{query}\" (online): this sends your search words and your IP address to api.duckduckgo.com (free, no account). Nothing else is sent: no files, no history. The result is only shown, never run, and may be out of date."
+                    "Search the web for \"{query}\" (online, free, no account): Pawline sends your search words to api.duckduckgo.com (its Instant Answer service, not full web search), plus the usual web details: your IP address and a \"Pawline\" user-agent. Pawline does not send your files, chat history or location. What DuckDuckGo keeps is its own policy. The result is only shown, never run, and may be empty or out of date."
                 ),
                 SearchEngine::Wiki => format!(
-                    "Search Wikipedia for \"{query}\" (online): this sends your search words and your IP address to en.wikipedia.org (free, no account). Nothing else is sent: no files, no history. The result is only shown, never run."
+                    "Search Wikipedia for \"{query}\" (online, free, no account): Pawline sends your search words to en.wikipedia.org, plus the usual web details: your IP address and a \"Pawline\" user-agent. Pawline does not send your files, chat history or location. What Wikipedia keeps is its own policy. The result is only shown, never run."
                 ),
             },
             Operation::Weather { place } => crate::weather::disclosure(place),

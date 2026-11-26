@@ -17,7 +17,7 @@ impl ExecutionBackend for UiBackend {
     fn execute(&self, op: &Operation) -> Result<OpOutcome, PawError> {
         if let Operation::Weather { place } = op {
             let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(20));
-            return Ok(OpOutcome { op: op.clone(), detail: pawline_core::weather::weather(&http, place)? });
+            return Ok(OpOutcome { op: op.clone(), detail: { let mut p = None; pawline_core::weather::weather(&http, place, &mut p)? } });
         }
         if let Operation::Search { engine, query } = op {
             let text = pawline_core::search::run(*engine, query)?;
