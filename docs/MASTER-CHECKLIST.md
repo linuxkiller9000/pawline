@@ -21,7 +21,7 @@ Legend: DONE = done for the scope written, not hardware-verified. PARTIAL = some
 | 7 | Basic presentations | (old 9) | DONE as a checkpoint |
 | 8 | Typo tolerance | new | PARTIAL: command, weather, search and question words (docs/TYPOS.md) |
 | 9 | Conversation, hints and jokes | new | DONE for session-only scope (accepted by main 3:35): offline chat, hints, jokes, opt-in online chat with exact-text card. Separate: persistent history (15/19), Arabic (11) |
-| 10 | Presentation extras | new | PARTIAL: themes done (theme: line, 6 themes, contrast-tested, LibreOffice render checked); tables, local images, draft editing, charts, fact-check support, non-LibreOffice check OPEN |
+| 10 | Presentation extras | new | PARTIAL: themes done (theme: line, 6 themes, contrast-tested, LibreOffice render checked); tables done (| a | b | lines, native table, limits 8x6, ragged/oversize refused, RTL cells, LibreOffice render checked); local images, draft editing, charts, fact-check support, non-LibreOffice check OPEN |
 | 11 | Arabic functionality | new | OPEN |
 | 12 | Voice/audio completion | new | OPEN (runtime gates) |
 | 13 | Desktop polish and accessibility | section 25 + extras | OPEN |

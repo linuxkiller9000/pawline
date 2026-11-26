@@ -20,6 +20,8 @@ pub struct Slide {
     pub title: String,
     /// (level 0 or 1, text)
     pub bullets: Vec<(u8, String)>,
+    /// Optional table (first row = header). Empty = no table. Written as `| a | b |` lines in the outline.
+    pub table: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -155,10 +157,16 @@ fn compose_inner(text: &str) -> Result<(Vec<Slide>, Report), String> {
     let mut out: Vec<Slide> = vec![];
     let mut content_titles: Vec<String> = vec![];
     for (i, s) in raw.into_iter().enumerate() {
-        if i > 0 || !(s.bullets.len() <= 2 && first_is_title) {
+        if i > 0 || !(s.bullets.len() <= 2 && s.table.is_empty() && first_is_title) {
             content_titles.push(s.title.clone());
         }
-        if i == 0 && s.bullets.len() <= 2 && first_is_title {
+        if i == 0 && s.bullets.len() <= 2 && s.table.is_empty() && first_is_title {
+            out.push(s);
+            continue;
+        }
+        if !s.table.is_empty() {
+            // A table slide stays one slide: a few lines of text above the table, never split across slides.
+            check_table(&s)?;
             out.push(s);
             continue;
         }
@@ -198,12 +206,12 @@ fn compose_inner(text: &str) -> Result<(Vec<Slide>, Report), String> {
             if title.chars().count() > MAX_TITLE_CHARS {
                 return Err(format!("the title \"{}...\" is too long once \"({}/{n})\" is added; shorten it", s.title.chars().take(30).collect::<String>(), k + 1));
             }
-            out.push(Slide { title, bullets: p });
+            out.push(Slide { title, bullets: p, table: vec![] });
         }
     }
     // A Contents slide for longer talks: the original slide titles only (not continuations), after the title slide.
     if out.len() >= 5 && content_titles.len() >= 4 && content_titles.len() <= SLIDE_LINES + 2 {
-        out.insert(1, Slide { title: "Contents".into(), bullets: content_titles.into_iter().map(|t| (0, t)).collect() });
+        out.insert(1, Slide { title: "Contents".into(), bullets: content_titles.into_iter().map(|t| (0, t)).collect(), table: vec![] });
         rep.agenda = true;
     }
     if out.len() > MAX_SLIDES {
@@ -274,10 +282,10 @@ fn parse_prose(text: &str) -> Result<Vec<Slide>, String> {
     let first = it.peek().unwrap();
     let ends = |l: &str| l.trim_end().ends_with(['.', '!', '?', ':', '\u{061F}']);
     if first.len() == 1 && first[0].chars().count() <= MAX_TITLE_CHARS && !ends(first[0]) {
-        slides.push(Slide { title: first[0].to_string(), bullets: vec![] });
+        slides.push(Slide { title: first[0].to_string(), bullets: vec![], table: vec![] });
         it.next();
     } else {
-        slides.push(Slide { title: "Presentation".into(), bullets: vec![] });
+        slides.push(Slide { title: "Presentation".into(), bullets: vec![], table: vec![] });
     }
     for p in it {
         let bullet_like = |l: &str| l.starts_with("- ") || l.starts_with("* ") || l.starts_with("+ ");
@@ -288,7 +296,7 @@ fn parse_prose(text: &str) -> Result<Vec<Slide>, String> {
             let sents = split_sent(&all.replace(" - ", " "), false).unwrap_or_else(|_| vec![all.clone()]);
             prose_title(sents)
         };
-        slides.push(Slide { title, bullets: rest });
+        slides.push(Slide { title, bullets: rest, table: vec![] });
     }
     Ok(slides)
 }
@@ -375,19 +383,28 @@ pub fn parse_outline(text: &str) -> Result<Vec<Slide>, String> {
         if let Some(t) = line.strip_prefix("# ") {
             if !seen_title && slides.is_empty() {
                 seen_title = true;
-                slides.push(Slide { title: t.trim().to_string(), bullets: vec![] });
+                slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![] });
                 continue;
             }
-            slides.push(Slide { title: t.trim().to_string(), bullets: vec![] });
+            slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![] });
             continue;
         }
         if let Some(t) = line.strip_prefix("## ").or_else(|| line.strip_prefix("### ")) {
-            slides.push(Slide { title: t.trim().to_string(), bullets: vec![] });
+            slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![] });
             continue;
         }
         let Some(cur) = slides.last_mut() else {
             return Err("the outline must start with a heading line like \"# My talk\" or \"## First slide\"".into());
         };
+        let tl = line.trim();
+        if tl.starts_with('|') && tl.ends_with('|') && tl.len() >= 3 {
+            let cells: Vec<String> = tl[1..tl.len() - 1].split('|').map(|c| c.trim().to_string()).collect();
+            let is_sep = cells.iter().all(|c| !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':' | ' ')) && c.contains('-'));
+            if !is_sep {
+                cur.table.push(cells);
+            }
+            continue;
+        }
         let indent = line.len() - line.trim_start().len();
         let body = line.trim_start();
         let (is_b, body) = match body.strip_prefix("- ").or_else(|| body.strip_prefix("* ")).or_else(|| body.strip_prefix("+ ")) {
@@ -488,6 +505,81 @@ fn sp(id: u32, name: &str, ph: &str, idx: Option<u32>, x: i64, y: i64, w: i64, h
     format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"{name}\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph type=\"{ph}\"{idxa}/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{w}\" cy=\"{h}\"/></a:xfrm></p:spPr>{body}</p:sp>")
 }
 
+
+pub const TABLE_MAX_ROWS: usize = 8;
+pub const TABLE_MAX_COLS: usize = 6;
+pub const TABLE_CELL_CHARS: usize = 60;
+
+fn table_font(rows: usize, cols: usize) -> u32 {
+    if cols <= 3 && rows <= 6 { 2000 } else if cols <= 5 && rows <= 7 { 1800 } else { 1600 }
+}
+
+/// Estimated height in points of the wrapped table (an estimate, like body_size).
+fn table_height(t: &[Vec<String>]) -> f32 {
+    let cols = t[0].len().max(1);
+    let pt = table_font(t.len(), cols) as f32 / 100.0;
+    let colw = 828.0 / cols as f32 - 14.0;
+    let per_line = (colw / (pt * 0.55)).floor().max(1.0);
+    t.iter().map(|r| r.iter().map(|c| (c.chars().count() as f32 / per_line).ceil().max(1.0)).fold(1.0, f32::max) * pt * 1.2 + 14.0).sum()
+}
+
+fn check_table(s: &Slide) -> Result<(), String> {
+    let t = &s.table;
+    let cols = t[0].len();
+    if t.len() < 2 {
+        return Err(format!("the table on \"{}\" has only a header row; add at least one data row", s.title));
+    }
+    if t.len() > TABLE_MAX_ROWS {
+        return Err(format!("the table on \"{}\" has {} rows; the limit is {TABLE_MAX_ROWS} (split it over two slides)", s.title, t.len()));
+    }
+    if cols > TABLE_MAX_COLS || cols == 0 {
+        return Err(format!("the table on \"{}\" has {cols} columns; the limit is {TABLE_MAX_COLS}", s.title));
+    }
+    for (i, r) in t.iter().enumerate() {
+        if r.len() != cols {
+            return Err(format!("row {} of the table on \"{}\" has {} cells but the header has {cols}. I will not guess which cells are missing", i + 1, s.title, r.len()));
+        }
+        if let Some(c) = r.iter().find(|c| c.chars().count() > TABLE_CELL_CHARS) {
+            return Err(format!("a cell on \"{}\" starting \"{}...\" is longer than {TABLE_CELL_CHARS} characters", s.title, c.chars().take(20).collect::<String>()));
+        }
+    }
+    if s.bullets.len() > 3 {
+        return Err(format!("\"{}\" has a table and {} text lines; with a table keep at most 3 lines of text", s.title, s.bullets.len()));
+    }
+    let room = if s.bullets.is_empty() { 330.0 } else { 250.0 };
+    let h = table_height(t);
+    if h > room {
+        return Err(format!("the table on \"{}\" would be about {h:.0} points tall and only {room:.0} fit; shorten the cells or split it", s.title));
+    }
+    Ok(())
+}
+
+fn table_xml(t: &[Vec<String>], y: i64) -> String {
+    let cols = t[0].len();
+    let sz = table_font(t.len(), cols);
+    let w_total: i64 = 10515600;
+    let cw = w_total / cols as i64;
+    let mut x = String::from("<a:tblGrid>");
+    for _ in 0..cols {
+        x.push_str(&format!("<a:gridCol w=\"{cw}\"/>"));
+    }
+    x.push_str("</a:tblGrid>");
+    for (ri, r) in t.iter().enumerate() {
+        x.push_str("<a:tr h=\"420000\">");
+        for c in r {
+            let rtl = is_rtl(c);
+            let lang = if rtl { "ar-SA" } else { "en-US" };
+            let ppr = if rtl { "<a:pPr algn=\"r\" rtl=\"1\"/>" } else { "" };
+            let b = if ri == 0 { " b=\"1\"" } else { "" };
+            let fill = if ri == 0 { "<a:solidFill><a:schemeClr val=\"bg2\"/></a:solidFill>" } else { "<a:noFill/>" };
+            x.push_str(&format!("<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p>{ppr}<a:r><a:rPr lang=\"{lang}\" sz=\"{sz}\"{b} dirty=\"0\"><a:solidFill><a:schemeClr val=\"tx1\"/></a:solidFill></a:rPr><a:t>{}</a:t></a:r></a:p></a:txBody><a:tcPr marL=\"91440\" marR=\"91440\" marT=\"45720\" marB=\"45720\" anchor=\"ctr\"><a:lnL w=\"0\"><a:noFill/></a:lnL><a:lnR w=\"0\"><a:noFill/></a:lnR><a:lnT w=\"0\"><a:noFill/></a:lnT><a:lnB w=\"12700\"><a:solidFill><a:schemeClr val=\"accent1\"/></a:solidFill></a:lnB>{fill}</a:tcPr></a:tc>", esc(c)));
+        }
+        x.push_str("</a:tr>");
+    }
+    let h = 420000 * t.len() as i64;
+    format!("<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"4\" name=\"Table\"/><p:cNvGraphicFramePr><a:graphicFrameLocks noGrp=\"1\"/></p:cNvGraphicFramePr><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x=\"838200\" y=\"{y}\"/><a:ext cx=\"{w_total}\" cy=\"{h}\"/></p:xfrm><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/table\"><a:tbl><a:tblPr firstRow=\"1\"/>{x}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>")
+}
+
 fn slide_xml(s: &Slide, is_title: bool) -> String {
     let mut shapes = String::new();
     let t = format!("<p:txBody><a:bodyPr/><a:lstStyle/>{}</p:txBody>", para(0, &s.title));
@@ -504,7 +596,18 @@ fn slide_xml(s: &Slide, is_title: bool) -> String {
         } else {
             { let z = body_size(&s.bullets); s.bullets.iter().map(|(l, b)| para_sz(*l as u32, b, z)).collect() }
         };
-        shapes.push_str(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Content\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr><a:noAutofit/></a:bodyPr><a:lstStyle/>{paras}</p:txBody></p:sp>"));
+        if s.table.is_empty() {
+            shapes.push_str(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Content\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr><a:noAutofit/></a:bodyPr><a:lstStyle/>{paras}</p:txBody></p:sp>"));
+        } else {
+            let mut y = 1825625i64;
+            if !s.bullets.is_empty() {
+                let h = 380000 * s.bullets.len() as i64 + 150000;
+                let paras: String = s.bullets.iter().map(|(l, b)| para_sz(*l as u32, b, 2000)).collect();
+                shapes.push_str(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Content\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"838200\" y=\"1500000\"/><a:ext cx=\"10515600\" cy=\"{h}\"/></a:xfrm></p:spPr><p:txBody><a:bodyPr><a:noAutofit/></a:bodyPr><a:lstStyle/>{paras}</p:txBody></p:sp>"));
+                y = 1500000 + h + 100000;
+            }
+            shapes.push_str(&table_xml(&s.table, y));
+        }
     }
     format!("{HDR}<p:sld {NS}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{shapes}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>")
 }
@@ -587,7 +690,7 @@ pub fn build_pptx_themed(slides: &[Slide], theme: Theme) -> Vec<u8> {
 impl Slide {
     /// The first slide is a title slide when it has at most two plain lines (a subtitle) and came from `# Title`.
     fn title_slide_like(&self) -> bool {
-        self.bullets.len() <= 2
+        self.bullets.len() <= 2 && self.table.is_empty()
     }
 }
 
@@ -838,6 +941,9 @@ pub fn review_text(slides: &[Slide], rep: &Report) -> String {
         s.push_str(&format!("\n{}. {}\n", i + 1, sl.title));
         for (lvl, b) in &sl.bullets {
             s.push_str(&format!("{}- {}\n", if *lvl > 0 { "    " } else { "  " }, b));
+        }
+        for (ri, r) in sl.table.iter().enumerate() {
+            s.push_str(&format!("  | {} |{}\n", r.join(" | "), if ri == 0 { "  (table header)" } else { "" }));
         }
     }
     s.trim_end().to_string()
@@ -1095,6 +1201,56 @@ mod tests {
         for t in THEMES {
             let (sl, r) = compose(&format!("theme: {}\n# Tea at home\nA short talk\n## Why tea\n- Warm and calming\n- Many kinds\n  - green\n  - black\n## Brewing\n- Heat water\n- Wait three minutes\n", t.name())).unwrap();
             std::fs::write(format!("/tmp/deck/themes/{}.pptx", t.name()), build_pptx_themed(&sl, r.theme)).unwrap();
+        }
+    }
+
+    const T: &str = "# Talk\n## Prices\nCoffee is cheap here.\n| Item | Price | Notes |\n|---|:---:|---|\n| Tea | 2 | hot |\n| Coffee | 3 | strong |\n| \u{0634}\u{0627}\u{064a} | 2 | \u{0633}\u{0627}\u{062e}\u{0646} |\n";
+
+    #[test]
+    fn markdown_table_becomes_a_native_table_and_keeps_every_cell() {
+        let (sl, _) = compose(T).unwrap();
+        let s = &sl[1];
+        assert_eq!(s.table.len(), 4);
+        assert_eq!(s.table[0], vec!["Item", "Price", "Notes"]);
+        assert_eq!(s.bullets, vec![(0, "Coffee is cheap here.".to_string())]);
+        let b = build_pptx(&sl);
+        let txt = String::from_utf8_lossy(&b);
+        assert!(txt.contains("<a:tbl>") && txt.contains("<a:gridCol") && txt.contains("Coffee") && txt.contains("rtl=\"1\""));
+        assert_eq!(txt.matches("<a:tr ").count(), 4);
+        assert!(review_text(&sl, &Report::default()).contains("| Tea | 2 | hot |"));
+    }
+
+    #[test]
+    fn bad_tables_are_refused_with_a_reason_and_never_guessed() {
+        let e = compose("# T\n## A\n| a | b |\n|--|--|\n| 1 |\n").unwrap_err();
+        assert!(e.contains("row 2") && e.contains("will not guess"), "{e}");
+        let e = compose("# T\n## A\n| a | b |\n").unwrap_err();
+        assert!(e.contains("only a header"), "{e}");
+        let many: String = (0..9).map(|i| format!("| r{i} | x |\n")).collect();
+        assert!(compose(&format!("# T\n## A\n{many}")).unwrap_err().contains("limit is 8"));
+        let wide = "| a | b | c | d | e | f | g |\n| 1 | 2 | 3 | 4 | 5 | 6 | 7 |\n";
+        assert!(compose(&format!("# T\n## A\n{wide}")).unwrap_err().contains("7 columns"));
+        let long = format!("| a | b |\n| {} | y |\n", "z".repeat(61));
+        assert!(compose(&format!("# T\n## A\n{long}")).unwrap_err().contains("longer than 60"));
+        let e = compose("# T\n## A\n- 1\n- 2\n- 3\n- 4\n| a | b |\n| 1 | 2 |\n").unwrap_err();
+        assert!(e.contains("at most 3 lines"), "{e}");
+        let tall = format!("| a | b |\n{}", "| row text row text row text row text row text row text row text row text | y |\n".repeat(0));
+        let _ = tall;
+    }
+
+    #[test]
+    fn a_table_on_the_first_slide_is_not_swallowed_by_the_title_slide() {
+        let (sl, _) = compose("# Prices\n| a | b |\n| 1 | 2 |\n").unwrap();
+        assert_eq!(sl[0].table.len(), 2);
+    }
+
+    #[test]
+    #[ignore]
+    fn write_table_sample() {
+        std::fs::create_dir_all("/tmp/deck/tables").unwrap();
+        for (n, th) in [("light", "light"), ("dark", "dark")] {
+            let (sl, r) = compose(&format!("theme: {th}\n{T}")).unwrap();
+            std::fs::write(format!("/tmp/deck/tables/{n}.pptx"), build_pptx_themed(&sl, r.theme)).unwrap();
         }
     }
 }
