@@ -232,6 +232,8 @@ pub struct UiState {
     /// Steps of an organize plan waiting for a yes, and of the last organize that ran (for "undo organize"). Memory only.
     pub organize_pending: Option<usize>,
     pub undo_batch: Option<usize>,
+    /// Offline conversation: a few recent lines, memory only, never written to disk.
+    pub chat: pawline_core::chat::ChatState,
 }
 
 pub fn startup_notes_from(root: &std::path::Path) -> Vec<String> {
@@ -360,6 +362,26 @@ fn typo_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
 fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     if let Some(r) = weather_pick(input) {
         return r;
+    }
+    // A trailing "please" is politeness, not part of a name (never for quoted names or right after called/folder/file).
+    if let Some(stripped) = pawline_core::chat::strip_trailing_polite(input) {
+        if pawline_core::typo::recognised_cmd(&stripped) {
+            let mut r = handle_text_inner(state, &stripped);
+            r.text = format!("(I read the trailing \"please\" as politeness, not part of the name. Put the name in quotes to keep it.)\n{}", r.text);
+            return r;
+        }
+    }
+    // Conversation first: discussing an action is never requesting it. Negations, how-to questions, what-ifs and past tense
+    // never reach the planner or the on-device model; a polite request becomes a pick that still needs sending and a card.
+    match state.chat.respond(input, pawline_core::typo::recognised_cmd(input)) {
+        pawline_core::chat::Outcome::Pass => {}
+        pawline_core::chat::Outcome::Reply(t) | pawline_core::chat::Outcome::Discussion(t) => return reply("message", t),
+        pawline_core::chat::Outcome::Pick { text, command } => {
+            let mut out = reply("message", text);
+            state.picks = vec![command.clone()];
+            out.plan = Some(format!("{command}\t{command}"));
+            return out;
+        }
     }
     if let Some(r) = typo_gate(state, input) {
         return r;
@@ -659,6 +681,7 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
     let notes = startup_notes_from(&root);
     UiState {
         picks: vec![],
+        chat: Default::default(),
         organize_pending: None,
         undo_batch: None,
         carried: std::time::Duration::ZERO,
@@ -1222,6 +1245,43 @@ mod memory_tests {
         // the place the user typed is payload: only "weather" changes
         let r = handle_text(&mut st, "wether in wheather");
         assert!(r.text.contains("weather in wheather"), "{}", r.text);
+    }
+
+    #[test]
+    fn conversation_never_turns_into_an_action() {
+        let root = org_root("chat1");
+        std::fs::create_dir_all(root.join("kp")).unwrap();
+        let mut st = new_state(root.clone());
+        for s in ["don't delete the folder kp", "how do I delete a folder?", "what if I delete the folder kp", "i deleted the folder kp yesterday", "dont delte kp"] {
+            let r = handle_text(&mut st, s);
+            assert_eq!(r.kind, "message", "{s}: {}", r.text);
+            assert!(st.pending.is_none(), "{s}");
+            assert!(root.join("kp").exists(), "{s}");
+        }
+        // a polite request is only a pick; sending the picked command then shows the card; nothing is deleted
+        let r = handle_text(&mut st, "can you delete the folder kp?");
+        assert_eq!(r.kind, "message");
+        assert_eq!(r.plan.as_deref(), Some("delete the folder kp\tdelete the folder kp"));
+        assert!(st.pending.is_none() && root.join("kp").exists());
+        let r = handle_text(&mut st, "delete the folder kp");
+        assert_eq!(r.kind, "confirm");
+        assert!(root.join("kp").exists());
+        cancel(&mut st);
+        // jokes and hints are plain text
+        assert!(handle_text(&mut st, "tell me a joke").text.len() > 10);
+        assert!(handle_text(&mut st, "hint").text.starts_with("Hint:"));
+    }
+
+    #[test]
+    fn trailing_please_is_not_part_of_a_name() {
+        let root = org_root("chat2");
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "delete the folder nothere please");
+        assert!(r.text.contains("trailing \"please\""), "{}", r.text);
+        assert!(!r.text.contains("nothere please"), "{}", r.text);
+        // quoted keeps it
+        let r = handle_text(&mut st, "delete the folder \"nothere please\"");
+        assert!(!r.text.contains("trailing"), "{}", r.text);
     }
 
     #[test]

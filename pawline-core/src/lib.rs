@@ -9,6 +9,7 @@
 pub mod apps;
 pub mod weather;
 pub mod assist;
+pub mod chat;
 pub mod context;
 pub mod deck;
 pub mod dirs;
