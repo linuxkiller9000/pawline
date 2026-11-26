@@ -131,6 +131,7 @@ Status: PARTIAL. A Windows executable builds and links (cross-compiled, debug); 
 
 ## 23. Linux desktop verification (old 7)
 Status: PARTIAL. XFCE and KDE X11 (headless) checked. niri and KDE Wayland, the Wayland layer-shell path and a physical desktop are open. Runtime gate.
+2026-11-26: orb drag verified on X11 (Xvfb, debug build): dragging the orb 200px/144px moved the window (1286,12 -> 1086,0, clamped at the top edge) and a click without movement still opened the card (68x68 orb -> 440x470 card); pixel proof od_after_c/oc_clickc. Wayland orb drag and paste into Pawline remain unverified.
 
 ## 24. Update and maintenance (user section 24)
 - Version checking.
