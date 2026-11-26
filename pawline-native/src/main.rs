@@ -181,6 +181,22 @@ const THEME_ROWS: usize = 1;
 const PAD: f32 = 14.0;
 const CHAT_TOP: f32 = 64.0;
 const BOTTOM: f32 = 64.0;
+
+/// Clamp a scroll offset to the scrollable range (settings panel; unit-tested).
+fn scroll_clamp(scroll: f32, content: f32, viewport: f32) -> f32 {
+    scroll.clamp(0.0, (content - viewport).max(0.0))
+}
+
+/// Smallest scroll change that brings [item_top, item_bot] fully into a viewport this tall (settings panel; unit-tested).
+fn scroll_to_visible(scroll: f32, item_top: f32, item_bot: f32, viewport: f32) -> f32 {
+    if item_top < scroll {
+        item_top
+    } else if item_bot > scroll + viewport {
+        item_bot - viewport
+    } else {
+        scroll
+    }
+}
 const MAX_IN_LINES: usize = 4;
 const REPLY_H: f32 = 22.0;
 const THUMB_W: u32 = 220;
@@ -427,6 +443,7 @@ struct App {
     settings: theme::Settings,
     settings_open: bool,
     settings_sel: usize,
+    settings_scroll: f32,
     t0: std::time::Instant,
     r_gear: (f32, f32, f32, f32),
     input_w: f32,
@@ -764,8 +781,57 @@ impl App {
         (CHAT_TOP + 34.0, 26.0)
     }
 
+    /// Top and bottom of the scrollable settings area: below the header line, above the window edge.
+    fn settings_viewport(&self) -> (f32, f32) {
+        (CHAT_TOP + 34.0, self.h as f32 - 12.0)
+    }
+
+    /// Privacy notes shown under the settings rows. Assembled in one place so the drawn text and the
+    /// scrollable content height can never disagree.
+    fn settings_notes(&self) -> Vec<String> {
+        let mut notes = vec!["Offline mode stops Pawline's own requests only, not apps you open.".to_string(), history::NOTE.to_string()];
+        // Offline mode covers Pawline's built-in requests only. Say when a custom speech command is configured.
+        let custom: Vec<&str> = ["PAWLINE_STT_CMD", "PAWLINE_TTS_CMD", "PAWLINE_REC_CMD"].into_iter().filter(|k| std::env::var_os(k).is_some()).collect();
+        if !custom.is_empty() {
+            notes.push(format!("Custom command set ({}): Pawline cannot control whether it uses the network.", custom.join(", ")));
+        }
+        notes
+    }
+
+    /// Full height of the scrollable settings content (rows plus wrapped notes), in pixels.
+    fn settings_content_h(&mut self, w: f32) -> f32 {
+        let (_, rh) = self.settings_geom();
+        let mut hgt = self.settings_rows() as f32 * (rh + 4.0) + 14.0 + 33.0;
+        for n in self.settings_notes() {
+            hgt += self.wrap(&n, 12.0, w - 2.0 * PAD - 8.0).len() as f32 * 15.0;
+        }
+        hgt
+    }
+
+    /// Keep the selected settings row inside the visible area (called after Up/Down). On the last
+    /// row the notes below it count too, so a keyboard-only user can read the whole panel.
+    fn settings_ensure_visible(&mut self) {
+        let (_, rh) = self.settings_geom();
+        let (top, bot) = self.settings_viewport();
+        let row_top = self.settings_sel as f32 * (rh + 4.0);
+        let item_bot = if self.settings_sel + 1 == self.settings_rows() {
+            self.settings_content_h(self.w as f32)
+        } else {
+            row_top + rh
+        };
+        self.settings_scroll = scroll_to_visible(self.settings_scroll, row_top, item_bot, bot - top);
+    }
+
+    /// Fill a rounded rect clipped to the visible settings area.
+    fn settings_fill(&self, pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, r: f32, c: (u8, u8, u8, u8)) {
+        let (top, bot) = self.settings_viewport();
+        let (y0, y1) = (y.max(top), (y + h).min(bot));
+        if y1 > y0 {
+            fill(pm, &rrect(x, y0, w, y1 - y0, r), c);
+        }
+    }
+
     fn draw_settings(&mut self, pm: &mut Pixmap, w: f32, h: f32) {
-        let _ = h;
         self.text(pm, "Settings", PAD + 4.0, CHAT_TOP + 18.0, 16.0, (235, 230, 250), (0.0, h));
         // Version display: local only, from the package version at build time. Right-aligned on the
         // header line so the settings layout grows by zero rows (no scroll layout yet).
@@ -773,53 +839,63 @@ impl App {
         let vw = self.measure(ver, 12.0, shape::Mode::Auto);
         self.text(pm, ver, (w - PAD - 4.0 - vw).max(PAD + 90.0), CHAT_TOP + 18.0, 12.0, (150, 145, 175), (0.0, h));
         let (top, rh) = self.settings_geom();
+        let (_, bot) = self.settings_viewport();
+        let content = self.settings_content_h(w);
+        self.settings_scroll = scroll_clamp(self.settings_scroll, content, bot - top);
+        let scroll = self.settings_scroll;
+        let clip = (top, bot);
         for k in 0..self.settings_rows() {
-            let y = top + k as f32 * (rh + 4.0);
+            let y = top + k as f32 * (rh + 4.0) - scroll;
+            if y + rh < top || y > bot {
+                continue;
+            }
             let sel = k == self.settings_sel;
-            fill(pm, &rrect(PAD - 2.0, y, w - 2.0 * PAD + 4.0, rh, 10.0), if sel { (70, 64, 110) } else { (44, 40, 64) }.rgba());
+            self.settings_fill(pm, PAD - 2.0, y, w - 2.0 * PAD + 4.0, rh, 10.0, if sel { (70, 64, 110) } else { (44, 40, 64) }.rgba());
             if k < THEME_ROWS {
                 let t = &theme::THEMES[self.settings.theme.min(theme::THEMES.len() - 1)];
                 for (i, c) in t.bg.iter().enumerate() {
-                    fill(pm, &rrect(PAD + 8.0 + i as f32 * 18.0, y + 4.0, 18.0, 18.0, 4.0), (c.0, c.1, c.2, 255));
+                    self.settings_fill(pm, PAD + 8.0 + i as f32 * 18.0, y + 4.0, 18.0, 18.0, 4.0, (c.0, c.1, c.2, 255));
                 }
-                fill(pm, &rrect(PAD + 66.0, y + 4.0, 18.0, 18.0, 9.0), (t.accent.0, t.accent.1, t.accent.2, 255));
+                self.settings_fill(pm, PAD + 66.0, y + 4.0, 18.0, 18.0, 9.0, (t.accent.0, t.accent.1, t.accent.2, 255));
                 let label = format!("Theme: {} (Enter for next)", t.name);
-                self.text(pm, &label, PAD + 96.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
+                self.text(pm, &label, PAD + 96.0, y + 18.0, 14.0, (255, 255, 255), clip);
             } else if k == THEME_ROWS + 5 {
                 let label = format!("Keep conversation on this computer: {}", if self.settings.keep_history { "ON" } else { "off" });
-                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
             } else if k == THEME_ROWS + 4 {
                 let label = format!("Microphone: {}", if self.settings.mic_blocked { "BLOCKED (voice input off)" } else { "allowed when you press the mic button" });
-                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
             } else if k == THEME_ROWS + 3 {
                 let label = format!("Offline mode (Pawline's own online features): {}", if self.settings.offline { "ON" } else { "off" });
-                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
             } else if k == THEME_ROWS + 2 {
                 let label = format!("Text size: {}% (Enter to change)", self.settings.text_pct);
-                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
             } else if k == THEME_ROWS + 1 {
                 let label = format!("Speak replies aloud (local engine): {}", if self.settings.speak { "on" } else { "off" });
-                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
             } else {
                 let label = format!("Colours drift slowly: {}", if self.settings.drift { "on" } else { "off" });
-                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
             }
         }
-        let note_y = top + self.settings_rows() as f32 * (rh + 4.0) + 14.0;
-        self.text(pm, "Up/Down choose, Enter applies, Esc closes. The settings file", PAD + 4.0, note_y, 12.0, (190, 185, 215), (0.0, h));
-        self.text(pm, "holds only these switches, no message text.", PAD + 4.0, note_y + 15.0, 12.0, (190, 185, 215), (0.0, h));
-        // Offline mode covers Pawline's built-in requests only. Say so, and say when a custom speech command is configured.
+        let note_y = top + self.settings_rows() as f32 * (rh + 4.0) + 14.0 - scroll;
+        self.text(pm, "Up/Down choose, Enter applies, Esc closes. The settings file", PAD + 4.0, note_y, 12.0, (190, 185, 215), clip);
+        self.text(pm, "holds only these switches, no message text.", PAD + 4.0, note_y + 15.0, 12.0, (190, 185, 215), clip);
         let mut ny = note_y + 33.0;
-        let mut notes = vec!["Offline mode stops Pawline's own requests only, not apps you open.".to_string(), history::NOTE.to_string()];
-        let custom: Vec<&str> = ["PAWLINE_STT_CMD", "PAWLINE_TTS_CMD", "PAWLINE_REC_CMD"].into_iter().filter(|k| std::env::var_os(k).is_some()).collect();
-        if !custom.is_empty() {
-            notes.push(format!("Custom command set ({}): Pawline cannot control whether it uses the network.", custom.join(", ")));
-        }
-        for n in notes {
+        for n in self.settings_notes() {
             for l in self.wrap(&n, 12.0, w - 2.0 * PAD - 8.0) {
-                self.text(pm, &l, PAD + 4.0, ny, 12.0, (190, 185, 215), (0.0, h));
+                self.text(pm, &l, PAD + 4.0, ny, 12.0, (190, 185, 215), clip);
                 ny += 15.0;
             }
+        }
+        // Scrollbar, drawn only when the content is taller than the visible area.
+        if content > bot - top {
+            let vh = bot - top;
+            fill(pm, &rrect(w - 7.0, top, 3.0, vh, 1.5), (60, 56, 84, 255));
+            let thumb_h = (vh * vh / content).max(18.0);
+            let thumb_y = top + (vh - thumb_h) * scroll / (content - vh);
+            fill(pm, &rrect(w - 7.0, thumb_y, 3.0, thumb_h, 1.5), (140, 130, 190, 255));
         }
     }
 
@@ -2038,8 +2114,14 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
             let n = self.settings_rows();
             match e.keysym {
                 Keysym::Escape => self.settings_open = false,
-                Keysym::Up => self.settings_sel = (self.settings_sel + n - 1) % n,
-                Keysym::Down | Keysym::Tab => self.settings_sel = (self.settings_sel + 1) % n,
+                Keysym::Up => {
+                    self.settings_sel = (self.settings_sel + n - 1) % n;
+                    self.settings_ensure_visible();
+                }
+                Keysym::Down | Keysym::Tab => {
+                    self.settings_sel = (self.settings_sel + 1) % n;
+                    self.settings_ensure_visible();
+                }
                 Keysym::Return | Keysym::KP_Enter => self.apply_setting(self.settings_sel),
                 _ => {}
             }
@@ -2271,18 +2353,24 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
         }
         if self.confirm.is_none() && inside(self.r_gear, self.ptr_pos) {
             self.settings_open = !self.settings_open;
+            if self.settings_open {
+                self.settings_scroll = 0.0;
+            }
             self.draw();
             return;
         }
         if self.settings_open && self.confirm.is_none() {
             let (top, rh) = self.settings_geom();
+            let (_, bot) = self.settings_viewport();
             let (px, py) = self.ptr_pos;
-            let w = self.w as f32;
-            for k in 0..self.settings_rows() {
-                let y = top + k as f32 * (rh + 4.0);
-                if inside((PAD - 2.0, y, w - 2.0 * PAD + 4.0, rh), (px, py)) {
-                    self.settings_sel = k;
-                    self.apply_setting(k);
+            if py >= top as f64 && py < bot as f64 {
+                let w = self.w as f32;
+                for k in 0..self.settings_rows() {
+                    let y = top + k as f32 * (rh + 4.0) - self.settings_scroll;
+                    if inside((PAD - 2.0, y, w - 2.0 * PAD + 4.0, rh), (px, py)) {
+                        self.settings_sel = k;
+                        self.apply_setting(k);
+                    }
                 }
             }
             self.draw();
@@ -2402,6 +2490,10 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
         }
         if self.confirm.is_some() {
             self.plan_scroll = (self.plan_scroll + dy).clamp(0.0, self.plan_max);
+        } else if self.settings_open {
+            let (top, bot) = self.settings_viewport();
+            let content = self.settings_content_h(self.w as f32);
+            self.settings_scroll = scroll_clamp(self.settings_scroll + dy, content, bot - top);
         } else {
             self.scroll = (self.scroll - dy).clamp(0.0, self.chat_max);
         }
@@ -3147,6 +3239,7 @@ fn main() {
         },
         settings_open: false,
         settings_sel: 0,
+        settings_scroll: 0.0,
         t0: std::time::Instant::now(),
         r_gear: (0.0, 0.0, 0.0, 0.0),
         input_w: 300.0,
@@ -3361,5 +3454,27 @@ mod saved_tests {
         assert!(saved_picture("Saved /home/u/Pictures/other/a.png").is_none());
         assert!(saved_picture("Saved Pictures/Pawline/a.png").is_none());
         assert!(saved_picture("no path here").is_none());
+    }
+}
+
+#[cfg(test)]
+mod settings_scroll_tests {
+    use super::*;
+
+    #[test]
+    fn scroll_clamp_stays_within_the_scrollable_range() {
+        assert_eq!(scroll_clamp(-5.0, 100.0, 50.0), 0.0, "never below 0");
+        assert_eq!(scroll_clamp(80.0, 100.0, 50.0), 50.0, "never past the end");
+        assert_eq!(scroll_clamp(20.0, 100.0, 50.0), 20.0, "inside: unchanged");
+        assert_eq!(scroll_clamp(20.0, 40.0, 50.0), 0.0, "content shorter than the viewport: no scroll");
+    }
+
+    #[test]
+    fn scroll_to_visible_moves_only_as_much_as_needed() {
+        assert_eq!(scroll_to_visible(0.0, 10.0, 36.0, 50.0), 0.0, "already visible: unchanged");
+        assert_eq!(scroll_to_visible(30.0, 0.0, 26.0, 50.0), 0.0, "above the viewport: scroll up to its top");
+        assert_eq!(scroll_to_visible(0.0, 180.0, 206.0, 50.0), 156.0, "below the viewport: scroll down just enough");
+        assert_eq!(scroll_to_visible(100.0, 110.0, 136.0, 50.0), 100.0, "visible lower down: unchanged");
+        assert_eq!(scroll_to_visible(0.0, 0.0, 60.0, 50.0), 10.0, "taller than the viewport: its bottom decides");
     }
 }
