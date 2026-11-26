@@ -241,7 +241,12 @@ Reading: the debug-build typing latency gap is real and large; release on this V
 - Persistence: opt-in only, OFF by default, one Settings row, 100 messages x 4000 chars cap, unencrypted file disclosed (15b/15c, pixel proof hs150c, hist_restoredc).
 - Forget/delete: turning the row OFF deletes the file; "forget our chat" clears session lines. Per-conversation deletion does not exist (single conversation only).
 - Long-conversation limits: caps above; perf measured in item 18 slice 3 (~31 ms redraws at the cap, sandbox).
-- Old context causing actions: behavioural isolation test (16b); context never creates an action. Still open: multiple named conversations, export, search inside history.
+- Old context causing actions: behavioural isolation test (16b); context never causes an action. Still open: multiple named conversations, per-conversation delete, export.
+
+### Item 19 slice: history search (2026-11-26)
+- "search history for X" (also my/saved variants) and "find X in history": read-only case-insensitive search of the saved conversation AND every archived copy. The query is taken byte for byte (bridge::memory_tests::history_search_query_is_verbatim_and_only_history_phrases_match: case, inner spacing and mid-phrase punctuation preserved; ordinary file search untouched). The reply lists up to 10 hits (100 chars each) with who said it and an "(archived copy)" label, counts the rest, says nothing was written or sent, and says unsaved on-screen lines are not searched. Empty query asks instead of searching; history off with nothing saved says to turn it on in Settings first.
+- Tests: history::search_tests (behavioural, real temp files: across current + archives, case-insensitive, hit cap with total count, long-line clipping, missing/empty/corrupt dirs safe). Pixel proof, debug build, Xvfb sandbox: hs4_hitsc (2 hits incl. "You (archived copy): help", reply fully readable).
+- Note: the user's own search line is itself saved when history is ON, so it can appear in its own results; that is the opt-in keeping rule working as disclosed, not a leak.
 
 ### Item 20 slice 1 (PARTIAL)
 - "reset settings" (also "restore defaults"): text size, theme, drift, spoken replies go back to defaults. Offline mode, mic block and saved-conversation switch are NOT changed and nothing is deleted (stated in the reply). Unit test (structural, author-written) plus GUI proof, release build at 8513133, Xvfb sandbox: Forest theme at 150% text with offline=on, mic=blocked became Dusk at 100%, file kept offline=on, mic=blocked (/tmp/rs0c.png before, /tmp/rs1c.png after).

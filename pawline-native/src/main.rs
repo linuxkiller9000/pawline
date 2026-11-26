@@ -1314,6 +1314,46 @@ impl App {
     }
 
     /// Archived copies made by "new conversation", oldest first.
+    /// "search history for X": read-only search of the saved conversation and archived copies.
+    /// Never creates or changes anything; the unsaved lines on screen are not searched.
+    fn reply_history_search(&mut self, query: &str) {
+        let q = query.trim();
+        if q.is_empty() {
+            self.push(false, "message", "Say what to search for, for example: search history for cmake".into(), None);
+            return;
+        }
+        let Some(dir) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
+            self.push(false, "message", "There is no data folder to search.".into(), None);
+            return;
+        };
+        let (hits, total) = history::search_dir(&dir, q);
+        if total == 0 {
+            let has_files = history_path().map(|p| p.is_file()).unwrap_or(false) || !Self::history_archives().is_empty();
+            let text = if has_files {
+                format!("No saved line contains \"{q}\". Searched the saved conversation and archived copies; the unsaved lines on this screen were not searched.")
+            } else {
+                format!("No saved conversation to search for \"{q}\": history keeping is off and nothing is saved. Turn it on in Settings first. Nothing was written.")
+            };
+            self.push(false, "message", text, None);
+            return;
+        }
+        let mut text = if total == 1 {
+            format!("1 saved line contains \"{q}\":")
+        } else {
+            format!("{total} saved lines contain \"{q}\":")
+        };
+        for h in &hits {
+            let who = if h.user { "You" } else { "Pawline" };
+            let where_ = if h.archived { " (archived copy)" } else { "" };
+            text.push_str(&format!("\n{who}{where_}: {}", h.text));
+        }
+        if total > hits.len() {
+            text.push_str(&format!("\n{} more not shown.", total - hits.len()));
+        }
+        text.push_str("\nSearched saved files only, nothing was written or sent.");
+        self.push(false, "message", text, None);
+    }
+
     fn history_archives() -> Vec<std::path::PathBuf> {
         let Some(dir) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else { return vec![] };
         let mut v: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
@@ -2037,6 +2077,10 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
         }
         if r.kind == "delhist" {
             self.ask_delete_history();
+            return;
+        }
+        if r.kind == "histsearch" {
+            self.reply_history_search(r.plan.as_deref().unwrap_or(""));
             return;
         }
         self.push(false, &r.kind, r.text.clone(), None);

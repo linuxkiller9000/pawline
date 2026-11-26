@@ -122,6 +122,114 @@ pub fn delete(path: &Path) -> std::io::Result<()> {
     }
 }
 
+pub const SEARCH_MAX_HITS: usize = 10;
+pub const SEARCH_HIT_MAX: usize = 100;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hit {
+    /// True when the line comes from an archived copy (made by "new conversation"), not the current file.
+    pub archived: bool,
+    /// True when the user said the line, false when Pawline did.
+    pub user: bool,
+    pub text: String,
+}
+
+/// Search the saved conversation and every archived copy in `dir` for a case-insensitive substring
+/// (item 19: history search). Read-only. Files are read through `load`, so missing, oversized,
+/// symlinked-away or corrupt files are simply skipped. Returns up to SEARCH_MAX_HITS hits, each
+/// clipped to SEARCH_HIT_MAX chars, plus the total number of matching lines.
+pub fn search_dir(dir: &Path, query: &str) -> (Vec<Hit>, usize) {
+    let q = query.to_lowercase();
+    let mut files: Vec<(bool, std::path::PathBuf)> = Vec::new();
+    let cur = dir.join("history.txt");
+    if cur.symlink_metadata().map(|m| m.is_file()).unwrap_or(false) {
+        files.push((false, cur));
+    }
+    let mut arch: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("history-archived-") && n.ends_with(".txt"))
+                .unwrap_or(false)
+        })
+        .collect();
+    arch.sort();
+    files.extend(arch.into_iter().map(|p| (true, p)));
+    let mut hits = Vec::new();
+    let mut total = 0usize;
+    for (archived, f) in files {
+        for l in load(&f) {
+            if l.text.to_lowercase().contains(&q) {
+                total += 1;
+                if hits.len() < SEARCH_MAX_HITS {
+                    hits.push(Hit { archived, user: l.user, text: l.text.chars().take(SEARCH_HIT_MAX).collect() });
+                }
+            }
+        }
+    }
+    (hits, total)
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    fn dir_with_files(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("pawline-hs-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        save(&d.join("history.txt"), &[Line { user: true, text: "how do I build with CMake".into() }, Line { user: false, text: "Run cmake -B build first".into() }, Line { user: true, text: "unrelated question".into() }]).unwrap();
+        save(&d.join("history-archived-1000.txt"), &[Line { user: true, text: "older cmake error".into() }]).unwrap();
+        save(&d.join("history-archived-2000.txt"), &[Line { user: false, text: "nothing relevant".into() }]).unwrap();
+        d
+    }
+
+    #[test]
+    fn search_finds_across_current_and_archives_case_insensitively() {
+        let d = dir_with_files("basic");
+        let (hits, total) = search_dir(&d, "CMAKE");
+        assert_eq!(total, 3);
+        assert_eq!(hits.len(), 3);
+        assert!(!hits[0].archived && hits[0].user);
+        assert!(!hits[1].archived && !hits[1].user);
+        assert!(hits[2].archived, "the archived copy is searched and labelled");
+        let (hits, total) = search_dir(&d, "nothing here matches");
+        assert_eq!((hits.len(), total), (0, 0));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn search_caps_hits_but_counts_everything_and_clips_long_lines() {
+        let d = std::env::temp_dir().join(format!("pawline-hs-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let lines: Vec<Line> = (0..25).map(|i| Line { user: true, text: format!("match line {i}") }).collect();
+        save(&d.join("history.txt"), &lines).unwrap();
+        let long = "x".repeat(500) + "needle";
+        save(&d.join("history-archived-1000.txt"), &[Line { user: false, text: long.clone() }]).unwrap();
+        let (hits, total) = search_dir(&d, "match line");
+        assert_eq!(total, 25);
+        assert_eq!(hits.len(), SEARCH_MAX_HITS, "only the first hits are carried");
+        let (hits, total) = search_dir(&d, "needle");
+        assert_eq!(total, 1);
+        assert_eq!(hits[0].text.chars().count(), SEARCH_HIT_MAX, "long lines are clipped");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn search_an_empty_or_missing_dir_finds_nothing() {
+        let d = std::env::temp_dir().join(format!("pawline-hs-empty-{}", std::process::id()));
+        assert_eq!(search_dir(&d, "x"), (vec![], 0), "missing dir");
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(search_dir(&d, "x"), (vec![], 0), "empty dir");
+        std::fs::write(d.join("history-archived-5.txt"), "garbage without header").unwrap();
+        assert_eq!(search_dir(&d, "x"), (vec![], 0), "corrupt file is skipped, no panic");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
