@@ -85,17 +85,50 @@ fn ask_online(text: &str) -> Result<String, PawError> {
 /// Places offered by the weather chooser, waiting for a number. Memory only; any other input clears it.
 static WEATHER_PICK: std::sync::Mutex<Option<Vec<pawline_core::weather::Place>>> = std::sync::Mutex::new(None);
 
-/// A typed number while a weather chooser is open fetches that place's forecast; anything else cancels the chooser.
+/// A typed number - or the typed name of one listed place - while a weather chooser is open fetches
+/// that place's forecast. A name matching several listed places asks for the number and keeps the
+/// chooser open. Anything else cancels the chooser and is treated as a new request.
 pub fn weather_pick(input: &str) -> Option<UiReply> {
-    let opts = WEATHER_PICK.lock().unwrap().take()?;
+    let opts = WEATHER_PICK.lock().unwrap().clone()?;
     let low = input.trim().to_lowercase();
     let low = low.trim_end_matches(['.', '!']);
     if matches!(low, "cancel" | "no" | "nope" | "no thanks" | "no thank you" | "never mind" | "nevermind" | "stop" | "none" | "skip" | "forget it") {
+        WEATHER_PICK.lock().unwrap().take();
         return Some(reply("message", "Cancelled. No forecast was fetched.".into()));
     }
-    let n: usize = input.trim().trim_end_matches('.').parse().ok().filter(|n| (1..=opts.len()).contains(n))?;
+    let pick: Option<usize> = match input.trim().trim_end_matches('.').parse::<usize>() {
+        Ok(n) if (1..=opts.len()).contains(&n) => Some(n - 1),
+        _ => {
+            // Typed name: exact match on a listed place's city part or whole label.
+            let m: Vec<usize> = opts
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| {
+                    let l = p.label.to_lowercase();
+                    let city = l.split(',').next().unwrap_or("").trim();
+                    !low.is_empty() && (city == low || l == low)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            match m.len() {
+                1 => Some(m[0]),
+                0 => {
+                    // Not a pick: the chooser is cancelled and the input is handled as a new request.
+                    WEATHER_PICK.lock().unwrap().take();
+                    return None;
+                }
+                _ => {
+                    let list = m.iter().map(|i| format!("{}. {}", i + 1, opts[*i].label)).collect::<Vec<_>>().join("
+");
+                    return Some(reply("message", format!("More than one listed place is called \"{}\":\n{list}\nType its number. The list is still open; nothing else was sent.", input.trim())));
+                }
+            }
+        }
+    };
+    let i = pick?;
+    WEATHER_PICK.lock().unwrap().take();
     let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(20));
-    Some(match pawline_core::weather::forecast(&http, &opts[n - 1]) {
+    Some(match pawline_core::weather::forecast(&http, &opts[i]) {
         Ok(t) => reply("executed", t),
         Err(e) => {
             let t = e.to_string();
@@ -2033,6 +2066,31 @@ mod memory_tests {
         assert!(!st.online_chat);
         let r = handle_text(&mut st, "I think clouds look like sheep");
         assert!(!r.text.contains("POST one JSON body"));
+    }
+
+    #[test]
+    fn weather_chooser_typed_name_picks_and_ambiguity_keeps_the_list() {
+        let _wp = WEATHER_PICK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let opts = vec![
+            pawline_core::weather::Place { label: "Cairo, Cairo Governorate, Egypt".into(), lat: 30.0, lon: 31.0 },
+            pawline_core::weather::Place { label: "Cairo, Illinois, United States".into(), lat: 37.0, lon: -89.1 },
+            pawline_core::weather::Place { label: "Paris, Ile-de-France, France".into(), lat: 48.8, lon: 2.3 },
+        ];
+        // A typed name matching several listed places asks for the number and keeps the chooser open.
+        *WEATHER_PICK.lock().unwrap() = Some(opts.clone());
+        let r = weather_pick("cairo").expect("ambig answer");
+        assert_eq!(r.kind, "message");
+        assert!(r.text.contains("More than one listed place") && r.text.contains("2. Cairo, Illinois"), "{}", r.text);
+        assert!(weather_pick_open(), "chooser stays open on ambiguity");
+        // A name not in the list cancels the chooser and is treated as a new request (None).
+        let r = weather_pick("london");
+        assert!(r.is_none());
+        assert!(!weather_pick_open(), "chooser is cancelled by an unrelated reply");
+        // Cancel words still cancel.
+        *WEATHER_PICK.lock().unwrap() = Some(opts);
+        let r = weather_pick("cancel").expect("cancel answer");
+        assert!(r.text.contains("Cancelled"));
+        assert!(!weather_pick_open());
     }
 
     #[test]
