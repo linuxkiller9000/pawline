@@ -27,6 +27,7 @@ pub mod search;
 pub mod shrink;
 pub mod searchmem;
 pub mod textfallback;
+pub mod typo;
 pub mod validate;
 pub mod wallpaper;
 

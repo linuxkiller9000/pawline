@@ -335,8 +335,33 @@ pub fn remember_steps(path: &std::path::Path, request: &str, ops: &[Operation], 
     pawline_core::planmem::record_success(path, request, &steps, now)
 }
 
+/// Typo tolerance for command words (see pawline_core::typo). A changed word is never run directly: the reply is a
+/// "Did you mean" suggestion whose pick refills the input; the corrected request then goes through the normal
+/// confirmation (a picked suggestion is also forced to a confirm card). Names are never touched. Only a dropped
+/// "please" lead-in runs directly. Typing never approves a card: this path produces no approval.
+fn typo_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
+    let s = pawline_core::typo::suggest(input, &pawline_core::typo::recognised_by_parsers)?;
+    if s.direct {
+        return Some(handle_text_inner(state, &s.corrected));
+    }
+    let said = s.changes.iter().map(|(a, b)| format!("\"{a}\" as \"{b}\"")).collect::<Vec<_>>().join(", ");
+    let mut out = reply(
+        "message",
+        format!(
+            "I read {said}. Did you mean:\n{}\nPick it (click, or Up/Down then Tab), then press Enter. Nothing was done yet. You will still see the full path and confirm before anything changes. Names are never corrected; if I read it wrong, just retype it.",
+            s.corrected
+        ),
+    );
+    state.picks = vec![s.corrected.clone()];
+    out.plan = Some(format!("{}\t{}", s.corrected, s.corrected));
+    Some(out)
+}
+
 fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     if let Some(r) = weather_pick(input) {
+        return r;
+    }
+    if let Some(r) = typo_gate(state, input) {
         return r;
     }
     // Local, offline controls for the search memory (Pawline's own file, nothing leaves the machine).
@@ -1144,6 +1169,37 @@ mod memory_tests {
         let _ = std::fs::remove_file(&f);
         assert!(!remember_steps(&f, "write a presentation about X", &[Operation::DeckDraft { topic: "X".into() }], 1));
         assert!(!f.exists());
+    }
+
+    #[test]
+    fn typo_suggestion_never_acts_and_a_pick_still_needs_the_card() {
+        let root = org_root("typo1");
+        std::fs::create_dir_all(root.join("kp")).unwrap();
+        let mut st = new_state(root.clone());
+        // a typo in a risky verb: only a suggestion, nothing is deleted, nothing pending
+        let r = handle_text(&mut st, "dlete the folder kp");
+        assert_eq!(r.kind, "message");
+        assert!(r.text.contains("Did you mean") && r.text.contains("delete the folder kp"));
+        assert!(root.join("kp").exists());
+        assert!(st.pending.is_none());
+        // a misspelled yes does nothing, with a suggestion open and with no card
+        let y = handle_text(&mut st, "yse");
+        assert!(root.join("kp").exists());
+        assert!(!y.text.to_lowercase().contains("deleted"));
+        // picking the suggestion shows the normal confirm card (full path) and still deletes nothing
+        let r = handle_text(&mut st, "delete the folder kp");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(root.join("kp").exists());
+        // typing a misspelled yes while the card is open does not approve it
+        let _ = handle_text(&mut st, "yse");
+        let _ = handle_text(&mut st, "yes");
+        assert!(root.join("kp").exists(), "typing never approves");
+        cancel(&mut st);
+        assert!(root.join("kp").exists());
+        // names stay as typed: "flder" is a folder name here, not corrected
+        let r = handle_text(&mut st, "delete the folder flder");
+        assert!(!r.text.contains("Did you mean"), "{}", r.text);
+        cancel(&mut st);
     }
 
     #[test]
