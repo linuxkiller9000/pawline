@@ -24,3 +24,6 @@ Not done / limits (item 11 stays PARTIAL, not counted done):
 - Arabic voice: not implemented or tested. Moonshine's Arabic status is unverified here. Voice transcripts still go to the draft only.
 - Arabic typing in the GUI needs a UTF-8 locale in the test harness. Typing uses xdotool in Xvfb.
 - Mixed-direction and shaping readability was checked earlier (item 3, X11). Nothing new measured here.
+
+## 11b: status lines (partial)
+After an Arabic command, a fixed Arabic line is added: "تم." after a finished action, or "هذا يحتاج تأكيدك قبل أي تغيير." when a confirm card is shown. Everything else in the reply (paths, card text, errors) stays English. This is not Arabic reply support.

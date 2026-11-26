@@ -391,7 +391,9 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
         pawline_core::arabic::Outcome::Reply(t) => return reply("message", t),
         pawline_core::arabic::Outcome::Command(e) => {
             let mut r = handle_text_inner(state, &e);
-            r.text = format!("فهمت طلبك هكذا / Understood from your Arabic request as: {e}\n{}", r.text);
+            // Fixed Arabic status line for the two outcomes we can recognise. The rest of the reply (paths, card) stays English.
+            let status = if r.text.contains("This needs your confirmation") { "\nهذا يحتاج تأكيدك قبل أي تغيير." } else if r.text.contains("Done:") { "\nتم." } else { "" };
+            r.text = format!("فهمت طلبك هكذا / Understood from your Arabic request as: {e}{status}\n{}", r.text);
             return r;
         }
         pawline_core::arabic::Outcome::Suggest { english, said, meant } => {
@@ -1931,6 +1933,7 @@ mod memory_tests {
         // creating a plain folder in the home area needs no card in the English path either; the same rule applies here
         assert_eq!(r.kind, "executed", "{}", r.text);
         assert!(r.text.contains("Understood from your Arabic request as: make a folder called مشاريع"), "{}", r.text);
+        assert!(r.text.contains("تم."), "{}", r.text);
         assert!(root.join("مشاريع").is_dir());
         // a question and a negation run nothing and plan nothing
         for q in ["كيف احذف مجلد مشاريع؟", "لا تحذف مجلد مشاريع"] {
