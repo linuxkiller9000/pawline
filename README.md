@@ -1,3 +1,44 @@
+# Pawline v0.3.0-test.5 - test binaries (pre-release)
+
+Test builds of commit 85824ae (successor line, on top of v0.3.0-test.4).
+SANDBOX-TESTED ONLY: not verified on real hardware, real audio, a real
+desktop, or Windows. The audits mentioned in the docs are author-written.
+
+Linux x86_64 only this time. The Windows build is unchanged since test.3
+(the new feature is Linux-only for now), so Windows testers should keep
+pawline-v0.3.0-test.3-windows-x86_64.exe.
+
+## What changed since v0.3.0-test.4: Laya setup is fully in-app now
+
+No python, no script, no terminal: say "laya on" and Pawline shows a
+consent card with the exact costs. Only a click on "Do it" starts anything
+(typing never approves it; Esc cancels while it runs; offline mode refuses
+the download instead of showing the card). It then downloads the model
+(288 MB) and tokenizer (2 MB) from huggingface.co (free, no account;
+huggingface.co sees your IP address), converts the model on your machine,
+and loads it. The downloads are size- and checksum-pinned, so a changed or
+corrupted file is refused, and nothing is installed until everything
+finishes.
+
+Correction to the test.4 notes below: the one-time download is about
+290 MB (288 MB model + 2 MB tokenizer), not "~160 MB".
+
+Honest costs: about 950 MB of free disk during setup, about 640 MB kept
+afterwards (the download itself is removed), about 700 MB RAM while the
+model is loaded, and a few seconds per suggestion on an old CPU (the first
+suggestion of a session also loads the model). While it thinks you see a
+status line, you can keep typing, and Esc stops the wait. Normal commands
+never touch the model.
+
+The manual script still works as a fallback (needs python3 and about 2 GB
+free during conversion): sh laya-setup.sh
+
+Also in this build: a display fix - when a suggestion's pick row was shown,
+it could cover the last lines of the message above it; the chat view now
+makes room for it.
+
+Then say "laya on" inside Pawline (session only; "laya off" unloads it).
+
 # Pawline v0.3.0-test.4 - test binaries (pre-release)
 
 Test builds of commit f25a913 (successor line, on top of v0.3.0-test.3).
