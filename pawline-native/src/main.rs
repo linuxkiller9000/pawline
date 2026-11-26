@@ -413,6 +413,8 @@ struct App {
     /// X11 backend (XFCE and other X11 sessions). None on Wayland.
     xb: Option<Xb>,
     #[cfg(unix)]
+    conn: Option<Connection>,
+    #[cfg(unix)]
     ddm: Option<DataDeviceManagerState>,
     #[cfg(unix)]
     ddev: Option<DataDevice>,
@@ -3342,10 +3344,12 @@ impl DataDeviceHandler for App {
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
     fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice, _: f64, _: f64) {}
     fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
-    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _dev: &wl_data_device::WlDataDevice) {
+    fn drop_performed(&mut self, conn: &Connection, _: &QueueHandle<Self>, _dev: &wl_data_device::WlDataDevice) {
         let Some(offer) = self.ddev.as_ref().and_then(|d| d.data().drag_offer()) else { return };
         let Some(mime) = offer.with_mime_types(|ms| dropin::PASTE_MIMES.iter().find(|m| ms.iter().any(|x| x == **m)).map(|m| m.to_string())) else { return };
         let Ok(pipe) = offer.receive(mime.clone()) else { return };
+        // Flush before waiting on the pipe: without this the source never learns it may send.
+        let _ = conn.flush();
         offer.finish();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -3441,6 +3445,11 @@ impl App {
         let offer = dev.data().selection_offer()?;
         let mime = offer.with_mime_types(|ms| dropin::PASTE_MIMES.iter().find(|m| ms.iter().any(|x| x == **m)).map(|m| m.to_string()))?;
         let pipe = offer.receive(mime.clone()).ok()?;
+        // The receive request must reach the compositor before the source can write; the event
+        // loop only flushes after this callback returns, so flush here or the read always times out.
+        if let Some(c) = &self.conn {
+            let _ = c.flush();
+        }
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             use std::io::Read;
@@ -3748,6 +3757,8 @@ fn main() {
         #[cfg(unix)]
         qh: qh0.clone(),
         xb,
+        #[cfg(unix)]
+        conn: conn_opt.clone(),
         #[cfg(unix)]
         ddm: wl_rest.as_ref().zip(qh0.as_ref()).and_then(|(r, q)| DataDeviceManagerState::bind(&r.0, q).ok()),
         #[cfg(unix)]
