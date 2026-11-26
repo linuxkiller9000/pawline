@@ -203,7 +203,9 @@ pub fn ask(http: &dyn Http, question: &str, cancelled: &dyn Fn() -> bool, commit
     if q.is_empty() || q.chars().count() > MAX_QUESTION_CHARS {
         return Err(PawError::Validation(format!("A question must be 1 to {MAX_QUESTION_CHARS} characters. I won't cut it for you. Nothing was sent.")));
     }
-    let r = http.get(&pollinations_text_url(&q), &[])?;
+    let r = http.get(&pollinations_text_url(&q), &[]).map_err(|_| {
+        PawError::Exec("Pollinations could not be reached right now (no connection, or the service is down). There is no answer, and Pawline did not retry. Check your connection and ask again later.".into())
+    })?;
     if cancelled() || !commit() {
         return Err(PawError::Exec("Cancelled. Nothing was kept, and a late answer will be discarded.".into()));
     }
@@ -317,6 +319,20 @@ mod tests {
         fn post(&self, _u: &str, _h: &[(&str, &str)], _b: &str) -> Result<HttpReply, PawError> {
             unreachable!()
         }
+    }
+    struct Down;
+    impl Http for Down {
+        fn get(&self, _u: &str, _h: &[(&str, &str)]) -> Result<HttpReply, PawError> {
+            Err(PawError::Exec("network problem: io: Connection refused (os error 111)".into()))
+        }
+        fn post(&self, _u: &str, _h: &[(&str, &str)], _b: &str) -> Result<HttpReply, PawError> {
+            unreachable!()
+        }
+    }
+    #[test]
+    fn unreachable_service_is_one_plain_sentence_without_retry_or_raw_error() {
+        let e = ask(&Down, "what is a cat", &|| false, &|| true).unwrap_err().to_string();
+        assert!(e.contains("could not be reached") && e.contains("did not retry") && !e.contains("os error") && !e.contains("io:"), "{e}");
     }
     #[test]
     fn url_has_only_the_question() {

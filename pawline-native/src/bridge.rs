@@ -66,6 +66,11 @@ static WEATHER_PICK: std::sync::Mutex<Option<Vec<pawline_core::weather::Place>>>
 /// A typed number while a weather chooser is open fetches that place's forecast; anything else cancels the chooser.
 pub fn weather_pick(input: &str) -> Option<UiReply> {
     let opts = WEATHER_PICK.lock().unwrap().take()?;
+    let low = input.trim().to_lowercase();
+    let low = low.trim_end_matches(['.', '!']);
+    if matches!(low, "cancel" | "no" | "nope" | "no thanks" | "no thank you" | "never mind" | "nevermind" | "stop" | "none" | "skip" | "forget it") {
+        return Some(reply("message", "Cancelled. No forecast was fetched.".into()));
+    }
     let n: usize = input.trim().trim_end_matches('.').parse().ok().filter(|n| (1..=opts.len()).contains(n))?;
     let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(20));
     Some(match pawline_core::weather::forecast(&http, &opts[n - 1]) {
@@ -75,6 +80,11 @@ pub fn weather_pick(input: &str) -> Option<UiReply> {
             reply("failed", t.strip_prefix("Execution failed: ").unwrap_or(&t).to_string())
         }
     })
+}
+
+/// Esc while the chooser is open closes it. True when there was one.
+pub fn weather_pick_cancel() -> bool {
+    WEATHER_PICK.lock().unwrap().take().is_some()
 }
 
 pub fn weather_pick_open() -> bool {
@@ -1010,7 +1020,15 @@ mod memory_tests {
         // a non-number cancels the chooser and is then handled as normal input
         *WEATHER_PICK.lock().unwrap() = Some(opts.clone());
         assert!(weather_pick_open());
-        assert!(weather_pick("never mind").is_none() && !weather_pick_open(), "any other text closes it");
+        for w in ["cancel", "no", "No thanks", "never mind", "Stop."] {
+            *WEATHER_PICK.lock().unwrap() = Some(opts.clone());
+            let r = weather_pick(w).expect(w);
+            assert!(r.kind == "message" && r.text.contains("Cancelled") && !weather_pick_open(), "{w}");
+        }
+        *WEATHER_PICK.lock().unwrap() = Some(opts.clone());
+        assert!(weather_pick_cancel() && !weather_pick_open() && !weather_pick_cancel(), "Esc closes it");
+        *WEATHER_PICK.lock().unwrap() = Some(opts.clone());
+        assert!(weather_pick("make a folder called kitten").is_none() && !weather_pick_open(), "a real other request closes it and routes normally");
         // an out-of-range number also closes it without any request
         *WEATHER_PICK.lock().unwrap() = Some(opts.clone());
         assert!(weather_pick("7").is_none() && !weather_pick_open());

@@ -1658,6 +1658,10 @@ impl App {
                 self.zi_sel = if e.keysym == Keysym::Up { (self.zi_sel + n - 1) % n } else { (self.zi_sel + 1) % n };
                 self.draw();
             }
+            Keysym::Escape if bridge::weather_pick_cancel() => {
+                self.toast = Some("Cancelled. No forecast was fetched");
+                self.draw();
+            }
             Keysym::Escape if self.reply.is_some() && !self.busy && self.menu_rows().is_empty() => {
                 self.reply = None;
                 self.draw();

@@ -115,7 +115,7 @@ impl Operation {
                 provider.disclosure()
             ),
             Operation::AskOnline { text } => format!(
-                "Ask Pollinations (online) \"{text}\": this is the free \"Classic\" service: no account, best effort, about one request per 45 seconds per IP address. Pawline puts your question text in the web address it requests from text.pollinations.ai, plus the usual web details (your IP address, a \"Pawline\" user-agent). Pollinations says the same address returns the same cached answer to anyone who has it. Pawline does not send your files, chat history or location. What Pollinations keeps is its own policy. The answer is only shown, never run, and may be wrong."
+                "Ask Pollinations (online) \"{text}\": this is the free \"Classic\" service: no account, best effort, about one request per 45 seconds per IP address. Pawline puts your question text in the web address it requests from text.pollinations.ai, plus the usual web details (your IP address, a \"Pawline\" user-agent). Pollinations says the same address returns the same cached answer to anyone who has it. Pawline does not send your files, chat history or location. What Pollinations keeps is its own policy. Do not put passwords, secrets or private information in this question. The answer is only shown, never run, and may be wrong."
             ),
             Operation::Search { engine, query } => match engine {
                 SearchEngine::Web => format!(
