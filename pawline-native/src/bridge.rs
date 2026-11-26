@@ -451,6 +451,11 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                 "This chat is forgotten: its lines are cleared from memory and none of them can trigger anything now. Nothing was sent or deleted.".into(),
             );
         }
+        if matches!(low, "delete saved history" | "delete my saved history" | "delete saved conversations" | "delete my saved conversations" | "delete my saved conversation") {
+            // The window owns the history file: it shows the confirm card with the real counts.
+            // Terminal mode keeps no history file, so say so instead of pretending.
+            return reply("delhist", "The app will list the saved conversation file and any archived copies and ask before deleting. (Terminal sessions keep no history file.)".into());
+        }
         if matches!(low, "chat online" | "start online chat" | "turn on online chat" | "online chat" | "chat online on") {
             state.online_chat = true;
             return reply("message", format!("Online chat is ON for this session only. Nothing was sent. Commands and offline help still run first and locally. When something is not a command, I will show you a card with the exact messages (up to {} earlier lines of this session, kept in memory only) before anything goes to text.pollinations.ai (free, no account, your IP address is visible, one request per 45 seconds). Your files, location and saved history are never sent; texts with paths, addresses, long numbers, file names, passwords or other credentials are not offered. Replies are AI-written and may be wrong. Say \"chat off\" to stop or \"forget our chat\" to clear the lines.", pawline_core::textfallback::CHAT_CONTEXT_LINES));
@@ -1688,6 +1693,17 @@ mod memory_tests {
         let mut names: Vec<String> = std::fs::read_dir(&root).unwrap().flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
         names.sort();
         assert_eq!(names, vec!["Downloads"], "nothing may be created: {names:?}");
+    }
+
+    #[test]
+    fn delete_saved_history_asks_and_deletes_nothing_by_itself() {
+        let root = org_root("delhist");
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "delete saved history");
+        assert_eq!(r.kind, "delhist", "{}", r.text);
+        assert!(st.pending.is_none(), "no engine plan may pend: deletion is app-level and confirmed there");
+        let names: Vec<String> = std::fs::read_dir(&root).unwrap().flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+        assert_eq!(names, vec!["Downloads"], "nothing deleted or created: {names:?}");
     }
 
     #[test]

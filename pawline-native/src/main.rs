@@ -225,6 +225,12 @@ fn line_mode(l: &str) -> shape::Mode {
     }
 }
 
+/// App-level (non-engine) confirmable actions: the saved-conversation delete is Pawline's own
+/// data, not a confined filesystem plan, so it cannot ride the engine's confirm path.
+enum AppAction {
+    DeleteHistory(Vec<std::path::PathBuf>),
+}
+
 enum Req {
     Text(String, Option<std::path::PathBuf>),
     Confirm,
@@ -320,6 +326,8 @@ struct App {
     msgs: Vec<Msg>,
     /// Plan text awaiting a decision.
     confirm: Option<String>,
+    /// Set when `confirm` belongs to an AppAction rather than an engine plan.
+    app_pending: Option<AppAction>,
     /// Small pictures shown above the card text (deck pictures only), decoded from the same bytes that go into the file.
     confirm_thumbs: Vec<Pixmap>,
     /// The microphone notice has been shown once this session.
@@ -1174,22 +1182,83 @@ impl App {
         fill(pm, &rrect(x0 + cx, h / 2.0 - 9.0, 2.0, 18.0, 1.0), (255, 255, 255, 255));
     }
 
-    /// Turn conversation keeping on or off. On saves from now; off deletes the file, and if it cannot be deleted it stays on and says so.
+    /// Archived copies made by "new conversation", oldest first.
+    fn history_archives() -> Vec<std::path::PathBuf> {
+        let Some(dir) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else { return vec![] };
+        let mut v: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.file_name().map(|n| n.to_string_lossy().starts_with("history-archived-")).unwrap_or(false))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Turn conversation keeping on or off. On saves from now; off deletes the saved file AND every
+    /// archived copy (they are the same retained chat text). If anything cannot be deleted it stays
+    /// on and says so.
     fn toggle_history(&mut self) {
         let Some(p) = history_path() else {
             self.push(false, "error", "No place to keep a conversation file was found, so nothing is saved.".into(), None);
             return;
         };
         if self.settings.keep_history {
-            match history::delete(&p) {
-                Ok(()) => self.settings.keep_history = false,
-                Err(e) => self.push(false, "error", format!("Could not delete the saved conversation ({e}), so saving stays ON."), None),
+            let archives = Self::history_archives();
+            let mut failed: Vec<String> = Vec::new();
+            if let Err(e) = history::delete(&p) {
+                failed.push(format!("history.txt: {e}"));
+            }
+            for a in &archives {
+                if let Err(e) = std::fs::remove_file(a) {
+                    failed.push(format!("{}: {e}", a.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
+                }
+            }
+            if failed.is_empty() {
+                self.settings.keep_history = false;
+                if !archives.is_empty() {
+                    self.push(false, "message", format!("Also deleted {} archived conversation file(s).", archives.len()), None);
+                }
+            } else {
+                self.push(false, "error", format!("Could not delete everything ({}), so saving stays ON.", failed.join(", ")), None);
             }
         } else {
             self.hist_from = self.msgs.len();
             self.settings.keep_history = true;
             self.persist_history();
         }
+    }
+
+    /// Preview + confirm card for "delete saved history": lists exactly what will go.
+    fn ask_delete_history(&mut self) {
+        let mut targets: Vec<std::path::PathBuf> = Vec::new();
+        let mut lines = 0usize;
+        if let Some(p) = history_path() {
+            if p.exists() {
+                lines = history::load(&p).len();
+                targets.push(p);
+            }
+        }
+        let archives = Self::history_archives();
+        let na = archives.len();
+        targets.extend(archives);
+        if targets.is_empty() {
+            self.push(false, "message", "There is no saved conversation to delete: no history file and no archived copies exist. Nothing was done.".into(), None);
+            self.draw();
+            return;
+        }
+        let mut text = format!("Delete your saved conversation? This cannot be undone.
+- history.txt ({lines} saved lines)");
+        if na > 0 {
+            text.push_str(&format!("\n- {na} archived conversation file(s) (history-archived-*.txt)"));
+        }
+        text.push_str("\nHistory keeping will also turn OFF. Nothing else is touched.");
+        self.confirm = Some(text);
+        self.app_pending = Some(AppAction::DeleteHistory(targets));
+        self.focus = Btn::No;
+        self.plan_scroll = 0.0;
+        self.draw();
     }
 
     /// "New conversation": drop every bubble but the welcome line. The saved history file is NOT
@@ -1760,6 +1829,38 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
         self.confirm = None;
         self.confirm_thumbs.clear();
         self.plan_scroll = 0.0;
+        if let Some(act) = self.app_pending.take() {
+            // App-level action: runs here, never reaches the engine.
+            if !yes {
+                self.push(false, "message", "Cancelled. Nothing was deleted.".into(), None);
+                self.draw();
+                return;
+            }
+            match act {
+                AppAction::DeleteHistory(paths) => {
+                    let mut gone = 0usize;
+                    let mut failed: Vec<String> = Vec::new();
+                    for p in &paths {
+                        match std::fs::remove_file(p) {
+                            Ok(()) => gone += 1,
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(e) => failed.push(format!("{}: {e}", p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())),
+                        }
+                    }
+                    if failed.is_empty() {
+                        self.settings.keep_history = false;
+                        if let Some(p) = settings_path() {
+                            let _ = theme::save(&p, &self.settings);
+                        }
+                        self.push(false, "message", format!("Deleted the saved conversation and archived copies ({gone} files). History keeping is now OFF; turn it back on in Settings if you want it. Nothing else was touched."), None);
+                    } else {
+                        self.push(false, "error", format!("Deleted {gone} files, but these could not be deleted: {}. History keeping stays as it was.", failed.join(", ")), None);
+                    }
+                    self.draw();
+                }
+            }
+            return;
+        }
         self.busy = true;
         let _ = self.tx.send(if yes { Req::Confirm } else { Req::Cancel });
     }
@@ -1768,6 +1869,10 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
         self.busy = false;
         if r.kind == "clearchat" {
             self.clear_conversation_view();
+        }
+        if r.kind == "delhist" {
+            self.ask_delete_history();
+            return;
         }
         self.push(false, &r.kind, r.text.clone(), None);
         if r.kind == "md" {
@@ -2915,6 +3020,7 @@ fn main() {
             v
         },
         confirm: None,
+        app_pending: None,
         confirm_thumbs: Vec::new(),
         mic_told: false,
         history_warned: false,

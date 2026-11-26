@@ -4,7 +4,7 @@
 use std::path::Path;
 
 /// Shown in Settings next to the switch.
-pub const NOTE: &str = "Conversation file (off by default, separate from settings): when ON it keeps what you submit from then on (typed or from voice) and Pawline's plain replies. NOT encrypted: anyone who can read your account files can read it. Not kept: draft, cards, tasks, audio. Permissions are restricted on Linux only, unverified on Windows. OFF deletes it. Never added to online chat context.";
+pub const NOTE: &str = "Conversation file (off by default, separate from settings): when ON it keeps what you submit from then on (typed or from voice) and Pawline's plain replies. NOT encrypted: anyone who can read your account files can read it. Not kept: draft, cards, tasks, audio. Permissions are restricted on Linux only, unverified on Windows. OFF deletes it and every archived copy (archives are made when you say 'new conversation'). Never added to online chat context.";
 
 pub const MAX_MSGS: usize = 100;
 pub const MAX_CHARS: usize = 4000;

@@ -265,3 +265,12 @@ folder (the user is told the exact name; pixel proof nc2_afterc/nc3_afterc) and 
 chat" now also returns immediately with an honest line instead of falling through. Behavioural test:
 bridge::memory_tests::new_conversation_never_creates_a_file. Still open for item 19: an explicit "delete saved
 history" control with confirm, context-limit handling for very long conversations.
+
+2026-11-26 item 19 privacy follow-up: archived conversations no longer linger. "delete saved history" (also
+"delete my saved history/conversation(s)") is an app-level confirm card listing exactly what goes: history.txt
+with its line count plus every history-archived-*.txt; approving deletes them and turns history keeping OFF
+(persisted); cancelling deletes nothing. Turning history OFF in Settings now deletes the archives too and says
+how many. The Settings disclosure names archives explicitly. Live proofs (Xvfb, debug): dh2_cardc (card),
+dh2_donec (deleted, 3 files), tog_offc (toggle removed 2 archives), st3_settingsc (disclosure text).
+Behavioural test: bridge::memory_tests::delete_saved_history_asks_and_deletes_nothing_by_itself.
+Still open for item 19: context limits for very long conversations.
