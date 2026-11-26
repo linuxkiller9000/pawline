@@ -364,7 +364,31 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
     {
         return Ok(image_request(cmd, &lower, first));
     }
-    Err(PawError::Parse(format!("I don't know how to \"{first}\" yet. Say \"help\" to see what I can do.")))
+    Err(PawError::Parse(unknown_command_message(cmd, first)))
+}
+
+/// The parting message when nothing understood the input. A lone unknown word gets the closest
+/// command words (same first letter, one or two edits away) plus two concrete ways forward;
+/// longer input keeps the plain message.
+fn unknown_command_message(cmd: &str, first: &str) -> String {
+    if cmd.trim().split_whitespace().count() == 1 {
+        let mut close: Vec<&str> = crate::typo::RISKY_VERBS
+            .iter()
+            .chain(crate::typo::SAFE_VERBS)
+            .copied()
+            .chain(["search", "weather", "joke", "remind", "time", "scroll", "hint"])
+            .filter(|v| v.starts_with(first.chars().next().unwrap_or('\0')) && crate::typo::distance(&first.to_lowercase(), v) <= 2)
+            .collect();
+        close.sort_by_key(|v| crate::typo::distance(&first.to_lowercase(), v));
+        close.dedup();
+        close.truncate(3);
+        if !close.is_empty() {
+            let list = close.iter().map(|v| format!("\"{v}\"")).collect::<Vec<_>>().join(", ");
+            return format!("I don't know \"{first}\" as a command. Closest commands: {list}. Say \"hint\" for examples, or \"search {first}\" to look it up.");
+        }
+        return format!("I don't know \"{first}\" as a command. Say \"hint\" for examples of what I can do, or \"search {first}\" to look it up.");
+    }
+    format!("I don't know how to \"{first}\" yet. Say \"help\" to see what I can do.")
 }
 
 /// A picture request. The provider must be named; nothing is sent until the
@@ -796,6 +820,41 @@ fn parse_wallpaper(cmd: &str) -> Option<Result<Directive, PawError>> {
         return Some(Err(PawError::Parse("which picture should be the wallpaper?".into())));
     }
     Some(Ok(Directive::SetWallpaper { image: name_to_location(target), via, no_backup_ok }))
+}
+
+#[cfg(test)]
+mod unknown_word_tests {
+    fn err_of(input: &str) -> String {
+        match crate::intent::parse(input) {
+            Err(crate::error::PawError::Parse(m)) => m,
+            other => panic!("{input}: expected parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lone_unknown_word_offers_ways_forward() {
+        let m = err_of("say");
+        assert!(m.contains("\"say\""), "{m}");
+        assert!(m.contains("hint"), "{m}");
+        assert!(m.contains("search say"), "{m}");
+        let m = err_of("a");
+        assert!(m.contains("hint"), "{m}");
+        assert!(!m.contains("Closest commands"), "{m}");
+    }
+
+    #[test]
+    fn lone_typo_suggests_close_commands() {
+        let m = err_of("lst");
+        assert!(m.contains("Closest commands"), "{m}");
+        assert!(m.contains("\"list\""), "{m}");
+    }
+
+    #[test]
+    fn multi_word_keeps_plain_message() {
+        let m = err_of("florp the things");
+        assert!(m.contains("don't know how to \"florp\""), "{m}");
+        assert!(!m.contains("Closest commands"), "{m}");
+    }
 }
 
 #[cfg(test)]

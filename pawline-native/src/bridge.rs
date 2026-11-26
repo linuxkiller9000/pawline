@@ -779,7 +779,10 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     // Length gate: beyond ASSIST_INPUT_MAX the assist only churns until its timeout (measured 33.7s on a
     // 10k-char input, then it disables itself). Skip it; the note at the error reply says what happened.
     let too_long_for_assist = r.is_err() && !assist_len_ok(input);
-    if r.is_err() && !too_long_for_assist && assist_enabled() {
+    // A single word is either a known command (already parsed) or not worth seconds of model
+    // inference: fail fast and let the message offer the closest commands instead.
+    let single_word = input.trim().split_whitespace().count() == 1;
+    if r.is_err() && !too_long_for_assist && !single_word && assist_enabled() {
         if !state.assist_tried {
             // A busy error is transient (an earlier abandoned inference still holds the native
             // session) and cheap, so it does not burn the one lazy-load attempt; other failures
