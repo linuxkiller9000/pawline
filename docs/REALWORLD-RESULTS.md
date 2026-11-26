@@ -86,3 +86,12 @@ Each entry: build + HEAD, environment, what ran, observed, evidence. Sandbox run
   well under the 20ms pacing. No kill landed inside the intent->commit window, so recovery of a real mid-operation kill is NOT
   proven by this run; the seeded-journal recovery (item 26 E3) remains the only proof of that branch. A wider window needs a
   slow operation (large copy) - queued next. Earlier 500-line unpaced attempts deadlocked my harness (undrained pty), not Pawline.
+
+## 2026-11-26 item 15 kill -9 INSIDE the copy window (SANDBOX, terminal mode via pty, debug build) - PASS
+- Setup: 3 GB file, "copy big3.bin to dest" (control run: full copy in 0.5s for 600MB; 3GB copy ~1.8s), SIGKILL mid-copy.
+- Kill at 0.5s / 1.0s / 1.5s after the command: partial copies of 711MB / 1.7GB / 2.66GB on disk. On relaunch, each time:
+  the interrupted intent was ABORTED in journal.jsonl (never committed), and Pawline printed the honest recovery note
+  "an unfinished copy may remain at ~/dest/big3.bin; check it" - the partial file is left for the user, not silently deleted.
+- Kill at 2.0s landed after completion: journal shows commit with fingerprint, full 3GB copy intact, no recovery note. Consistent.
+- Combined with the 15 fast-create kills (bundle 114, between-ops) and the seeded-journal E3 test, the real kill -9 crash
+  window is now covered for both fast and slow operations in the sandbox. Real-hardware crash stays with the N5010 gate.
