@@ -204,6 +204,18 @@ pub fn has_in_path(bin: &str) -> bool {
     std::env::var_os("PATH").map_or(false, |p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
 }
 
+/// Shown once per session before the first recording.
+pub const MIC_NOTICE: &str = "Microphone on while the bar shows listening. The audio is written to a private temporary file on this computer, turned into text here, and the file is deleted afterwards. The text only goes into the box: nothing is sent until you press Enter. If you set your own speech command (PAWLINE_REC_CMD or PAWLINE_STT_CMD), Pawline cannot control what that command does. You can block the microphone in Settings.";
+
+/// The Settings block switch for the microphone. Err carries the message to show; nothing records.
+pub fn mic_gate(blocked: bool) -> Result<(), String> {
+    if blocked {
+        Err("Microphone is blocked in Settings, so nothing was recorded. Turn it back on there to use voice input.".into())
+    } else {
+        Ok(())
+    }
+}
+
 /// A private temp WAV path (not created yet): runtime dir if present, else temp dir.
 pub fn temp_wav() -> PathBuf {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -418,6 +430,14 @@ pub fn speak(cmd: &Cmd, text: &str) -> Result<Child, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn microphone_block_refuses_before_any_recorder_starts() {
+        assert!(mic_gate(false).is_ok());
+        let e = mic_gate(true).unwrap_err();
+        assert!(e.contains("blocked") && e.contains("nothing was recorded"));
+        assert!(MIC_NOTICE.contains("deleted") && MIC_NOTICE.contains("nothing is sent until you press Enter") && MIC_NOTICE.contains("cannot control"));
+    }
 
     #[test]
     fn recorder_detection_order_and_missing_message() {

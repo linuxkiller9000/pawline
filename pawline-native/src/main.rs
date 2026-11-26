@@ -312,6 +312,8 @@ struct App {
     confirm: Option<String>,
     /// Small pictures shown above the card text (deck pictures only), decoded from the same bytes that go into the file.
     confirm_thumbs: Vec<Pixmap>,
+    /// The microphone notice has been shown once this session.
+    mic_told: bool,
     focus: Btn,
     /// Pixels scrolled up from the bottom of the chat (0 = latest).
     scroll: f32,
@@ -639,7 +641,7 @@ impl App {
     }
 
     fn settings_rows(&self) -> usize {
-        theme::THEMES.len() + 4
+        theme::THEMES.len() + 5
     }
 
     fn apply_setting(&mut self, row: usize) {
@@ -651,6 +653,11 @@ impl App {
             self.settings.speak = !self.settings.speak;
             if !self.settings.speak {
                 self.stop_speaking();
+            }
+        } else if row == theme::THEMES.len() + 4 {
+            self.settings.mic_blocked = !self.settings.mic_blocked;
+            if self.settings.mic_blocked && matches!(self.vstate, VState::Listening { .. }) {
+                self.cancel_listening();
             }
         } else if row == theme::THEMES.len() + 3 {
             self.settings.offline = !self.settings.offline;
@@ -668,7 +675,7 @@ impl App {
     }
 
     fn settings_geom(&self) -> (f32, f32) {
-        (CHAT_TOP + 34.0, 28.0)
+        (CHAT_TOP + 34.0, 26.0)
     }
 
     fn draw_settings(&mut self, pm: &mut Pixmap, w: f32, h: f32) {
@@ -676,35 +683,38 @@ impl App {
         self.text(pm, "Settings", PAD + 4.0, CHAT_TOP + 18.0, 16.0, (235, 230, 250), (0.0, h));
         let (top, rh) = self.settings_geom();
         for k in 0..self.settings_rows() {
-            let y = top + k as f32 * (rh + 6.0);
+            let y = top + k as f32 * (rh + 4.0);
             let sel = k == self.settings_sel;
             fill(pm, &rrect(PAD - 2.0, y, w - 2.0 * PAD + 4.0, rh, 10.0), if sel { (70, 64, 110) } else { (44, 40, 64) }.rgba());
             if k < theme::THEMES.len() {
                 let t = &theme::THEMES[k];
                 for (i, c) in t.bg.iter().enumerate() {
-                    fill(pm, &rrect(PAD + 8.0 + i as f32 * 18.0, y + 5.0, 18.0, 18.0, 4.0), (c.0, c.1, c.2, 255));
+                    fill(pm, &rrect(PAD + 8.0 + i as f32 * 18.0, y + 4.0, 18.0, 18.0, 4.0), (c.0, c.1, c.2, 255));
                 }
-                fill(pm, &rrect(PAD + 66.0, y + 5.0, 18.0, 18.0, 9.0), (t.accent.0, t.accent.1, t.accent.2, 255));
+                fill(pm, &rrect(PAD + 66.0, y + 4.0, 18.0, 18.0, 9.0), (t.accent.0, t.accent.1, t.accent.2, 255));
                 let label = format!("Theme: {}", t.name);
-                self.text(pm, &label, PAD + 96.0, y + 19.0, 14.0, (255, 255, 255), (0.0, h));
+                self.text(pm, &label, PAD + 96.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
                 if k == self.settings.theme {
-                    self.text(pm, "selected", w - PAD - 74.0, y + 19.0, 12.0, (150, 230, 180), (0.0, h));
+                    self.text(pm, "selected", w - PAD - 74.0, y + 18.0, 12.0, (150, 230, 180), (0.0, h));
                 }
+            } else if k == theme::THEMES.len() + 4 {
+                let label = format!("Microphone: {}", if self.settings.mic_blocked { "BLOCKED (voice input off)" } else { "allowed when you press the mic button" });
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
             } else if k == theme::THEMES.len() + 3 {
                 let label = format!("Offline mode (Pawline's own online features): {}", if self.settings.offline { "ON" } else { "off" });
-                self.text(pm, &label, PAD + 10.0, y + 19.0, 14.0, (255, 255, 255), (0.0, h));
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
             } else if k == theme::THEMES.len() + 2 {
                 let label = format!("Text size: {}% (Enter to change)", self.settings.text_pct);
-                self.text(pm, &label, PAD + 10.0, y + 19.0, 14.0, (255, 255, 255), (0.0, h));
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
             } else if k == theme::THEMES.len() + 1 {
                 let label = format!("Speak replies aloud (local engine): {}", if self.settings.speak { "on" } else { "off" });
-                self.text(pm, &label, PAD + 10.0, y + 19.0, 14.0, (255, 255, 255), (0.0, h));
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
             } else {
                 let label = format!("Colours drift slowly: {}", if self.settings.drift { "on" } else { "off" });
-                self.text(pm, &label, PAD + 10.0, y + 19.0, 14.0, (255, 255, 255), (0.0, h));
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
             }
         }
-        let note_y = top + self.settings_rows() as f32 * (rh + 6.0) + 14.0;
+        let note_y = top + self.settings_rows() as f32 * (rh + 4.0) + 14.0;
         self.text(pm, "Up/Down choose, Enter applies, Esc closes.", PAD + 4.0, note_y, 12.0, (190, 185, 215), (0.0, h));
         self.text(pm, "Saved on this computer only; no request text.", PAD + 4.0, note_y + 18.0, 12.0, (190, 185, 215), (0.0, h));
         // Offline mode covers Pawline's built-in requests only. Say so, and say when a custom speech command is configured.
@@ -1172,6 +1182,15 @@ impl App {
     fn start_listening(&mut self) {
         if !matches!(self.vstate, VState::Idle) || self.busy {
             return;
+        }
+        if let Err(e) = voice::mic_gate(self.settings.mic_blocked) {
+            self.push(false, "message", e, None);
+            self.draw();
+            return;
+        }
+        if !self.mic_told {
+            self.mic_told = true;
+            self.push(false, "message", voice::MIC_NOTICE.to_string(), None);
         }
         match self.vcmds().and_then(|(rec, st, wav)| voice::start_recording(&rec, &wav).map(|c| (c, st, wav))) {
             Ok((child, st, wav)) => {
@@ -1950,7 +1969,7 @@ impl App {
             let (px, py) = self.ptr_pos;
             let w = self.w as f32;
             for k in 0..self.settings_rows() {
-                let y = top + k as f32 * (rh + 6.0);
+                let y = top + k as f32 * (rh + 4.0);
                 if inside((PAD - 2.0, y, w - 2.0 * PAD + 4.0, rh), (px, py)) {
                     self.settings_sel = k;
                     self.apply_setting(k);
@@ -2759,6 +2778,7 @@ fn main() {
         msgs: vec![Msg { user: false, kind: "message".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it. Right-click a message (or Ctrl+R) to reply to it.".into(), thumb: None, quote: None }],
         confirm: None,
         confirm_thumbs: Vec::new(),
+        mic_told: false,
         focus: Btn::No,
         scroll: 0.0,
         plan_scroll: 0.0,

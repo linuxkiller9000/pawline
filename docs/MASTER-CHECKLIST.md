@@ -171,3 +171,8 @@ signing or release commitment without approval. Publishing needs the user's expl
 - 14 privacy: claims for the earlier GET routes (Q&A, deck draft, search) and the new POST chat route must be stated per route, not generalized from one. The privacy facts on the chat card come from pollinations.ai/privacy (2026-11-17) only.
 - 18 performance: debug-build GUI typing latency is slow (long input redraw); measure and fix, no performance claim yet.
 - 21/25: provider terms and privacy pages must be read in full before release; the 2026-11-26 read was a skim (no full legal review claimed).
+
+### 14c microphone control (PARTIAL)
+- Settings row "Microphone" (mic= key, default allowed). Blocked: the mic button records nothing and says so. One-time session notice before the first recording: private temp file, local transcription, deletion, text only goes into the box, custom STT/REC commands not controlled.
+- File access: Pawline's own file actions are confined to the home folder and need a confirm card.
+- Still open: per-permission screen for files/internet/AI, Tauri UI has no switches, full privacy audit, provider terms full read, real mic hardware.
