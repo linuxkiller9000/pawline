@@ -122,7 +122,16 @@ pub fn stt(env_override: Option<&str>, has: &dyn Fn(&str) -> bool, setup: &SttSe
     match (bin, &setup.whisper_model) {
         (Some(b), Some(m)) => Ok(Cmd { program: b.into(), args: vec!["-m".into(), m.to_string_lossy().to_string(), "-f".into(), w, "-nt".into(), "-np".into()], env: vec![] }),
         _ => Err(format!(
-            "No speech-to-text set up. Pawline's default is Moonshine through sherpa-onnx: install sherpa-onnx-offline (on PATH, or in ~/.local/share/pawline/sherpa/) and put a Moonshine model folder named moonshine-* in ~/.local/share/pawline/models/. Alternatives: whisper.cpp (whisper-cli plus a ggml .bin model in that models folder), or PAWLINE_STT_CMD. Pawline downloads nothing and never uses an online service for this. Found: sherpa-onnx {}, Moonshine model {}, whisper {}.",
+            "No speech-to-text is set up yet, so nothing was recorded.\n\
+            On Arch Linux:\n\
+            1. Install sherpa-onnx from the AUR (it provides the sherpa-onnx-offline command): yay -S sherpa-onnx\n\
+            2. Get the free MIT Moonshine model (runs on your CPU, about 240 MB unpacked):\n\
+            mkdir -p ~/.local/share/pawline/models && cd ~/.local/share/pawline/models\n\
+            wget https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-tiny-en-int8.tar.bz2\n\
+            tar xf sherpa-onnx-moonshine-tiny-en-int8.tar.bz2\n\
+            mv sherpa-onnx-moonshine-tiny-en-int8 moonshine-tiny-en-int8\n\
+            Then press the mic again. Pawline downloads nothing itself and never uses an online service for this.\n\
+            (Found: sherpa-onnx {}, Moonshine model {}, whisper {}. Not on Arch? The same two pieces work: sherpa-onnx-offline on PATH, and the model folder in ~/.local/share/pawline/models/. Whisper.cpp with a ggml .bin model there, or PAWLINE_STT_CMD, also work.)",
             if setup.sherpa.is_some() { "yes" } else { "no" },
             if setup.moonshine.is_some() { "yes" } else { "no" },
             if bin.is_some() { "yes" } else { "no" }
@@ -466,6 +475,16 @@ pub fn speak(cmd: &Cmd, text: &str) -> Result<Child, String> {
         });
     }
     Ok(child)
+}
+
+#[test]
+fn stt_setup_message_names_the_exact_arch_steps_and_model() {
+    let setup = SttSetup { sherpa: None, moonshine: None, whisper_model: None };
+    let e = stt(None, &|_| false, &setup, Path::new("/tmp/x.wav")).unwrap_err();
+    assert!(e.contains("yay -S sherpa-onnx"), "{e}");
+    assert!(e.contains("sherpa-onnx-moonshine-tiny-en-int8.tar.bz2"), "{e}");
+    assert!(e.contains("~/.local/share/pawline/models"), "{e}");
+    assert!(e.contains("nothing was recorded"), "{e}");
 }
 
 #[cfg(test)]

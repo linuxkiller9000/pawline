@@ -46,6 +46,13 @@ Verified: headless sway/Wayland and an X11 virtual display in the sandbox. UNVER
 Dependency warnings visible (unmaintained, no fix available): rustybuzz 0.20.1 RUSTSEC-2026-0206, ttf-parser 0.25.1 RUSTSEC-2026-0192.
 
 ## Troubleshooting (draft)
-- No voice input: STT tools/models not installed; Pawline says so and downloads nothing.
+- No voice input: STT tools/models not installed; Pawline says so and downloads nothing. The setup Pawline suggests (also what its message prints):
+  1. Install sherpa-onnx from the AUR (provides the sherpa-onnx-offline command): `yay -S sherpa-onnx`
+  2. Get the free MIT Moonshine model (about 240 MB unpacked):
+     `mkdir -p ~/.local/share/pawline/models && cd ~/.local/share/pawline/models`
+     `wget https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-tiny-en-int8.tar.bz2`
+     `tar xf sherpa-onnx-moonshine-tiny-en-int8.tar.bz2`
+     `mv sherpa-onnx-moonshine-tiny-en-int8 moonshine-tiny-en-int8`
+  Pawline finds sherpa-onnx-offline on PATH (or ~/.local/share/pawline/sherpa/bin/) and the first complete moonshine-* folder in ~/.local/share/pawline/models/. Alternatives: whisper.cpp (whisper-cli + a ggml .bin model in that models folder) or PAWLINE_STT_CMD. All of it is offline; no online speech service is ever used.
 - Nothing remembered: history is off by default.
 - Wayland input problems: see docs/WAYLAND-SMOKE.md.
