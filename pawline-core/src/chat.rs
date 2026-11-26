@@ -305,6 +305,28 @@ impl ChatState {
         if lead_len(toks, &["why did you", "did you", "have you", "what did you do", "what have you done"]).is_some() {
             return Outcome::Reply("I only change things after you press Do it on a card. If something looks wrong, say \"undo\" to reverse the last change.".into());
         }
+        // 5b. Clock questions, answered offline from this computer's clock and zone files.
+        match time_query(n) {
+            Some(TimeQuery::Local) => {
+                return Outcome::Reply(match clock_line(None) {
+                    Some(l) => format!("It's {l}. (From this computer's clock, no network used.)"),
+                    None => "I can't read the system clock here (the date command is missing).".into(),
+                });
+            }
+            Some(TimeQuery::City(place)) => {
+                return Outcome::Reply(match zone_for_place(&place) {
+                    Some(zone) => match clock_line(Some(&zone)) {
+                        Some(l) => format!("In {}: {l}. (From this computer's time zone data ({zone}), no network used.)", capitalize_words(&place)),
+                        None => "I can't read the system clock here (the date command is missing).".into(),
+                    },
+                    None => match clock_line(None) {
+                        Some(l) => format!("I don't have a time zone for \"{place}\" in this computer's zone files. The local time here is {l}."),
+                        None => format!("I don't have a time zone for \"{place}\" in this computer's zone files, and I can't read the system clock here either."),
+                    },
+                });
+            }
+            None => {}
+        }
         // 6. Follow-ups.
         if matches!(
             n,
@@ -316,11 +338,23 @@ impl ChatState {
                 None => Outcome::Reply("Another what? I can do a joke or a hint. Say \"joke\" or \"hint\".".into()),
             };
         }
-        let joke_lead = toks.len() <= 2
-            || toks.first().is_some_and(|t| matches!(*t, "tell" | "tel" | "tlel" | "tll" | "got" | "any" | "know" | "give" | "say" | "have" | "hear" | "wanna" | "want" | "need" | "crack" | "one" | "another" | "more" | "please" | "can" | "could" | "do" | "a" | "joke" | "jokes" | "lets" | "let's"))
-            || (toks.first() == Some(&"i") && toks.get(1).is_some_and(|t| matches!(*t, "want" | "need" | "wanna" | "would")));
+        // A joke asked with a conversational lead-in is still a joke request ("thats funny, tell me
+        // a joke", "haha, good one, tell me another"). Guards: an exact ask word must appear
+        // ("the jokes on you", "my friend tells jokes" and "that was a thin joke book" have none),
+        // and no command or past-tense change word ("delete the joke folder", "you deleted my joke
+        // file") may be present.
+        const JOKE_ASK: &[&str] = &[
+            "tell", "tel", "tlel", "tll", "give", "say", "know", "got", "any", "hear", "wanna", "want", "need", "crack", "another", "more", "lets", "let's",
+        ];
+        let joke_ask = (has_word(toks, "joke") || has_word(toks, "jokes"))
+            && toks.len() <= 12
+            && toks.iter().any(|t| JOKE_ASK.contains(t))
+            && !toks.iter().any(|t| {
+                ACTION_WORDS.contains(t)
+                    || matches!(*t, "deleted" | "removed" | "moved" | "copied" | "renamed" | "made" | "created" | "opened")
+            });
         let funny = has_word(toks, "something") && has_word(toks, "funny") && toks.len() <= 5;
-        if (toks.len() <= 6 && joke_lead && (has_word(toks, "joke") || has_word(toks, "jokes"))) || n.contains("make me laugh") || funny {
+        if joke_ask || n.contains("make me laugh") || funny {
             return Outcome::Reply(self.joke());
         }
         if (toks.len() <= 4 && (has_word(toks, "hint") || has_word(toks, "hints") || has_word(toks, "tips") || has_word(toks, "tip")))
@@ -391,6 +425,100 @@ fn k_raw(input: &str, k: usize) -> usize {
     input.split_whitespace().count()
 }
 
+enum TimeQuery {
+    Local,
+    City(String),
+}
+
+/// "time now", "what is the time now in new york": a local clock question or a city one.
+fn time_query(n: &str) -> Option<TimeQuery> {
+    const LOCAL: &[&str] = &[
+        "time", "time now", "time please", "the time", "the time now", "current time", "what time", "what time is it",
+        "what time is it now", "whats the time", "what's the time", "what is the time", "what is the time now",
+        "tell me the time", "can you tell me the time", "could you tell me the time", "can you tell me what time it is",
+        "do you have the time", "do you know the time", "do you know what time it is", "got the time",
+    ];
+    if LOCAL.contains(&n) {
+        return Some(TimeQuery::Local);
+    }
+    const CITY: &[&str] = &[
+        "what is the time now in ", "what time is it now in ", "what is the time in ", "what's the time in ",
+        "whats the time in ", "what time is it in ", "what time is in ", "what is time in ", "current time in ",
+        "the time in ", "time now in ", "time in ",
+    ];
+    for p in CITY {
+        if let Some(rest) = n.strip_prefix(p) {
+            let place = rest.trim().trim_end_matches(" right now").trim_end_matches(" now").trim_end_matches(" please").trim();
+            if place.is_empty() {
+                return Some(TimeQuery::Local);
+            }
+            return Some(TimeQuery::City(place.to_string()));
+        }
+    }
+    None
+}
+
+/// Map a typed place name to a zone file, e.g. "new york" -> "America/New_York", from the
+/// system's own time zone database (offline). Exact file-name match only; no guessing.
+fn zone_for_place(place: &str) -> Option<String> {
+    let token = place.trim().to_lowercase().replace(' ', "_");
+    if token.is_empty() || !token.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '\'')) {
+        return None;
+    }
+    let root = std::path::Path::new("/usr/share/zoneinfo");
+    for region in std::fs::read_dir(root).ok()?.flatten() {
+        let dir = region.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let rname = region.file_name().to_string_lossy().into_owned();
+        if matches!(rname.as_str(), "posix" | "right") {
+            continue;
+        }
+        if let Ok(inner) = std::fs::read_dir(&dir) {
+            for f in inner.flatten() {
+                let fname = f.file_name().to_string_lossy().into_owned();
+                if f.path().is_file() && fname.to_lowercase() == token {
+                    return Some(format!("{rname}/{fname}"));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// "16:44 EET (UTC+0200), Thursday 26 November" from the system `date`, with TZ set for a city.
+fn clock_line(zone: Option<&str>) -> Option<String> {
+    let mut cmd = std::process::Command::new("date");
+    cmd.arg("+%H:%M %Z (UTC%z), %A %-d %B");
+    if let Some(z) = zone {
+        cmd.env("TZ", z);
+    }
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+fn capitalize_words(s: &str) -> String {
+    s.split_whitespace()
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +528,64 @@ mod tests {
     }
     fn is_text(o: &Outcome) -> bool {
         matches!(o, Outcome::Reply(_) | Outcome::Discussion(_))
+    }
+
+    #[test]
+    fn joke_with_conversational_leadin() {
+        let mut c = ChatState::default();
+        for s in ["thats funny, tell me a joke", "haha thats a good one, tell me another joke", "ok that was funny, got another joke for me"] {
+            let o = c.respond(s, false);
+            assert!(is_text(&o), "{s}");
+            assert_eq!(c.last, Some(Topic::Joke), "{s}");
+        }
+    }
+
+    #[test]
+    fn joke_word_with_command_or_past_tense_is_not_a_joke() {
+        let mut c = ChatState::default();
+        for s in ["delete the joke folder", "you deleted my joke file"] {
+            let o = c.respond(s, false);
+            if let Outcome::Reply(t) | Outcome::Discussion(t) = &o {
+                assert!(!JOKES.contains(&t.as_str()), "{s} must not be answered with a joke");
+            }
+        }
+    }
+
+    #[test]
+    fn time_query_patterns() {
+        assert!(matches!(time_query("time now"), Some(TimeQuery::Local)));
+        assert!(matches!(time_query("what time is it"), Some(TimeQuery::Local)));
+        assert!(matches!(time_query("what is the time now in new york"), Some(TimeQuery::City(p)) if p == "new york"));
+        assert!(matches!(time_query("time in cairo"), Some(TimeQuery::City(p)) if p == "cairo"));
+        assert!(time_query("what time is the meeting").is_none());
+        assert!(time_query("show me the time folder").is_none());
+    }
+
+    #[test]
+    fn zone_lookup_common_cities() {
+        if !std::path::Path::new("/usr/share/zoneinfo").is_dir() {
+            return;
+        }
+        assert_eq!(zone_for_place("new york").as_deref(), Some("America/New_York"));
+        assert_eq!(zone_for_place("cairo").as_deref(), Some("Africa/Cairo"));
+        assert!(zone_for_place("not a real city").is_none());
+    }
+
+    #[test]
+    fn time_answers_offline() {
+        let mut c = ChatState::default();
+        let o = c.respond("what time is it", false);
+        match &o {
+            Outcome::Reply(t) => assert!(t.contains("clock"), "{t}"),
+            _ => panic!("expected a clock reply, got {o:?}"),
+        }
+        if std::path::Path::new("/usr/share/zoneinfo").is_dir() {
+            let o = c.respond("what is the time now in new york", false);
+            match &o {
+                Outcome::Reply(t) => assert!(t.contains("New York") && t.contains("America/New_York"), "{t}"),
+                _ => panic!("expected a city clock reply, got {o:?}"),
+            }
+        }
     }
 
     #[test]
