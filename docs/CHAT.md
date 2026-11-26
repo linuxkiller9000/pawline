@@ -19,3 +19,6 @@ Online chat (opt-in, per session):
 Window title shows [online chat ON] while it is on.
 
 Known gaps: history persistence is item 15/19 and is not built; English only.
+
+## Help text refresh (2026-11-26)
+The `help` text now lists weather (sends the place name to open-meteo.com), presentations (local review first; online topic drafts need a consent card, AI-written and not fact-checked), pictures (online, asks first), chat (offline English, opt-in online chat per session with a card per turn), the fixed Arabic command set, and the limits (not a general chat assistant, voice English only). Still not shown in help: settings, the folder chip, zi/frequent folders, voice, deck editing commands, image/chart/table/theme/source lines. Not translated into Arabic.
