@@ -4,7 +4,7 @@
 use std::path::Path;
 
 /// Shown in Settings next to the switch.
-pub const NOTE: &str = "Keep conversation (off by default) saves your typed lines and Pawline's plain replies in a private file here. It never saves the unsent draft, cards, pending tasks or audio. Turning it off deletes the file.";
+pub const NOTE: &str = "Conversation file (off by default, separate from settings): when ON it keeps the messages you submit (typed or from voice) and Pawline's plain replies. NOT encrypted: anyone who can read your account files can read it. Not kept: draft, cards, tasks, audio. Permissions are restricted on Linux only, unverified on Windows. OFF deletes it. Never added to online chat context.";
 
 pub const MAX_MSGS: usize = 100;
 pub const MAX_CHARS: usize = 4000;
@@ -178,6 +178,14 @@ mod tests {
         assert!(target.exists(), "delete removed the link only");
         delete(&f).unwrap();
     }
+    /// Structural guard (not a behavioural proof): the online chat context is built in bridge.rs from its own per-session
+    /// state; this module must stay out of it so restored text can never reach an online request.
+    #[test]
+    fn history_is_not_wired_into_the_online_chat_bridge() {
+        let b = include_str!("bridge.rs");
+        assert!(!b.contains("history::") && !b.contains("history.txt") && !b.contains("keep_history"));
+    }
+
     #[test]
     fn only_plain_conversation_is_kept() {
         assert!(keep_kind(true, "user") && keep_kind(false, "message") && keep_kind(false, "md"));

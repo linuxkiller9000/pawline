@@ -729,10 +729,10 @@ impl App {
             }
         }
         let note_y = top + self.settings_rows() as f32 * (rh + 4.0) + 14.0;
-        self.text(pm, "Up/Down choose, Enter applies, Esc closes.", PAD + 4.0, note_y, 12.0, (190, 185, 215), (0.0, h));
-        self.text(pm, "Settings are saved on this computer; no request text.", PAD + 4.0, note_y + 18.0, 12.0, (190, 185, 215), (0.0, h));
+        self.text(pm, "Up/Down choose, Enter applies, Esc closes. The settings file", PAD + 4.0, note_y, 12.0, (190, 185, 215), (0.0, h));
+        self.text(pm, "holds only these switches, no message text.", PAD + 4.0, note_y + 15.0, 12.0, (190, 185, 215), (0.0, h));
         // Offline mode covers Pawline's built-in requests only. Say so, and say when a custom speech command is configured.
-        let mut ny = note_y + 36.0;
+        let mut ny = note_y + 33.0;
         let mut notes = vec!["Offline mode stops Pawline's own requests only, not apps you open.".to_string(), history::NOTE.to_string()];
         let custom: Vec<&str> = ["PAWLINE_STT_CMD", "PAWLINE_TTS_CMD", "PAWLINE_REC_CMD"].into_iter().filter(|k| std::env::var_os(k).is_some()).collect();
         if !custom.is_empty() {
@@ -741,7 +741,7 @@ impl App {
         for n in notes {
             for l in self.wrap(&n, 12.0, w - 2.0 * PAD - 8.0) {
                 self.text(pm, &l, PAD + 4.0, ny, 12.0, (190, 185, 215), (0.0, h));
-                ny += 16.0;
+                ny += 15.0;
             }
         }
     }
