@@ -204,8 +204,19 @@ pub fn has_in_path(bin: &str) -> bool {
     std::env::var_os("PATH").map_or(false, |p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
 }
 
-/// Shown once per session before the first recording.
-pub const MIC_NOTICE: &str = "Microphone on while the bar shows listening. The audio is written to a private temporary file on this computer, turned into text here, and the file is deleted afterwards. The text only goes into the box: nothing is sent until you press Enter. If you set your own speech command (PAWLINE_REC_CMD or PAWLINE_STT_CMD), Pawline cannot control what that command does. You can block the microphone in Settings.";
+/// Shown once per session before the first recording. Local/deleted claims are made only for the built-in route.
+pub fn mic_notice(custom_rec: bool, custom_stt: bool) -> String {
+    let tail = " The text only goes into the box: nothing is sent until you press Enter. You can block the microphone in Settings.";
+    if !custom_rec && !custom_stt {
+        return format!("Microphone on while the bar shows listening. The built-in route writes the audio to a private temporary file on this computer, turns it into text here, and deletes the file afterwards.{tail}");
+    }
+    let which = match (custom_rec, custom_stt) {
+        (true, true) => "your own recorder and speech commands (PAWLINE_REC_CMD, PAWLINE_STT_CMD)",
+        (true, false) => "your own recorder command (PAWLINE_REC_CMD)",
+        _ => "your own speech command (PAWLINE_STT_CMD)",
+    };
+    format!("Microphone on while the bar shows listening. You set {which}. Pawline cannot check where that command sends or keeps audio or text, so no local-only promise is made for it. Pawline tries to delete its temporary audio file afterwards.{tail}")
+}
 
 /// The Settings block switch for the microphone. Err carries the message to show; nothing records.
 pub fn mic_gate(blocked: bool) -> Result<(), String> {
@@ -468,7 +479,14 @@ mod tests {
         assert!(mic_gate(false).is_ok());
         let e = mic_gate(true).unwrap_err();
         assert!(e.contains("blocked") && e.contains("nothing was recorded"));
-        assert!(MIC_NOTICE.contains("deleted") && MIC_NOTICE.contains("nothing is sent until you press Enter") && MIC_NOTICE.contains("cannot control"));
+        let b = mic_notice(false, false);
+        assert!(b.contains("on this computer") && b.contains("deletes the file") && b.contains("nothing is sent until you press Enter") && !b.contains("cannot check"));
+        for (r, t) in [(true, false), (false, true), (true, true)] {
+            let c = mic_notice(r, t);
+            assert!(!c.contains("on this computer") && !c.contains("deletes the file"), "no local claim on a custom route");
+            assert!(c.contains("cannot check where") && c.contains("nothing is sent until you press Enter"));
+        }
+        assert!(mic_notice(true, false).contains("PAWLINE_REC_CMD") && !mic_notice(true, false).contains("PAWLINE_STT_CMD"));
     }
 
     #[test]

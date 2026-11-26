@@ -1195,7 +1195,7 @@ impl App {
         }
         if !self.mic_told {
             self.mic_told = true;
-            self.push(false, "message", voice::MIC_NOTICE.to_string(), None);
+            self.push(false, "message", voice::mic_notice(std::env::var_os("PAWLINE_REC_CMD").is_some(), std::env::var_os("PAWLINE_STT_CMD").is_some()), None);
         }
         match self.vcmds().and_then(|(rec, st, wav)| voice::start_recording(&rec, &wav).map(|c| (c, st, wav))) {
             Ok((child, st, wav)) => {
