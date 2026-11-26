@@ -111,8 +111,8 @@ mod tests {
         let d = std::env::temp_dir().join(format!("pawline-theme-{}", std::process::id()));
         let f = d.join("ui-settings.txt");
         assert_eq!(load(&f), Settings::default());
-        save(&f, &Settings { theme: 2, drift: false, speak: true }).unwrap();
-        assert_eq!(load(&f), Settings { theme: 2, drift: false, speak: true });
+        save(&f, &Settings { text_pct: 100, theme: 2, drift: false, speak: true }).unwrap();
+        assert_eq!(load(&f), Settings { text_pct: 100, theme: 2, drift: false, speak: true });
         std::fs::write(&f, "theme=Nope\ndrift=maybe\nspeak=maybe\njunk").unwrap();
         assert_eq!(load(&f), Settings { text_pct: 100, theme: 0, drift: true, speak: false });
         let t = std::fs::read_to_string(&f).unwrap();
