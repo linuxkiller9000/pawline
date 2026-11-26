@@ -54,6 +54,13 @@ static LAST_CHAT_ANSWER: std::sync::Mutex<Option<String>> = std::sync::Mutex::ne
 
 /// Longest the app waits for the local model. Not tuned against measured inference times; a timeout switches the assist off for the session.
 const ASSIST_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Longer input than this never reaches the assist: a huge blob only burns the whole timeout and the
+/// parser's answer is the honest one anyway. The GUI input caps at 2000 (edit.rs MAX_CHARS); this is stricter.
+const ASSIST_INPUT_MAX: usize = 1000;
+
+fn assist_len_ok(input: &str) -> bool {
+    input.chars().count() <= ASSIST_INPUT_MAX
+}
 
 fn chat_online(context: &[String], text: &str) -> Result<String, PawError> {
     let (c, q) = (context.to_vec(), text.to_string());
@@ -564,7 +571,10 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     // Parser first. The 35 MB model is loaded only when the parser has a
     // gap, so ordinary commands never wait for it.
     let mut r = state.engine.handle_with(input, &backend, false, None);
-    if r.is_err() {
+    // Length gate: beyond ASSIST_INPUT_MAX the assist only churns until its timeout (measured 33.7s on a
+    // 10k-char input, then it disables itself). Skip it; the note at the error reply says what happened.
+    let too_long_for_assist = r.is_err() && !assist_len_ok(input);
+    if r.is_err() && !too_long_for_assist {
         if !state.assist_tried {
             state.assist_tried = true;
             state.assist = NeedleAssist::embedded().ok().map(|a| pawline_core::assist::TimedAssist::new(std::sync::Arc::new(a), ASSIST_LIMIT));
@@ -703,7 +713,14 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
         }
         Ok(Response::Message(m)) => reply("message", m),
         Ok(Response::Failed { completed, failed, error, remaining }) => reply(if error.to_string().contains("Cancelled.") { "message" } else { "failed" }, fail_text(completed.len(), &failed.to_string(), &error.to_string(), remaining.to_string())),
-        Err(e) => reply("error", e.to_string()),
+        Err(e) => {
+            let t = e.to_string();
+            reply("error", if too_long_for_assist {
+                format!("{t}\n(Over {ASSIST_INPUT_MAX} characters is too long for the local AI reader, so only the plain command parser tried it. Nothing else was run.)")
+            } else {
+                t
+            })
+        }
     }
 }
 
@@ -1362,6 +1379,20 @@ mod memory_tests {
         assert_eq!(netgate::attempts(), before, "the forecast request was not made");
         assert!(!weather_pick_open(), "the chooser is closed, a later number is plain text");
         netgate::set_offline_for_this_thread(None);
+    }
+
+    #[test]
+    fn over_long_input_skips_the_assist_and_says_so() {
+        // boundary on the predicate, without waking the 35 MB model
+        assert!(assist_len_ok(&"x".repeat(ASSIST_INPUT_MAX)));
+        assert!(!assist_len_ok(&"x".repeat(ASSIST_INPUT_MAX + 1)));
+        let mut st = new_state(org_root("lengate"));
+        let long = "x".repeat(10_000);
+        let t0 = std::time::Instant::now();
+        let r = handle_text(&mut st, &long);
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "no 30s assist timeout burn: {:?}", t0.elapsed());
+        assert!(r.text.contains("too long for the local AI reader"), "{}", r.text);
+        assert!(!st.assist_tried, "the assist was never woken");
     }
 
     #[test]

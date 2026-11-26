@@ -2588,6 +2588,11 @@ fn work_root() -> std::path::PathBuf {
 fn run_terminal() {
     use std::io::{BufRead, IsTerminal, Write};
     let tty = std::io::stdin().is_terminal();
+    // Honour the persisted offline switch, the same as the GUI at startup: without this the terminal
+    // ignored a "yes" to offline mode and let online requests reach a disclosure card.
+    if let Some(p) = settings_path() {
+        pawline_core::netgate::set_offline(theme::load(&p).offline);
+    }
     let mut st = bridge::new_state(work_root());
     println!("Pawline (terminal mode). Type a command, or 'quit' to leave.");
     if !st.notes.is_empty() {
