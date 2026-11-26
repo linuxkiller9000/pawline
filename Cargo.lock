@@ -660,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "pawline-native"
-version = "0.2.1-beta"
+version = "0.3.0-test.1"
 dependencies = [
  "calloop",
  "fontdue",

@@ -7,10 +7,12 @@ in Settings). Version numbers are the `pawline-native` Cargo package version.
 Dates are the git tag dates. Entries describe intent at a theme level; the git
 history is the exact record.
 
-## Unreleased - successor line (no tag, no published builds)
+## v0.3.0-test.1 - 2026-11-26 (test pre-release)
 
-Everything below is merged on the successor development branches since
-v0.2.1-beta (2026-11-25). It is NOT a release and has no version number yet.
+Test pre-release cut for real-hardware testing. Sandbox-verified only
+(Xvfb/headless CI): unverified on real hardware, real audio and Windows, and
+the audits it cites are author-written. Everything below is merged on the
+successor development line since v0.2.1-beta (2026-11-25), grouped by theme.
 
 - Input and chat: full edit buffer (caret, Home/End/Delete, word jump, selection,
   select-all), wrapped multi-line prompt box, clipboard (Ctrl+C/X/V, Shift+Insert,
@@ -88,4 +90,8 @@ v0.2.1-beta (2026-11-25). It is NOT a release and has no version number yet.
 
 Note on tags: v0.2.0-beta-rc.1/rc.2 and v0.2.1-beta-rc.1 were release
 candidates for the versions above. v0.2.2-test.1 is a CI workflow test tag,
-not a release.
+not a release. v0.3.0-test.1 is a test pre-release, not a stable release.
+
+## Unreleased
+
+Nothing yet.
