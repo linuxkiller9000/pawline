@@ -360,6 +360,7 @@ impl Validator {
         crate::journal::last_open_of(&text, "wallpaper").is_some()
             || crate::journal::last_open_of(&text, "wallpaper_base").is_some()
             || crate::wallpaper::current_swaybg_image().is_some()
+            || crate::wallpaper::current_awww_image().is_some()
     }
 
     /// A rename, move or copy needs something to act on: it must exist on
@@ -559,10 +560,10 @@ impl Validator {
                     };
                     let known = self.wallpaper_backup_known();
                     if !known && !*no_backup_ok {
-                        return Err(PawError::Validation(
-                            "I can't see your current wallpaper, so I can't back it up and Undo couldn't restore it. Nothing was changed. To go ahead anyway, say the same thing again ending with \"anyway\"."
-                                .into(),
-                        ));
+                        return Err(PawError::Validation(format!(
+                            "I can't see your current wallpaper, so I can't back it up and Undo couldn't restore it. I checked: whether I set a wallpaper before (no), a running swaybg showing one, and an awww/swww daemon to ask. {} Nothing was changed. To go ahead anyway, say the same thing again ending with \"anyway\".",
+                            crate::wallpaper::backup_check_note()
+                        )));
                     }
                     ops.push(Operation::SetWallpaper { image: path, via, no_backup_ok: *no_backup_ok && !known });
                 }
