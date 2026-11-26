@@ -283,7 +283,7 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
             .ok_or_else(|| PawError::Parse("rename needs \"... to <new name>\"".into()))?;
         return Ok(Directive::Rename {
             target: place_ref(t),
-            new_name: n.trim().to_string(),
+            new_name: unwrap_quotes(n.trim()),
         });
     }
     if first == "move" || first == "copy" {
@@ -577,6 +577,19 @@ fn split_name_list(s: &str) -> Vec<String> {
 /// Names and paths are case-sensitive on Linux: "Pets" and "pets" are
 /// different files. Every name keeps exactly the letters the user typed and
 /// is looked up that way; there is no case-insensitive nearest match.
+/// "name" or 'name' or `name` (or curly quotes) around a whole new name are the quoting syntax, not part of the name.
+/// Anything else, including quotes inside the name, is kept exactly.
+fn unwrap_quotes(s: &str) -> String {
+    let c: Vec<char> = s.chars().collect();
+    if c.len() >= 2 {
+        let pair = matches!((c[0], c[c.len() - 1]), ('"', '"') | ('\'', '\'') | ('`', '`') | ('\u{201c}', '\u{201d}') | ('\u{2018}', '\u{2019}'));
+        if pair && !c[1..c.len() - 1].iter().any(|x| matches!(x, '"' | '`' | '\u{201c}' | '\u{201d}')) {
+            return c[1..c.len() - 1].iter().collect();
+        }
+    }
+    s.to_string()
+}
+
 fn place_ref(s: &str) -> LocationRef {
     name_to_location(s)
 }
@@ -736,6 +749,23 @@ mod case_tests {
             d => panic!("{d:?}"),
         }
     }
+    #[test]
+    fn quotes_around_a_new_name_are_syntax_not_part_of_the_name() {
+        for (inp, want) in [
+            ("rename a.txt to \"new name.txt\"", "new name.txt"),
+            ("rename a.txt to 'new name.txt'", "new name.txt"),
+            ("rename a.txt to \u{201c}new name.txt\u{201d}", "new name.txt"),
+            ("rename a.txt to plain.txt", "plain.txt"),
+            ("rename a.txt to it's.txt", "it's.txt"),
+            ("rename a.txt to \"a\"b\"", "\"a\"b\""),
+        ] {
+            match one(inp) {
+                Directive::Rename { new_name, .. } => assert_eq!(new_name, want, "{inp}"),
+                d => panic!("{d:?}"),
+            }
+        }
+    }
+
     #[test]
     fn bare_names_keep_their_exact_case() {
         match one("delete Pics") {
