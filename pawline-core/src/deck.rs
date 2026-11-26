@@ -31,6 +31,7 @@ pub struct Report {
     /// Long lines cut into several bullets at sentence ends.
     pub lines_cut: usize,
     pub agenda: bool,
+    pub theme: Theme,
 }
 
 impl Report {
@@ -48,14 +49,105 @@ impl Report {
         if self.agenda {
             v.push("a Contents slide added".to_string());
         }
+        if self.theme != Theme::Pawline {
+            v.push(format!("{} theme", self.theme.name()));
+        }
         if v.is_empty() { "your outline was used as written".into() } else { v.join("; ") }
     }
+}
+
+
+/// Colour themes. Chosen with a first outline line `theme: dark` (names below). Only colours change; text is never touched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Theme {
+    #[default]
+    Pawline,
+    Dark,
+    Ocean,
+    Forest,
+    Sunset,
+    Contrast,
+}
+
+pub const THEMES: &[Theme] = &[Theme::Pawline, Theme::Dark, Theme::Ocean, Theme::Forest, Theme::Sunset, Theme::Contrast];
+
+impl Theme {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Theme::Pawline => "light",
+            Theme::Dark => "dark",
+            Theme::Ocean => "ocean",
+            Theme::Forest => "forest",
+            Theme::Sunset => "sunset",
+            Theme::Contrast => "contrast",
+        }
+    }
+    pub fn from_name(n: &str) -> Option<Theme> {
+        let n = n.trim().to_lowercase();
+        let n = n.trim_end_matches(" theme").trim();
+        match n {
+            "light" | "default" | "pawline" => Some(Theme::Pawline),
+            "dark" => Some(Theme::Dark),
+            "ocean" | "blue" => Some(Theme::Ocean),
+            "forest" | "green" => Some(Theme::Forest),
+            "sunset" | "warm" => Some(Theme::Sunset),
+            "contrast" | "high contrast" | "high-contrast" => Some(Theme::Contrast),
+            _ => None,
+        }
+    }
+    /// (dk1, lt1, dk2, lt2, accent1, accent2, dark background?)
+    fn colors(&self) -> (&'static str, &'static str, &'static str, &'static str, &'static str, &'static str, bool) {
+        match self {
+            Theme::Pawline => ("1F1D2B", "FFFFFF", "3B3558", "EEEBF5", "7C5CD6", "E8828C", false),
+            Theme::Dark => ("16141F", "F2F0FA", "3B3558", "D9D4EA", "A78BFA", "F29AA3", true),
+            Theme::Ocean => ("0B2540", "F4FAFF", "134074", "DCEBFA", "1F6FB5", "2A9D8F", false),
+            Theme::Forest => ("12281C", "F6FBF4", "1E4D32", "DDEEDD", "2E7D4F", "B7791F", false),
+            Theme::Sunset => ("2A1220", "FFF3E6", "5A2A3C", "FFD9B8", "FF8C6B", "FFC857", true),
+            Theme::Contrast => ("000000", "FFFFFF", "000000", "FFFFFF", "0033CC", "7A0000", false),
+        }
+    }
+    /// (background, text) as hex, for contrast checks.
+    pub fn bg_text(&self) -> (&'static str, &'static str) {
+        let (dk1, lt1, _, _, _, _, dark) = self.colors();
+        if dark { (dk1, lt1) } else { (lt1, dk1) }
+    }
+}
+
+/// Reads an optional first line `theme: <name>`; returns the text without it.
+fn take_theme(text: &str) -> Result<(Theme, String), String> {
+    let mut lines = text.lines();
+    let mut skipped = 0usize;
+    let mut rest_start = 0usize;
+    for l in text.split_inclusive('\n') {
+        if l.trim().is_empty() {
+            skipped += 1;
+            rest_start += l.len();
+            continue;
+        }
+        let low = l.trim().to_lowercase();
+        if let Some(n) = low.strip_prefix("theme:") {
+            return match Theme::from_name(n) {
+                Some(t) => Ok((t, text[rest_start + l.len()..].to_string())),
+                None => Err(format!("I don't know the theme \"{}\". The themes are: {}", n.trim(), THEMES.iter().map(|t| t.name()).collect::<Vec<_>>().join(", "))),
+            };
+        }
+        break;
+    }
+    let _ = (&mut lines, skipped);
+    Ok((Theme::Pawline, text.to_string()))
 }
 
 /// Source text -> readable slides, locally and deterministically (no AI, no rewriting: every word of the source is
 /// kept, only split, grouped and given titles). Outlines with "#" headings are used as written; plain paragraphs get
 /// one slide each; dense slides continue on a next slide instead of being refused or shrunk to unreadable text.
 pub fn compose(text: &str) -> Result<(Vec<Slide>, Report), String> {
+    let (theme, text) = take_theme(text)?;
+    let (slides, mut rep) = compose_inner(&text)?;
+    rep.theme = theme;
+    Ok((slides, rep))
+}
+
+fn compose_inner(text: &str) -> Result<(Vec<Slide>, Report), String> {
     let has_headings = text.lines().any(|l| l.starts_with("# ") || l.starts_with("## ") || l.starts_with("### "));
     let first_is_title = text.lines().find(|l| !l.trim().is_empty()).is_some_and(|l| l.starts_with("# ")) || !has_headings;
     let mut rep = Report::default();
@@ -429,15 +521,16 @@ fn layout_xml(name: &str, ty: &str, title_ph: &str, body_ph: Option<(&str, &str)
     format!("{HDR}<p:sldLayout {NS} type=\"{ty}\" preserve=\"1\"><p:cSld name=\"{name}\"><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{shapes}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>")
 }
 
-fn master_xml() -> String {
+fn master_xml(theme: Theme) -> String {
     let title = sp(2, "Title", "title", None, 838200, 365125, 10515600, 1325563, "<p:txBody><a:bodyPr anchor=\"ctr\"><a:normAutofit/></a:bodyPr><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\"/><a:t>Title</a:t></a:r></a:p></p:txBody>");
     let body = "<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Body\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph type=\"body\" idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"838200\" y=\"1825625\"/><a:ext cx=\"10515600\" cy=\"4351338\"/></a:xfrm></p:spPr><p:txBody><a:bodyPr><a:noAutofit/></a:bodyPr><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\"/><a:t>Text</a:t></a:r></a:p></p:txBody></p:sp>";
     let lvl = |n: u32, marl: u32, sz: u32| format!("<a:lvl{n}pPr marL=\"{marl}\" indent=\"-285750\"><a:spcBef><a:spcPts val=\"600\"/></a:spcBef><a:buFont typeface=\"Arial\"/><a:buChar char=\"&#8226;\"/><a:defRPr sz=\"{sz}\" kern=\"1200\"><a:solidFill><a:schemeClr val=\"tx1\"/></a:solidFill><a:latin typeface=\"+mn-lt\"/></a:defRPr></a:lvl{n}pPr>");
-    format!("{HDR}<p:sldMaster {NS}><p:cSld><p:bg><p:bgRef idx=\"1001\"><a:schemeClr val=\"bg1\"/></p:bgRef></p:bg><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{title}{body}</p:spTree></p:cSld><p:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/><p:sldLayoutIdLst><p:sldLayoutId id=\"2147483649\" r:id=\"rId1\"/><p:sldLayoutId id=\"2147483650\" r:id=\"rId2\"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle><a:lvl1pPr algn=\"l\"><a:defRPr sz=\"3600\" b=\"1\" kern=\"1200\"><a:solidFill><a:schemeClr val=\"tx1\"/></a:solidFill><a:latin typeface=\"+mj-lt\"/></a:defRPr></a:lvl1pPr></p:titleStyle><p:bodyStyle>{}{}</p:bodyStyle><p:otherStyle><a:lvl1pPr><a:defRPr sz=\"1800\"/></a:lvl1pPr></p:otherStyle></p:txStyles></p:sldMaster>", lvl(1, 342900, 2800), lvl(2, 800100, 2400))
+    format!("{HDR}<p:sldMaster {NS}><p:cSld><p:bg><p:bgRef idx=\"1001\"><a:schemeClr val=\"bg1\"/></p:bgRef></p:bg><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{title}{body}</p:spTree></p:cSld><p:clrMap {} accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/><p:sldLayoutIdLst><p:sldLayoutId id=\"2147483649\" r:id=\"rId1\"/><p:sldLayoutId id=\"2147483650\" r:id=\"rId2\"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle><a:lvl1pPr algn=\"l\"><a:defRPr sz=\"3600\" b=\"1\" kern=\"1200\"><a:solidFill><a:schemeClr val=\"tx1\"/></a:solidFill><a:latin typeface=\"+mj-lt\"/></a:defRPr></a:lvl1pPr></p:titleStyle><p:bodyStyle>{}{}</p:bodyStyle><p:otherStyle><a:lvl1pPr><a:defRPr sz=\"1800\"/></a:lvl1pPr></p:otherStyle></p:txStyles></p:sldMaster>", if theme.colors().6 { "bg1=\"dk1\" tx1=\"lt1\" bg2=\"dk2\" tx2=\"lt2\"" } else { "bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\"" }, lvl(1, 342900, 2800), lvl(2, 800100, 2400))
 }
 
-fn theme_xml() -> String {
-    format!("{HDR}<a:theme xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" name=\"Pawline\"><a:themeElements><a:clrScheme name=\"Pawline\"><a:dk1><a:srgbClr val=\"1F1D2B\"/></a:dk1><a:lt1><a:srgbClr val=\"FFFFFF\"/></a:lt1><a:dk2><a:srgbClr val=\"3B3558\"/></a:dk2><a:lt2><a:srgbClr val=\"EEEBF5\"/></a:lt2><a:accent1><a:srgbClr val=\"7C5CD6\"/></a:accent1><a:accent2><a:srgbClr val=\"E8828C\"/></a:accent2><a:accent3><a:srgbClr val=\"4E9F7D\"/></a:accent3><a:accent4><a:srgbClr val=\"D9A441\"/></a:accent4><a:accent5><a:srgbClr val=\"4A8FC7\"/></a:accent5><a:accent6><a:srgbClr val=\"8A8AA0\"/></a:accent6><a:hlink><a:srgbClr val=\"4A8FC7\"/></a:hlink><a:folHlink><a:srgbClr val=\"7C5CD6\"/></a:folHlink></a:clrScheme><a:fontScheme name=\"Pawline\"><a:majorFont><a:latin typeface=\"DejaVu Sans\"/><a:ea typeface=\"\"/><a:cs typeface=\"\"/></a:majorFont><a:minorFont><a:latin typeface=\"DejaVu Sans\"/><a:ea typeface=\"\"/><a:cs typeface=\"\"/></a:minorFont></a:fontScheme><a:fmtScheme name=\"Pawline\"><a:fillStyleLst><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w=\"9525\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln><a:ln w=\"19050\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln><a:ln w=\"28575\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>")
+fn theme_xml(theme: Theme) -> String {
+    let (dk1, lt1, dk2, lt2, a1, a2, _) = theme.colors();
+    format!("{HDR}<a:theme xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" name=\"Pawline\"><a:themeElements><a:clrScheme name=\"Pawline\"><a:dk1><a:srgbClr val=\"{dk1}\"/></a:dk1><a:lt1><a:srgbClr val=\"{lt1}\"/></a:lt1><a:dk2><a:srgbClr val=\"{dk2}\"/></a:dk2><a:lt2><a:srgbClr val=\"{lt2}\"/></a:lt2><a:accent1><a:srgbClr val=\"{a1}\"/></a:accent1><a:accent2><a:srgbClr val=\"{a2}\"/></a:accent2><a:accent3><a:srgbClr val=\"4E9F7D\"/></a:accent3><a:accent4><a:srgbClr val=\"D9A441\"/></a:accent4><a:accent5><a:srgbClr val=\"4A8FC7\"/></a:accent5><a:accent6><a:srgbClr val=\"8A8AA0\"/></a:accent6><a:hlink><a:srgbClr val=\"4A8FC7\"/></a:hlink><a:folHlink><a:srgbClr val=\"7C5CD6\"/></a:folHlink></a:clrScheme><a:fontScheme name=\"Pawline\"><a:majorFont><a:latin typeface=\"DejaVu Sans\"/><a:ea typeface=\"\"/><a:cs typeface=\"\"/></a:majorFont><a:minorFont><a:latin typeface=\"DejaVu Sans\"/><a:ea typeface=\"\"/><a:cs typeface=\"\"/></a:minorFont></a:fontScheme><a:fmtScheme name=\"Pawline\"><a:fillStyleLst><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w=\"9525\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln><a:ln w=\"19050\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln><a:ln w=\"28575\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>")
 }
 
 const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -453,6 +546,10 @@ fn rels(items: &[(String, &str, String)]) -> String {
 
 /// The complete .pptx file as bytes.
 pub fn build_pptx(slides: &[Slide]) -> Vec<u8> {
+    build_pptx_themed(slides, Theme::Pawline)
+}
+
+pub fn build_pptx_themed(slides: &[Slide], theme: Theme) -> Vec<u8> {
     let mut files: Vec<(String, Vec<u8>)> = vec![];
     let mut ct = format!("{HDR}<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/><Override PartName=\"/ppt/slideMasters/slideMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml\"/><Override PartName=\"/ppt/slideLayouts/slideLayout1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/><Override PartName=\"/ppt/slideLayouts/slideLayout2.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/><Override PartName=\"/ppt/theme/theme1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.theme+xml\"/>");
     for i in 1..=slides.len() {
@@ -469,14 +566,14 @@ pub fn build_pptx(slides: &[Slide]) -> Vec<u8> {
     }
     files.push(("ppt/_rels/presentation.xml.rels".into(), rels(&prel).into_bytes()));
     files.push(("ppt/presentation.xml".into(), format!("{HDR}<p:presentation {NS}><p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" r:id=\"rId1\"/></p:sldMasterIdLst><p:sldIdLst>{ids}</p:sldIdLst><p:sldSz cx=\"12192000\" cy=\"6858000\"/><p:notesSz cx=\"6858000\" cy=\"9144000\"/></p:presentation>").into_bytes()));
-    files.push(("ppt/slideMasters/slideMaster1.xml".into(), master_xml().into_bytes()));
+    files.push(("ppt/slideMasters/slideMaster1.xml".into(), master_xml(theme).into_bytes()));
     files.push(("ppt/slideMasters/_rels/slideMaster1.xml.rels".into(), rels(&[("rId1".into(), "slideLayout", "../slideLayouts/slideLayout1.xml".into()), ("rId2".into(), "slideLayout", "../slideLayouts/slideLayout2.xml".into()), ("rId3".into(), "theme", "../theme/theme1.xml".into())]).into_bytes()));
     files.push(("ppt/slideLayouts/slideLayout1.xml".into(), layout_xml("Title Slide", "title", "ctrTitle", Some(("type=\"subTitle\" ", "1"))).into_bytes()));
     files.push(("ppt/slideLayouts/slideLayout2.xml".into(), layout_xml("Title and Content", "obj", "title", Some(("", "1"))).into_bytes()));
     for l in 1..=2 {
         files.push((format!("ppt/slideLayouts/_rels/slideLayout{l}.xml.rels"), rels(&[("rId1".into(), "slideMaster", "../slideMasters/slideMaster1.xml".into())]).into_bytes()));
     }
-    files.push(("ppt/theme/theme1.xml".into(), theme_xml().into_bytes()));
+    files.push(("ppt/theme/theme1.xml".into(), theme_xml(theme).into_bytes()));
     for (i, s) in slides.iter().enumerate() {
         let n = i + 1;
         let is_title = i == 0 && s.title_slide_like();
@@ -935,6 +1032,69 @@ mod tests {
             }
             let s = parse_outline("# Pawline demo\nA small helper for your files\n\n## What it does\n- Makes folders and moves files\n  - always asks first\n- Shrinks videos\n- Searches with fd and rg\n\n## Safety\n- Nothing is overwritten\n- Undo for every change\n").unwrap();
             std::fs::write(p, build_pptx(&s)).unwrap();
+        }
+    }
+
+    fn lum(hex: &str) -> f64 {
+        let c: Vec<f64> = (0..3).map(|k| u8::from_str_radix(&hex[k * 2..k * 2 + 2], 16).unwrap() as f64 / 255.0).map(|v| if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }).collect();
+        0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+    }
+    fn ratio(a: &str, b: &str) -> f64 {
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn every_theme_has_readable_text_contrast() {
+        for t in THEMES {
+            let (bg, tx) = t.bg_text();
+            let r = ratio(bg, tx);
+            let need = if *t == Theme::Contrast { 7.0 } else { 4.5 };
+            assert!(r >= need, "{} contrast {r:.2} < {need}", t.name());
+            let (_, _, _, _, a1, _, _) = t.colors();
+            assert!(ratio(bg, a1) >= 3.0 || *t == Theme::Pawline, "{} accent contrast {:.2}", t.name(), ratio(bg, a1));
+        }
+    }
+
+    #[test]
+    fn theme_line_changes_colours_only() {
+        let body = "# Talk\n## One\n- a\n- b\n";
+        let (plain, r0) = compose(body).unwrap();
+        assert_eq!(r0.theme, Theme::Pawline);
+        for (name, t) in [("dark", Theme::Dark), ("Ocean", Theme::Ocean), ("theme: forest", Theme::Forest)] {
+            let line = if name.starts_with("theme:") { name.to_string() } else { format!("theme: {name}") };
+            let (sl, r) = compose(&format!("{line}\n{body}")).unwrap();
+            assert_eq!(sl, plain, "text must not change");
+            assert_eq!(r.theme, t);
+        }
+        let (sl, r) = compose(&format!("\n  Theme: Dark theme\n{body}")).unwrap();
+        assert_eq!((sl, r.theme), (plain, Theme::Dark));
+        let e = compose(&format!("theme: neon\n{body}")).unwrap_err();
+        assert!(e.contains("neon") && e.contains("ocean") && e.contains("contrast"), "{e}");
+        // a heading or bullet line that merely mentions a theme is content, not a directive
+        let (sl, r) = compose("# Talk\n## One\n- theme: dark\n").unwrap();
+        assert_eq!(r.theme, Theme::Pawline);
+        assert!(sl.iter().any(|s| s.bullets.iter().any(|b| b.1.contains("theme: dark"))));
+    }
+
+    #[test]
+    fn dark_theme_swaps_background_and_text_in_the_file() {
+        let (sl, r) = compose("theme: dark\n# T\n## A\n- x\n").unwrap();
+        let bytes = build_pptx_themed(&sl, r.theme);
+        let txt = String::from_utf8_lossy(&bytes);
+        assert!(txt.contains("bg1=\"dk1\" tx1=\"lt1\"") && txt.contains("16141F") && txt.contains("F2F0FA"));
+        let light = String::from_utf8_lossy(&build_pptx(&sl)).to_string();
+        assert!(light.contains("bg1=\"lt1\" tx1=\"dk1\"") && light.contains("1F1D2B"));
+        assert!(r.describe().contains("dark theme"));
+    }
+
+    #[test]
+    #[ignore]
+    fn write_theme_samples() {
+        std::fs::create_dir_all("/tmp/deck/themes").unwrap();
+        for t in THEMES {
+            let (sl, r) = compose(&format!("theme: {}\n# Tea at home\nA short talk\n## Why tea\n- Warm and calming\n- Many kinds\n  - green\n  - black\n## Brewing\n- Heat water\n- Wait three minutes\n", t.name())).unwrap();
+            std::fs::write(format!("/tmp/deck/themes/{}.pptx", t.name()), build_pptx_themed(&sl, r.theme)).unwrap();
         }
     }
 }

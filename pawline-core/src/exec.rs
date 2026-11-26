@@ -146,20 +146,20 @@ impl DirectFsBackend {
         }
         let mut text = String::new();
         Read::take(&mut src, crate::deck::MAX_SOURCE + 1).read_to_string(&mut text).map_err(|_| PawError::Validation("the outline is not readable UTF-8 text".into()))?;
-        let (slides, _) = crate::deck::compose(&text).map_err(PawError::Validation)?;
-        self.publish_deck(&slides, to, "The outline is untouched.")
+        let (slides, rep) = crate::deck::compose(&text).map_err(PawError::Validation)?;
+        self.publish_deck(&slides, rep.theme, to, "The outline is untouched.")
     }
 
     /// The reviewed draft text (held in memory by the UI) as a new deck: same build and no-replace publish as `deck`.
     pub fn deck_text(&self, text: &str, to: &Path) -> Result<String, PawError> {
-        let (slides, _) = crate::deck::compose(text).map_err(PawError::Validation)?;
-        self.publish_deck(&slides, to, "It was written from the draft you reviewed.")
+        let (slides, rep) = crate::deck::compose(text).map_err(PawError::Validation)?;
+        self.publish_deck(&slides, rep.theme, to, "It was written from the draft you reviewed.")
     }
 
-    fn publish_deck(&self, slides: &[crate::deck::Slide], to: &Path, note: &str) -> Result<String, PawError> {
+    fn publish_deck(&self, slides: &[crate::deck::Slide], theme: crate::deck::Theme, to: &Path, note: &str) -> Result<String, PawError> {
         use std::io::Write;
         let rt = self.rel(to)?;
-        let bytes = crate::deck::build_pptx(slides);
+        let bytes = crate::deck::build_pptx_themed(slides, theme);
         refuse_clobber(&self.root, &rt)?;
         self.tracked("copy", self.rel_str(to)?, None, |id| {
             let nf = NewFile::create(&self.root, &rt)?;
