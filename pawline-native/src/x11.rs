@@ -24,6 +24,7 @@ struct Atoms {
     utf8: Atom,
     targets: Atom,
     text: Atom,
+    uri_list: Atom,
     prop: Atom,
     incr: Atom,
 }
@@ -87,6 +88,7 @@ impl Xb {
             utf8: ia(b"UTF8_STRING")?,
             targets: ia(b"TARGETS")?,
             text: ia(b"TEXT")?,
+            uri_list: ia(b"text/uri-list")?,
             prop: ia(b"PAWLINE_SEL")?,
             incr: ia(b"INCR")?,
         });
@@ -311,20 +313,29 @@ impl Xb {
         self.conn.get_selection_owner(self.atoms.clipboard).ok().and_then(|c| c.reply().ok()).is_some_and(|r| r.owner == self.win)
     }
 
-    /// Read the clipboard as text; waits at most half a second, text only, 64 KB at most.
+    /// Read the clipboard as text; waits at most half a second per attempt, 64 KB at most.
+    /// File managers offer text/uri-list rather than text, so that target is tried too
+    /// (converted to plain paths by dropin::offered_to_text).
     pub fn clip_paste(&self) -> Option<String> {
         if self.shared.owned.load(Ordering::SeqCst) {
             return self.shared.clip.lock().ok().map(|g| g.clone());
         }
-        let (tx, rx) = mpsc::channel();
-        *self.shared.paste.lock().ok()? = Some(tx);
-        let _ = self.conn.convert_selection(self.win, self.atoms.clipboard, self.atoms.utf8, self.atoms.prop, CURRENT_TIME);
-        let _ = self.conn.flush();
-        let got = rx.recv_timeout(std::time::Duration::from_millis(500)).ok().flatten();
-        if let Ok(mut g) = self.shared.paste.lock() {
-            *g = None;
+        for (atom, mime) in [(self.atoms.utf8, "text/plain"), (self.atoms.uri_list, "text/uri-list")] {
+            let (tx, rx) = mpsc::channel();
+            *self.shared.paste.lock().ok()? = Some(tx);
+            let _ = self.conn.convert_selection(self.win, self.atoms.clipboard, atom, self.atoms.prop, CURRENT_TIME);
+            let _ = self.conn.flush();
+            let got = rx.recv_timeout(std::time::Duration::from_millis(500)).ok().flatten();
+            if let Ok(mut g) = self.shared.paste.lock() {
+                *g = None;
+            }
+            if let Some(b) = got {
+                if let Some(t) = crate::dropin::offered_to_text(mime, &b[..b.len().min(CLIP_MAX as usize)]) {
+                    return Some(t);
+                }
+            }
         }
-        got.map(|b| String::from_utf8_lossy(&b[..b.len().min(CLIP_MAX)]).into_owned())
+        None
     }
 
     #[allow(dead_code)]

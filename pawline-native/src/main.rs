@@ -2,6 +2,7 @@
 //! buffers on a Wayland layer-shell surface (xdg-toplevel fallback). No
 //! OpenGL, EGL, GTK or WebKit is loaded.
 mod bridge;
+mod dropin;
 mod edit;
 mod shape;
 mod theme;
@@ -3263,15 +3264,42 @@ const CLIP_MAX: u64 = 64 * 1024;
 
 #[cfg(unix)]
 impl DataDeviceHandler for App {
-    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice, _: f64, _: f64, _: &wl_surface::WlSurface) {}
+    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _dev: &wl_data_device::WlDataDevice, _: f64, _: f64, _: &wl_surface::WlSurface) {
+        // Tell the source we take text or file paths, copied (never moved).
+        if let Some(offer) = self.ddev.as_ref().and_then(|d| d.data().drag_offer()) {
+            let mime = offer.with_mime_types(|ms| dropin::PASTE_MIMES.iter().find(|m| ms.iter().any(|x| x == **m)).map(|m| m.to_string()));
+            offer.accept_mime_type(offer.serial, mime);
+        }
+    }
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
     fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice, _: f64, _: f64) {}
     fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
-    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
+    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _dev: &wl_data_device::WlDataDevice) {
+        let Some(offer) = self.ddev.as_ref().and_then(|d| d.data().drag_offer()) else { return };
+        let Some(mime) = offer.with_mime_types(|ms| dropin::PASTE_MIMES.iter().find(|m| ms.iter().any(|x| x == **m)).map(|m| m.to_string())) else { return };
+        let Ok(pipe) = offer.receive(mime.clone()) else { return };
+        offer.finish();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = pipe.take(CLIP_MAX).read_to_end(&mut buf);
+            let _ = tx.send(buf);
+        });
+        if let Ok(buf) = rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            if let Some(t) = dropin::offered_to_text(&mime, &buf) {
+                // inserted as sanitised text only; dropping never submits anything
+                self.input.insert(&t);
+                self.draw();
+            }
+        }
+    }
 }
 #[cfg(unix)]
 impl DataOfferHandler for App {
-    fn source_actions(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: wl_data_device_manager::DndAction) {}
+    fn source_actions(&mut self, _: &Connection, _: &QueueHandle<Self>, offer: &mut DragOffer, _: wl_data_device_manager::DndAction) {
+        offer.set_actions(wl_data_device_manager::DndAction::Copy, wl_data_device_manager::DndAction::Copy);
+    }
     fn selected_action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: wl_data_device_manager::DndAction) {}
 }
 #[cfg(unix)]
@@ -3343,8 +3371,8 @@ impl App {
         }
         let dev = self.ddev.as_ref()?;
         let offer = dev.data().selection_offer()?;
-        let mime = offer.with_mime_types(|ms| CLIP_MIMES.iter().find(|m| ms.iter().any(|x| x == **m)).map(|m| m.to_string()))?;
-        let pipe = offer.receive(mime).ok()?;
+        let mime = offer.with_mime_types(|ms| dropin::PASTE_MIMES.iter().find(|m| ms.iter().any(|x| x == **m)).map(|m| m.to_string()))?;
+        let pipe = offer.receive(mime.clone()).ok()?;
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             use std::io::Read;
@@ -3353,7 +3381,7 @@ impl App {
             let _ = tx.send(buf);
         });
         let buf = rx.recv_timeout(std::time::Duration::from_millis(500)).ok()?;
-        Some(String::from_utf8_lossy(&buf).into_owned())
+        dropin::offered_to_text(&mime, &buf)
     }
     /// Text of the latest reply, without the "Took" line.
     fn last_result_text(&self) -> Option<String> {
