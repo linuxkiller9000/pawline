@@ -138,7 +138,7 @@ Status: PARTIAL. XFCE and KDE X11 (headless) checked. niri and KDE Wayland, the 
 - Preserve user settings and data during updates.
 - Rollback if an update breaks the app.
 - Clear changelog and version information.
-Status: OPEN. No update server exists; any version check is a network request and must follow the permission rules in 14. No signing or release commitment.
+Status: OPEN (design in docs/UPDATE-DESIGN.md, nothing built). No update server exists; any version check is a network request and must follow the permission rules in 14. No signing or release commitment.
 
 ## 25. Documentation (user section 27)
 - Installation guide.
