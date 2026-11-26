@@ -315,6 +315,7 @@ impl ExecutionBackend for UiBackend {
         let r = self.inner.execute(op);
         if matches!(op, Operation::DeckText { .. }) && r.is_ok() {
             *DECK_DRAFT.lock().unwrap() = None; // saved: the draft is used up
+            *DECK_CHECK.lock().unwrap() = None;
         }
         r
     }
@@ -899,7 +900,7 @@ Nothing is sent from your machine, and after setup Laya works fully offline. You
         }
         return r;
     }
-    if let Some(r) = deck_write_command(state, input).or_else(|| deck_save_command(state, input)).or_else(|| deck_edit_command(state, input)) {
+    if let Some(r) = deck_write_command(state, input).or_else(|| deck_save_command(state, input)).or_else(|| deck_edit_command(state, input)).or_else(|| deck_check_command(state, input)) {
         return r;
     }
     if let Some(r) = deck_command(state, input) {
@@ -1326,6 +1327,7 @@ static DECK_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::ne
 fn deck_draft_begin() -> u64 {
     use std::sync::atomic::Ordering::SeqCst;
     *DECK_DRAFT.lock().unwrap() = None;
+    *DECK_CHECK.lock().unwrap() = None; // a new draft replaces any earlier check
     DECK_GEN.fetch_add(1, SeqCst) + 1
 }
 
@@ -1370,12 +1372,43 @@ fn deck_edit_command(state: &mut UiState, input: &str) -> Option<UiReply> {
         Ok(new) => {
             let (slides, rep) = pawline_core::deck::compose(&new).ok()?;
             *d = Some(new);
+            *DECK_CHECK.lock().unwrap() = None; // the checked text changed; the old result no longer applies
             if state.pending.as_ref().is_some_and(|p| p.ops.iter().any(|o| matches!(o, Operation::DeckText { .. }))) {
                 state.pending = None;
             }
             Some(reply("message", format!("Changed the draft as you typed it. NOTHING IS SAVED YET. Your wording was kept exactly and is not fact-checked.\n{}\n\nSay \"save the presentation\" to see the file name and confirm. An earlier save card, if open, was dropped.", pawline_core::deck::review_text(&slides, &rep))))
         }
     }
+}
+
+/// Result of the last "check the draft against <file>": (file as typed, lines not found, lines total).
+/// Memory only; cleared when a new draft starts, on save and on any edit (the check no longer matches the text).
+static DECK_CHECK: std::sync::Mutex<Option<(String, usize, usize)>> = std::sync::Mutex::new(None);
+
+/// "check the draft against <file>": word-level comparison of the reviewed draft against a local text file
+/// the user chose. Never edits the draft; the result is a review list and is repeated on the save card.
+fn deck_check_command(state: &mut UiState, input: &str) -> Option<UiReply> {
+    let path = pawline_core::deckcheck::parse_check_command(input)?;
+    let Some(text) = DECK_DRAFT.lock().unwrap().clone() else {
+        return Some(reply("message", "There is no reviewed draft to check. Ask me to write a presentation about a topic first, then say \"check the draft against <file>\". Nothing was changed.".into()));
+    };
+    let home = std::fs::canonicalize(&state.root).unwrap_or_else(|_| state.root.clone());
+    let src = match pawline_core::deckcheck::read_source_text(&home, &path) {
+        Ok(t) => t,
+        Err(e) => return Some(reply("failed", format!("I can't check against that file: {e}. Nothing was changed."))),
+    };
+    if src.trim().is_empty() {
+        return Some(reply("failed", format!("{path} has no text to compare against. Nothing was changed.")));
+    }
+    let (slides, rep) = match pawline_core::deck::compose(&text) {
+        Ok(s) => s,
+        Err(e) => return Some(reply("failed", format!("I can't build that draft: {e}. Nothing was changed."))),
+    };
+    let checks = pawline_core::deckcheck::check_slides_against_source(&slides, &src);
+    let _ = rep;
+    let not_found = checks.iter().filter(|c| !c.found()).count();
+    *DECK_CHECK.lock().unwrap() = Some((path.clone(), not_found, checks.len()));
+    Some(reply("message", format!("{}\n\nThe draft is unchanged. Say \"save the presentation\" to see the file name and confirm - the card repeats how many lines were not found.", pawline_core::deckcheck::check_review_text(&path, &checks))))
 }
 
 /// "save the presentation" after a draft was shown: a second card with the full file path.
@@ -1395,7 +1428,11 @@ fn deck_save_command(state: &mut UiState, input: &str) -> Option<UiReply> {
     let dir = if home.join("Documents").is_dir() { home.join("Documents") } else { home };
     let to = pawline_core::deck::output_in(&dir, &slides[0].title);
     let op = Operation::DeckText { text, to };
-    let summary = format!("1. {}\n{}", op.describe(), pawline_core::deck::review_text(&slides, &rep));
+    let check_note = match DECK_CHECK.lock().unwrap().clone() {
+        Some((f, nf, total)) => format!("\nChecked against {f}: {nf} of {total} lines were NOT found there (word-level match, not understanding)."),
+        None => String::new(),
+    };
+    let summary = format!("1. {}\n{}{}", op.describe(), pawline_core::deck::review_text(&slides, &rep), check_note);
     state.pending = Some(Plan { ops: vec![op], needs_confirmation: true, confirmation_reasons: vec!["This saves one new .pptx file.".into()], assist_derived: false, notes: vec![] });
     state.pending_request = None;
             pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
@@ -1964,6 +2001,44 @@ mod memory_tests {
         assert_eq!(r.kind, "confirm", "{}", r.text);
         let _ = cancel(&mut st);
         netgate::set_offline_for_this_thread(None);
+    }
+
+    #[test]
+    fn checking_the_draft_against_a_local_file_names_missing_words_and_repeats_on_the_save_card() {
+        let _deck_guard = DECK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = org_root("deckcheck");
+        let mut st = new_state(root.clone());
+        *DECK_DRAFT.lock().unwrap() = None;
+        *DECK_CHECK.lock().unwrap() = None;
+        // no draft: refused, nothing read
+        let r = handle_text(&mut st, "check the draft against facts.txt");
+        assert!(r.text.contains("no reviewed draft to check") && st.pending.is_none(), "{}", r.text);
+        // with a draft and a source file: per-line review, invented number named
+        std::fs::write(root.join("facts.txt"), "Rain falls from clouds. Rivers flow to the sea. The sun lifts water up.
+").unwrap();
+        *DECK_DRAFT.lock().unwrap() = Some("# Water\n## Rain\n- Falls from clouds\n- 42 percent of rain is purple\n".into());
+        let r = handle_text(&mut st, "check the draft against facts.txt");
+        assert_eq!(r.kind, "message", "{}", r.text);
+        assert!(r.text.contains("word-level match against your file, not understanding"), "{}", r.text);
+        assert!(r.text.contains("found: Falls from clouds"), "{}", r.text);
+        assert!(r.text.contains("NOT found: 42 percent of rain is purple"), "{}", r.text);
+        assert!(r.text.contains("missing: 42") && r.text.contains("percent") && r.text.contains("purple"), "{}", r.text);
+        assert!(st.pending.is_none(), "a check never creates a card");
+        // the save card repeats the count
+        let r = handle_text(&mut st, "save the presentation");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(r.text.contains("Checked against facts.txt: 1 of 4 lines were NOT found there"), "{}", r.text);
+        assert!(cancel(&mut st).text.contains("Nothing was done"));
+        // after an edit the stale check is dropped from the card
+        let r = handle_text(&mut st, "change slide 2 line 1 to Rain falls from clouds");
+        assert!(r.text.contains("Changed the draft"), "{}", r.text);
+        let r = handle_text(&mut st, "save the presentation");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(!r.text.contains("Checked against"), "stale check must not be repeated: {}", r.text);
+        let _ = cancel(&mut st);
+        // a source outside home is refused
+        let r = handle_text(&mut st, "check the draft against /etc/hostname");
+        assert!(r.text.contains("outside your home folder"), "{}", r.text);
     }
 
     #[test]
