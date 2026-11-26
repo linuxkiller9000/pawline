@@ -149,7 +149,7 @@ Status: OPEN (design in docs/UPDATE-DESIGN.md, nothing built). No update server 
 - Troubleshooting guide.
 - How to uninstall cleanly without leaving unwanted files.
 Status: OPEN (PARTIAL draft in docs/USER-GUIDE-DRAFT.md), drafted alongside the features. The uninstall guide is written from a verified inventory of the files, folders, models and settings Pawline
-really creates; user-created documents are kept by default.
+really creates; user-created documents are kept by default. 2026-11-26 sync: the file inventory now names every retained chat file (history.txt, history-named-*.txt, history-archived-*.txt, current-conversation - all plain text, all removed by OFF or "delete our saved conversation"), and a Settings section lists all 12 rows with defaults, the reset semantics and the keyboard paths (Ctrl+,, Ctrl+C/V, Ctrl+R). The inventory wording was re-checked against history.rs.
 
 ## 26. Real-world testing (user section 28)
 - Test normal usage, not just successful demo cases.
