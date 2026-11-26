@@ -22,7 +22,18 @@ pub struct Slide {
     pub bullets: Vec<(u8, String)>,
     /// Optional table (first row = header). Empty = no table. Written as `| a | b |` lines in the outline.
     pub table: Vec<Vec<String>>,
+    /// `chart: bar|line|pie` under a slide draws the table's numbers as a native chart instead of a table.
+    pub chart: Option<ChartKind>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChartKind {
+    Bar,
+    Line,
+    Pie,
+}
+
+pub const CHART_MAX_SERIES: usize = 3;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Report {
@@ -164,9 +175,15 @@ fn compose_inner(text: &str) -> Result<(Vec<Slide>, Report), String> {
             out.push(s);
             continue;
         }
+        if s.chart.is_some() && s.table.is_empty() {
+            return Err(format!("\"{}\" has a chart line but no data. Put the numbers in a table under it: first column names, the other columns numbers", s.title));
+        }
         if !s.table.is_empty() {
             // A table slide stays one slide: a few lines of text above the table, never split across slides.
             check_table(&s)?;
+            if s.chart.is_some() {
+                check_chart(&s)?;
+            }
             out.push(s);
             continue;
         }
@@ -206,12 +223,12 @@ fn compose_inner(text: &str) -> Result<(Vec<Slide>, Report), String> {
             if title.chars().count() > MAX_TITLE_CHARS {
                 return Err(format!("the title \"{}...\" is too long once \"({}/{n})\" is added; shorten it", s.title.chars().take(30).collect::<String>(), k + 1));
             }
-            out.push(Slide { title, bullets: p, table: vec![] });
+            out.push(Slide { title, bullets: p, table: vec![], chart: None });
         }
     }
     // A Contents slide for longer talks: the original slide titles only (not continuations), after the title slide.
     if out.len() >= 5 && content_titles.len() >= 4 && content_titles.len() <= SLIDE_LINES + 2 {
-        out.insert(1, Slide { title: "Contents".into(), bullets: content_titles.into_iter().map(|t| (0, t)).collect(), table: vec![] });
+        out.insert(1, Slide { title: "Contents".into(), bullets: content_titles.into_iter().map(|t| (0, t)).collect(), table: vec![], chart: None });
         rep.agenda = true;
     }
     if out.len() > MAX_SLIDES {
@@ -282,10 +299,10 @@ fn parse_prose(text: &str) -> Result<Vec<Slide>, String> {
     let first = it.peek().unwrap();
     let ends = |l: &str| l.trim_end().ends_with(['.', '!', '?', ':', '\u{061F}']);
     if first.len() == 1 && first[0].chars().count() <= MAX_TITLE_CHARS && !ends(first[0]) {
-        slides.push(Slide { title: first[0].to_string(), bullets: vec![], table: vec![] });
+        slides.push(Slide { title: first[0].to_string(), bullets: vec![], table: vec![], chart: None });
         it.next();
     } else {
-        slides.push(Slide { title: "Presentation".into(), bullets: vec![], table: vec![] });
+        slides.push(Slide { title: "Presentation".into(), bullets: vec![], table: vec![], chart: None });
     }
     for p in it {
         let bullet_like = |l: &str| l.starts_with("- ") || l.starts_with("* ") || l.starts_with("+ ");
@@ -296,7 +313,7 @@ fn parse_prose(text: &str) -> Result<Vec<Slide>, String> {
             let sents = split_sent(&all.replace(" - ", " "), false).unwrap_or_else(|_| vec![all.clone()]);
             prose_title(sents)
         };
-        slides.push(Slide { title, bullets: rest, table: vec![] });
+        slides.push(Slide { title, bullets: rest, table: vec![], chart: None });
     }
     Ok(slides)
 }
@@ -383,20 +400,29 @@ pub fn parse_outline(text: &str) -> Result<Vec<Slide>, String> {
         if let Some(t) = line.strip_prefix("# ") {
             if !seen_title && slides.is_empty() {
                 seen_title = true;
-                slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![] });
+                slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None });
                 continue;
             }
-            slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![] });
+            slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None });
             continue;
         }
         if let Some(t) = line.strip_prefix("## ").or_else(|| line.strip_prefix("### ")) {
-            slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![] });
+            slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None });
             continue;
         }
         let Some(cur) = slides.last_mut() else {
             return Err("the outline must start with a heading line like \"# My talk\" or \"## First slide\"".into());
         };
         let tl = line.trim();
+        if let Some(k) = tl.to_lowercase().strip_prefix("chart:") {
+            cur.chart = Some(match k.trim() {
+                "bar" | "column" | "bars" => ChartKind::Bar,
+                "line" => ChartKind::Line,
+                "pie" => ChartKind::Pie,
+                other => return Err(format!("I don't know the chart type \"{other}\". Use chart: bar, chart: line or chart: pie")),
+            });
+            continue;
+        }
         if tl.starts_with('|') && tl.ends_with('|') && tl.len() >= 3 {
             let cells: Vec<String> = tl[1..tl.len() - 1].split('|').map(|c| c.trim().to_string()).collect();
             let is_sep = cells.iter().all(|c| !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':' | ' ')) && c.contains('-'));
@@ -580,6 +606,99 @@ fn table_xml(t: &[Vec<String>], y: i64) -> String {
     format!("<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"4\" name=\"Table\"/><p:cNvGraphicFramePr><a:graphicFrameLocks noGrp=\"1\"/></p:cNvGraphicFramePr><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x=\"838200\" y=\"{y}\"/><a:ext cx=\"{w_total}\" cy=\"{h}\"/></p:xfrm><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/table\"><a:tbl><a:tblPr firstRow=\"1\"/>{x}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>")
 }
 
+fn parse_num(c: &str) -> Option<f64> {
+    let t = c.trim();
+    if t.is_empty() || !t.chars().all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '-')) {
+        return None;
+    }
+    t.parse::<f64>().ok().filter(|v| v.is_finite() && v.abs() < 1e12)
+}
+
+/// Series are the numeric columns after the first; the first column holds the names. Every cell must be a plain number.
+pub fn chart_data(s: &Slide) -> Result<(Vec<String>, Vec<(String, Vec<f64>)>), String> {
+    let t = &s.table;
+    let cols = t[0].len();
+    if cols < 2 {
+        return Err(format!("the chart on \"{}\" needs a names column and at least one number column", s.title));
+    }
+    if cols - 1 > CHART_MAX_SERIES {
+        return Err(format!("the chart on \"{}\" has {} number columns; the limit is {CHART_MAX_SERIES}", s.title, cols - 1));
+    }
+    let cats: Vec<String> = t[1..].iter().map(|r| r[0].clone()).collect();
+    let mut series = vec![];
+    for c in 1..cols {
+        let mut vals = vec![];
+        for (ri, r) in t[1..].iter().enumerate() {
+            match parse_num(&r[c]) {
+                Some(v) => vals.push(v),
+                None => return Err(format!("\"{}\" in row {} of the chart on \"{}\" is not a plain number (use digits, a dot and a minus sign only). I will not guess a value", r[c], ri + 2, s.title)),
+            }
+        }
+        series.push((t[0][c].clone(), vals));
+    }
+    Ok((cats, series))
+}
+
+fn check_chart(s: &Slide) -> Result<(), String> {
+    let (_, series) = chart_data(s)?;
+    if s.chart == Some(ChartKind::Pie) {
+        if series.len() != 1 {
+            return Err(format!("a pie chart on \"{}\" takes exactly one number column", s.title));
+        }
+        if series[0].1.iter().any(|v| *v < 0.0) || series[0].1.iter().sum::<f64>() <= 0.0 {
+            return Err(format!("a pie chart on \"{}\" needs positive numbers", s.title));
+        }
+    }
+    Ok(())
+}
+
+fn num_s(v: f64) -> String {
+    format!("{v}")
+}
+
+/// Native chart part (values cached in the file; no embedded workbook, so \"Edit data\" is not available in PowerPoint).
+fn chart_xml(s: &Slide) -> String {
+    let (cats, series) = chart_data(s).unwrap_or_default();
+    let kind = s.chart.unwrap_or(ChartKind::Bar);
+    let mut ser = String::new();
+    for (i, (name, vals)) in series.iter().enumerate() {
+        let cat_pts: String = cats.iter().enumerate().map(|(k, c)| format!("<c:pt idx=\"{k}\"><c:v>{}</c:v></c:pt>", esc(c))).collect();
+        let val_pts: String = vals.iter().enumerate().map(|(k, v)| format!("<c:pt idx=\"{k}\"><c:v>{}</c:v></c:pt>", num_s(*v))).collect();
+        let acc = ["accent1", "accent2", "accent5"][i.min(2)];
+        let fill = match kind {
+            ChartKind::Pie => {
+                let dpts: String = (0..cats.len()).map(|k| format!("<c:dPt><c:idx val=\"{k}\"/><c:bubble3D val=\"0\"/><c:spPr><a:solidFill><a:schemeClr val=\"{}\"/></a:solidFill><a:ln w=\"12700\"><a:solidFill><a:schemeClr val=\"bg1\"/></a:solidFill></a:ln></c:spPr></c:dPt>", ["accent1", "accent2", "accent3", "accent4", "accent5", "accent6"][k % 6])).collect();
+                dpts
+            }
+            ChartKind::Line => format!("<c:spPr><a:ln w=\"38100\"><a:solidFill><a:schemeClr val=\"{acc}\"/></a:solidFill></a:ln></c:spPr><c:marker><c:symbol val=\"circle\"/><c:size val=\"7\"/><c:spPr><a:solidFill><a:schemeClr val=\"{acc}\"/></a:solidFill></c:spPr></c:marker>"),
+            ChartKind::Bar => format!("<c:spPr><a:solidFill><a:schemeClr val=\"{acc}\"/></a:solidFill></c:spPr><c:invertIfNegative val=\"0\"/>"),
+        };
+        ser.push_str(&format!(
+            "<c:ser><c:idx val=\"{i}\"/><c:order val=\"{i}\"/><c:tx><c:strRef><c:f>Sheet1!${col}$1</c:f><c:strCache><c:ptCount val=\"1\"/><c:pt idx=\"0\"><c:v>{}</c:v></c:pt></c:strCache></c:strRef></c:tx>{fill}<c:dLbls><c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz=\"1400\"><a:solidFill><a:schemeClr val=\"{lblclr}\"/></a:solidFill></a:defRPr></a:pPr><a:endParaRPr lang=\"en-US\"/></a:p></c:txPr>{pos}<c:showLegendKey val=\"0\"/><c:showVal val=\"1\"/><c:showCatName val=\"0\"/><c:showSerName val=\"0\"/><c:showPercent val=\"0\"/><c:showBubbleSize val=\"0\"/></c:dLbls><c:cat><c:strRef><c:f>Sheet1!$A$2:$A${last}</c:f><c:strCache><c:ptCount val=\"{}\"/>{cat_pts}</c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Sheet1!${col}$2:${col}${last}</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val=\"{}\"/>{val_pts}</c:numCache></c:numRef></c:val>{smooth}</c:ser>",
+            esc(name), cats.len(), vals.len(),
+            lblclr = if kind == ChartKind::Pie { "tx1" } else { "tx1" },
+            pos = match kind { ChartKind::Pie => "<c:dLblPos val=\"outEnd\"/>", ChartKind::Bar => "<c:dLblPos val=\"outEnd\"/>", ChartKind::Line => "<c:dLblPos val=\"t\"/>" },
+            col = (b'B' + i as u8) as char,
+            last = cats.len() + 1,
+            smooth = if kind == ChartKind::Line { "<c:smooth val=\"0\"/>" } else { "" },
+        ));
+    }
+    let txpr = "<c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz=\"1600\"><a:solidFill><a:schemeClr val=\"tx1\"/></a:solidFill></a:defRPr></a:pPr><a:endParaRPr lang=\"en-US\"/></a:p></c:txPr>";
+    let axes = "<c:axId val=\"111\"/><c:axId val=\"222\"/>";
+    let axdefs = format!("<c:catAx><c:axId val=\"111\"/><c:scaling><c:orientation val=\"minMax\"/></c:scaling><c:delete val=\"0\"/><c:axPos val=\"b\"/><c:numFmt formatCode=\"General\" sourceLinked=\"0\"/><c:majorTickMark val=\"none\"/><c:minorTickMark val=\"none\"/><c:tickLblPos val=\"nextTo\"/><c:spPr><a:ln w=\"9525\"><a:solidFill><a:schemeClr val=\"tx1\"/></a:solidFill></a:ln></c:spPr>{txpr}<c:crossAx val=\"222\"/><c:crosses val=\"autoZero\"/><c:auto val=\"1\"/><c:lblAlgn val=\"ctr\"/><c:lblOffset val=\"100\"/><c:noMultiLvlLbl val=\"0\"/></c:catAx><c:valAx><c:axId val=\"222\"/><c:scaling><c:orientation val=\"minMax\"/></c:scaling><c:delete val=\"0\"/><c:axPos val=\"l\"/><c:majorGridlines><c:spPr><a:ln w=\"6350\"><a:solidFill><a:schemeClr val=\"bg2\"/></a:solidFill></a:ln></c:spPr></c:majorGridlines><c:numFmt formatCode=\"General\" sourceLinked=\"0\"/><c:majorTickMark val=\"none\"/><c:minorTickMark val=\"none\"/><c:tickLblPos val=\"nextTo\"/><c:spPr><a:ln w=\"9525\"><a:noFill/></a:ln></c:spPr>{txpr}<c:crossAx val=\"111\"/><c:crosses val=\"autoZero\"/><c:crossBetween val=\"between\"/></c:valAx>");
+    let plot = match kind {
+        ChartKind::Bar => format!("<c:barChart><c:barDir val=\"col\"/><c:grouping val=\"clustered\"/><c:varyColors val=\"0\"/>{ser}<c:gapWidth val=\"80\"/>{axes}</c:barChart>{axdefs}"),
+        ChartKind::Line => format!("<c:lineChart><c:grouping val=\"standard\"/><c:varyColors val=\"0\"/>{ser}<c:marker val=\"1\"/>{axes}</c:lineChart>{axdefs}"),
+        ChartKind::Pie => format!("<c:pieChart><c:varyColors val=\"1\"/>{ser}<c:firstSliceAng val=\"0\"/></c:pieChart>"),
+    };
+    let legend = if series.len() > 1 || kind == ChartKind::Pie { format!("<c:legend><c:legendPos val=\"r\"/><c:overlay val=\"0\"/>{txpr}</c:legend>") } else { String::new() };
+    format!("{HDR}<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><c:roundedCorners val=\"0\"/><c:chart><c:autoTitleDeleted val=\"1\"/><c:plotArea><c:layout/>{plot}</c:plotArea>{legend}<c:plotVisOnly val=\"1\"/><c:dispBlanksAs val=\"gap\"/></c:chart><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr></c:chartSpace>")
+}
+
+fn chart_frame_xml(y: i64, h: i64) -> String {
+    format!("<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"5\" name=\"Chart\"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x=\"838200\" y=\"{y}\"/><a:ext cx=\"10515600\" cy=\"{h}\"/></p:xfrm><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" r:id=\"rId2\"/></a:graphicData></a:graphic></p:graphicFrame>")
+}
+
 fn slide_xml(s: &Slide, is_title: bool) -> String {
     let mut shapes = String::new();
     let t = format!("<p:txBody><a:bodyPr/><a:lstStyle/>{}</p:txBody>", para(0, &s.title));
@@ -606,7 +725,11 @@ fn slide_xml(s: &Slide, is_title: bool) -> String {
                 shapes.push_str(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Content\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"838200\" y=\"1500000\"/><a:ext cx=\"10515600\" cy=\"{h}\"/></a:xfrm></p:spPr><p:txBody><a:bodyPr><a:noAutofit/></a:bodyPr><a:lstStyle/>{paras}</p:txBody></p:sp>"));
                 y = 1500000 + h + 100000;
             }
-            shapes.push_str(&table_xml(&s.table, y));
+            if s.chart.is_some() {
+                shapes.push_str(&chart_frame_xml(y, 6300000 - y));
+            } else {
+                shapes.push_str(&table_xml(&s.table, y));
+            }
         }
     }
     format!("{HDR}<p:sld {NS}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{shapes}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>")
@@ -658,6 +781,11 @@ pub fn build_pptx_themed(slides: &[Slide], theme: Theme) -> Vec<u8> {
     for i in 1..=slides.len() {
         ct.push_str(&format!("<Override PartName=\"/ppt/slides/slide{i}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>"));
     }
+    for (i, sl) in slides.iter().enumerate() {
+        if sl.chart.is_some() {
+            ct.push_str(&format!("<Override PartName=\"/ppt/charts/chart{}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.drawingml.chart+xml\"/>", i + 1));
+        }
+    }
     ct.push_str("</Types>");
     files.push(("[Content_Types].xml".into(), ct.into_bytes()));
     files.push(("_rels/.rels".into(), rels(&[("rId1".into(), "officeDocument", "ppt/presentation.xml".into())]).into_bytes()));
@@ -682,7 +810,12 @@ pub fn build_pptx_themed(slides: &[Slide], theme: Theme) -> Vec<u8> {
         let is_title = i == 0 && s.title_slide_like();
         files.push((format!("ppt/slides/slide{n}.xml"), slide_xml(s, is_title).into_bytes()));
         let layout = if is_title { 1 } else { 2 };
-        files.push((format!("ppt/slides/_rels/slide{n}.xml.rels"), rels(&[("rId1".into(), "slideLayout", format!("../slideLayouts/slideLayout{layout}.xml"))]).into_bytes()));
+        let mut sr = vec![("rId1".to_string(), "slideLayout", format!("../slideLayouts/slideLayout{layout}.xml"))];
+        if s.chart.is_some() {
+            sr.push(("rId2".into(), "chart", format!("../charts/chart{n}.xml")));
+            files.push((format!("ppt/charts/chart{n}.xml"), chart_xml(s).into_bytes()));
+        }
+        files.push((format!("ppt/slides/_rels/slide{n}.xml.rels"), rels(&sr).into_bytes()));
     }
     zip_stored(&files)
 }
@@ -941,6 +1074,9 @@ pub fn review_text(slides: &[Slide], rep: &Report) -> String {
         s.push_str(&format!("\n{}. {}\n", i + 1, sl.title));
         for (lvl, b) in &sl.bullets {
             s.push_str(&format!("{}- {}\n", if *lvl > 0 { "    " } else { "  " }, b));
+        }
+        if let Some(k) = sl.chart {
+            s.push_str(&format!("  [{} chart drawn from this table; the numbers are exactly the ones below]\n", match k { ChartKind::Bar => "bar", ChartKind::Line => "line", ChartKind::Pie => "pie" }));
         }
         for (ri, r) in sl.table.iter().enumerate() {
             s.push_str(&format!("  | {} |{}\n", r.join(" | "), if ri == 0 { "  (table header)" } else { "" }));
@@ -1251,6 +1387,46 @@ mod tests {
         for (n, th) in [("light", "light"), ("dark", "dark")] {
             let (sl, r) = compose(&format!("theme: {th}\n{T}")).unwrap();
             std::fs::write(format!("/tmp/deck/tables/{n}.pptx"), build_pptx_themed(&sl, r.theme)).unwrap();
+        }
+    }
+
+    const C: &str = "# Sales\n## Tea sold\nchart: bar\n| Month | Hot | Iced |\n|---|---|---|\n| Jan | 12 | 3 |\n| Feb | 15 | 4 |\n| Mar | 9.5 | 8 |\n## Share\nchart: pie\n| Kind | Cups |\n| Green | 40 |\n| Black | 35 |\n| Herbal | 25 |\n## Trend\nchart: line\n| Week | Visitors |\n| 1 | 100 |\n| 2 | 130 |\n| 3 | 120 |\n";
+
+    #[test]
+    fn charts_use_exactly_the_supplied_numbers() {
+        let (sl, _) = compose(C).unwrap();
+        assert_eq!(sl.len(), 4);
+        let (cats, ser) = chart_data(&sl[1]).unwrap();
+        assert_eq!(cats, vec!["Jan", "Feb", "Mar"]);
+        assert_eq!(ser, vec![("Hot".to_string(), vec![12.0, 15.0, 9.5]), ("Iced".to_string(), vec![3.0, 4.0, 8.0])]);
+        let b = build_pptx(&sl);
+        let t = String::from_utf8_lossy(&b);
+        assert_eq!(t.matches("<c:chartSpace").count(), 3);
+        assert!(t.contains("<c:v>9.5</c:v>") && t.contains("<c:barChart>") && t.contains("<c:pieChart>") && t.contains("<c:lineChart>"));
+        assert!(t.contains("/ppt/charts/chart2.xml") && t.contains("../charts/chart4.xml"));
+        assert!(!t.contains("<a:tbl>"), "a chart slide shows the chart, not the table");
+        assert!(review_text(&sl, &Report::default()).contains("bar chart drawn from this table"));
+    }
+
+    #[test]
+    fn bad_chart_data_is_refused_not_guessed() {
+        let e = compose("# T\n## A\nchart: bar\n| m | v |\n| a | 12k |\n").unwrap_err();
+        assert!(e.contains("12k") && e.contains("will not guess"), "{e}");
+        assert!(compose("# T\n## A\nchart: bar\n").unwrap_err().contains("no data"));
+        assert!(compose("# T\n## A\nchart: donut\n| a | b |\n| x | 1 |\n").unwrap_err().contains("donut"));
+        assert!(compose("# T\n## A\nchart: pie\n| a | b | c |\n| x | 1 | 2 |\n").unwrap_err().contains("exactly one"));
+        assert!(compose("# T\n## A\nchart: pie\n| a | b |\n| x | -1 |\n| y | 0 |\n").unwrap_err().contains("positive"));
+        assert!(compose("# T\n## A\nchart: bar\n| a | b | c | d | e |\n| x | 1 | 2 | 3 | 4 |\n").unwrap_err().contains("limit is 3"));
+        assert!(compose("# T\n## A\nchart: bar\n| a |\n| x |\n").unwrap_err().contains("at least one number column"));
+    }
+
+    #[test]
+    #[ignore]
+    fn write_chart_sample() {
+        std::fs::create_dir_all("/tmp/deck/charts").unwrap();
+        for th in ["light", "dark"] {
+            let (sl, r) = compose(&format!("theme: {th}\n{C}")).unwrap();
+            std::fs::write(format!("/tmp/deck/charts/{th}.pptx"), build_pptx_themed(&sl, r.theme)).unwrap();
         }
     }
 }
