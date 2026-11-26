@@ -708,6 +708,11 @@ impl App {
     fn draw_settings(&mut self, pm: &mut Pixmap, w: f32, h: f32) {
         let _ = h;
         self.text(pm, "Settings", PAD + 4.0, CHAT_TOP + 18.0, 16.0, (235, 230, 250), (0.0, h));
+        // Version display: local only, from the package version at build time. Right-aligned on the
+        // header line so the settings layout grows by zero rows (no scroll layout yet).
+        let ver = concat!("Pawline ", env!("CARGO_PKG_VERSION"));
+        let vw = self.measure(ver, 12.0, shape::Mode::Auto);
+        self.text(pm, ver, (w - PAD - 4.0 - vw).max(PAD + 90.0), CHAT_TOP + 18.0, 12.0, (150, 145, 175), (0.0, h));
         let (top, rh) = self.settings_geom();
         for k in 0..self.settings_rows() {
             let y = top + k as f32 * (rh + 4.0);
