@@ -162,8 +162,7 @@ impl ExecutionBackend for UiBackend {
         }
         if let Operation::GenerateImage { provider, prompt } = op {
             // Only reached after the card naming this provider was confirmed.
-            let dir = std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
+            let dir = pawline_core::platform::home_dir()
                 .ok_or_else(|| PawError::Exec("HOME is not set; can't pick the Pictures folder".into()))?
                 .join("Pictures")
                 .join("Pawline");

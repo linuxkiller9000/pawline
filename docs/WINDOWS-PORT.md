@@ -48,3 +48,7 @@ Check commands: `cargo check -p pawline-core --target x86_64-pc-windows-gnu`; `c
 1. Introduce `platform` module with the primitives above (unix implementation = current code, moved, tests unchanged).
 2. Make core compile for the Windows target with Windows stubs that FAIL CLOSED (refuse the operation) until each primitive has a real implementation and a real-machine test.
 3. Window backend. 4. Real Windows test machine (not available yet). No release before step 4.
+
+## Item 22 source-prep slice 1 (nothing run on Windows)
+- Windows has no HOME. Five places read HOME directly (work root, data dir, Pictures folder, voice temp dir, app launch cwd); on Windows the work root would have failed to start. They now use `platform::home_dir()` (HOME, then USERPROFILE on Windows only) and `platform::data_dir_from` (PAWLINE_DATA, XDG_DATA_HOME, then %LOCALAPPDATA%\pawline on Windows, else ~/.local/share/pawline). Pure-function unit tests run on Linux (structural; the real Windows environment is untested). `apps::default_dirs` for Windows still has no Start Menu discovery.
+- Remaining Windows source gaps (unimplemented, unblocked for design, blocked for runtime proof): file identity via GetFileInformationByHandle, MoveFileExW no-replace move, reserved names (CON, NUL) and `\` path handling in intent/validate, case-insensitive name collisions, per-user ACLs for private dirs, Start Menu .lnk discovery, a Windows recorder/STT/TTS, DPI/IME/multi-monitor.

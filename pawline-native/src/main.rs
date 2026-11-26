@@ -1226,7 +1226,7 @@ impl App {
 
     fn vcmds(&self) -> Result<(voice::Cmd, voice::Cmd, std::path::PathBuf), String> {
         let wav = voice::temp_wav();
-        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+        let home = pawline_core::platform::home_dir().unwrap_or_default();
         let has = &voice::has_in_path;
         let rec = voice::recorder(std::env::var("PAWLINE_REC_CMD").ok().as_deref(), has, &wav)?;
         let setup = voice::find_stt(&home, &|b| voice::has_in_path(b));
@@ -2557,8 +2557,8 @@ impl ProvidesRegistryState for App {
 /// The folder Pawline works inside: PAWLINE_ROOT if set, else the home folder.
 fn work_root() -> std::path::PathBuf {
     let root = std::env::var_os("PAWLINE_ROOT")
-        .or_else(|| std::env::var_os("HOME"))
         .map(std::path::PathBuf::from)
+        .or_else(pawline_core::platform::home_dir)
         .filter(|p| p.is_absolute() && p.is_dir());
     match root {
         Some(r) => r,
