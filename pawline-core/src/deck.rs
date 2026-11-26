@@ -656,7 +656,7 @@ fn num_s(v: f64) -> String {
     format!("{v}")
 }
 
-/// Native chart part (values cached in the file; no embedded workbook, so \"Edit data\" is not available in PowerPoint).
+/// Native chart part: values cached in the file, plus an embedded .xlsx with the same numbers so "Edit data" has a sheet to open.
 fn chart_xml(s: &Slide) -> String {
     let (cats, series) = chart_data(s).unwrap_or_default();
     let kind = s.chart.unwrap_or(ChartKind::Bar);
@@ -692,7 +692,38 @@ fn chart_xml(s: &Slide) -> String {
         ChartKind::Pie => format!("<c:pieChart><c:varyColors val=\"1\"/>{ser}<c:firstSliceAng val=\"0\"/></c:pieChart>"),
     };
     let legend = if series.len() > 1 || kind == ChartKind::Pie { format!("<c:legend><c:legendPos val=\"r\"/><c:overlay val=\"0\"/>{txpr}</c:legend>") } else { String::new() };
-    format!("{HDR}<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><c:roundedCorners val=\"0\"/><c:chart><c:autoTitleDeleted val=\"1\"/><c:plotArea><c:layout/>{plot}</c:plotArea>{legend}<c:plotVisOnly val=\"1\"/><c:dispBlanksAs val=\"gap\"/></c:chart><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr></c:chartSpace>")
+    format!("{HDR}<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><c:roundedCorners val=\"0\"/><c:chart><c:autoTitleDeleted val=\"1\"/><c:plotArea><c:layout/>{plot}</c:plotArea>{legend}<c:plotVisOnly val=\"1\"/><c:dispBlanksAs val=\"gap\"/></c:chart><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr><c:externalData r:id=\"rId1\"><c:autoUpdate val=\"0\"/></c:externalData></c:chartSpace>")
+}
+
+/// Minimal workbook (inline strings, no shared strings) holding exactly the chart's table.
+fn chart_xlsx(s: &Slide) -> Vec<u8> {
+    let (cats, series) = chart_data(s).unwrap_or_default();
+    let head = s.table.first().cloned().unwrap_or_default();
+    let col = |i: usize| (b'A' + i as u8) as char;
+    let istr = |r: usize, c: usize, t: &str| format!("<c r=\"{}{r}\" t=\"inlineStr\"><is><t>{}</t></is></c>", col(c), esc(t));
+    let mut rows = String::from("<row r=\"1\">");
+    rows.push_str(&istr(1, 0, head.first().map(|x| x.as_str()).unwrap_or("")));
+    for (i, (n, _)) in series.iter().enumerate() {
+        rows.push_str(&istr(1, i + 1, n));
+    }
+    rows.push_str("</row>");
+    for (k, c) in cats.iter().enumerate() {
+        let r = k + 2;
+        rows.push_str(&format!("<row r=\"{r}\">{}", istr(r, 0, c)));
+        for (i, (_, v)) in series.iter().enumerate() {
+            rows.push_str(&format!("<c r=\"{}{r}\"><v>{}</v></c>", col(i + 1), num_s(v[k])));
+        }
+        rows.push_str("</row>");
+    }
+    let m = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    let files: Vec<(String, Vec<u8>)> = vec![
+        ("[Content_Types].xml".into(), format!("{HDR}<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>").into_bytes()),
+        ("_rels/.rels".into(), rels(&[("rId1".into(), "officeDocument", "xl/workbook.xml".into())]).into_bytes()),
+        ("xl/workbook.xml".into(), format!("{HDR}<workbook xmlns=\"{m}\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>").into_bytes()),
+        ("xl/_rels/workbook.xml.rels".into(), rels(&[("rId1".into(), "worksheet", "worksheets/sheet1.xml".into())]).into_bytes()),
+        ("xl/worksheets/sheet1.xml".into(), format!("{HDR}<worksheet xmlns=\"{m}\"><sheetData>{rows}</sheetData></worksheet>").into_bytes()),
+    ];
+    zip_stored(&files)
 }
 
 fn chart_frame_xml(y: i64, h: i64) -> String {
@@ -777,7 +808,7 @@ pub fn build_pptx(slides: &[Slide]) -> Vec<u8> {
 
 pub fn build_pptx_themed(slides: &[Slide], theme: Theme) -> Vec<u8> {
     let mut files: Vec<(String, Vec<u8>)> = vec![];
-    let mut ct = format!("{HDR}<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/><Override PartName=\"/ppt/slideMasters/slideMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml\"/><Override PartName=\"/ppt/slideLayouts/slideLayout1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/><Override PartName=\"/ppt/slideLayouts/slideLayout2.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/><Override PartName=\"/ppt/theme/theme1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.theme+xml\"/>");
+    let mut ct = format!("{HDR}<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Default Extension=\"xlsx\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\"/><Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/><Override PartName=\"/ppt/slideMasters/slideMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml\"/><Override PartName=\"/ppt/slideLayouts/slideLayout1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/><Override PartName=\"/ppt/slideLayouts/slideLayout2.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/><Override PartName=\"/ppt/theme/theme1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.theme+xml\"/>");
     for i in 1..=slides.len() {
         ct.push_str(&format!("<Override PartName=\"/ppt/slides/slide{i}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>"));
     }
@@ -814,6 +845,8 @@ pub fn build_pptx_themed(slides: &[Slide], theme: Theme) -> Vec<u8> {
         if s.chart.is_some() {
             sr.push(("rId2".into(), "chart", format!("../charts/chart{n}.xml")));
             files.push((format!("ppt/charts/chart{n}.xml"), chart_xml(s).into_bytes()));
+            files.push((format!("ppt/charts/_rels/chart{n}.xml.rels"), rels(&[("rId1".into(), "package", format!("../embeddings/Microsoft_Excel_Sheet{n}.xlsx"))]).into_bytes()));
+            files.push((format!("ppt/embeddings/Microsoft_Excel_Sheet{n}.xlsx"), chart_xlsx(s)));
         }
         files.push((format!("ppt/slides/_rels/slide{n}.xml.rels"), rels(&sr).into_bytes()));
     }
@@ -1404,6 +1437,7 @@ mod tests {
         assert_eq!(t.matches("<c:chartSpace").count(), 3);
         assert!(t.contains("<c:v>9.5</c:v>") && t.contains("<c:barChart>") && t.contains("<c:pieChart>") && t.contains("<c:lineChart>"));
         assert!(t.contains("/ppt/charts/chart2.xml") && t.contains("../charts/chart4.xml"));
+        assert!(t.contains("ppt/embeddings/Microsoft_Excel_Sheet2.xlsx") && t.contains("<c:externalData"));
         assert!(!t.contains("<a:tbl>"), "a chart slide shows the chart, not the table");
         assert!(review_text(&sl, &Report::default()).contains("bar chart drawn from this table"));
     }
