@@ -206,10 +206,10 @@ pub fn has_in_path(bin: &str) -> bool {
 
 /// Shown once per session before the first recording. Local/deleted claims are made only for the built-in route.
 pub fn mic_notice(custom_rec: bool, custom_stt: bool) -> String {
-    let tail = " The text only goes into the box: nothing is sent until you press Enter. You can block the microphone in Settings.";
     if !custom_rec && !custom_stt {
-        return format!("Microphone on while the bar shows listening. The built-in route writes the audio to a private temporary file on this computer, turns it into text here, and deletes the file afterwards.{tail}");
+        return "Microphone on while the bar shows listening. The built-in route writes the audio to a private temporary file on this computer, turns it into text here, and deletes the file afterwards. The text only goes into the box: Pawline sends nothing to its chat until you press Enter. You can block the microphone in Settings.".to_string();
     }
+    let tail = " The text goes into the box, and Pawline submits nothing to its chat until you press Enter. Your command may already have sent audio or text elsewhere. You can block the microphone in Settings.";
     let which = match (custom_rec, custom_stt) {
         (true, true) => "your own recorder and speech commands (PAWLINE_REC_CMD, PAWLINE_STT_CMD)",
         (true, false) => "your own recorder command (PAWLINE_REC_CMD)",
@@ -480,11 +480,12 @@ mod tests {
         let e = mic_gate(true).unwrap_err();
         assert!(e.contains("blocked") && e.contains("nothing was recorded"));
         let b = mic_notice(false, false);
-        assert!(b.contains("on this computer") && b.contains("deletes the file") && b.contains("nothing is sent until you press Enter") && !b.contains("cannot check"));
+        assert!(b.contains("on this computer") && b.contains("deletes the file") && b.contains("sends nothing to its chat until you press Enter") && !b.contains("cannot check"));
         for (r, t) in [(true, false), (false, true), (true, true)] {
             let c = mic_notice(r, t);
             assert!(!c.contains("on this computer") && !c.contains("deletes the file"), "no local claim on a custom route");
-            assert!(c.contains("cannot check where") && c.contains("nothing is sent until you press Enter"));
+            assert!(c.contains("cannot check where") && c.contains("submits nothing to its chat until you press Enter") && c.contains("may already have sent audio or text elsewhere"));
+            assert!(!c.contains("nothing is sent until"), "no absolute claim on a custom route");
         }
         assert!(mic_notice(true, false).contains("PAWLINE_REC_CMD") && !mic_notice(true, false).contains("PAWLINE_STT_CMD"));
     }

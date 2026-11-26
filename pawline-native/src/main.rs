@@ -7,6 +7,7 @@ mod shape;
 mod theme;
 mod fsearch;
 mod voice;
+mod history;
 mod md;
 mod thumb;
 
@@ -126,6 +127,8 @@ fn px() -> f32 {
 fn lh() -> f32 {
     20.0 * theme::text_scale()
 }
+/// The settings screen shows one theme row (Enter cycles), so the notes below it stay readable at the fixed window height.
+const THEME_ROWS: usize = 1;
 const PAD: f32 = 14.0;
 const CHAT_TOP: f32 = 64.0;
 const BOTTOM: f32 = 64.0;
@@ -203,6 +206,10 @@ impl Rgba for (u8, u8, u8) {
     fn rgba(self) -> (u8, u8, u8, u8) {
         (self.0, self.1, self.2, 255)
     }
+}
+
+fn history_path() -> Option<std::path::PathBuf> {
+    settings_path().map(|p| p.with_file_name("history.txt"))
 }
 
 fn settings_path() -> Option<std::path::PathBuf> {
@@ -314,6 +321,7 @@ struct App {
     confirm_thumbs: Vec<Pixmap>,
     /// The microphone notice has been shown once this session.
     mic_told: bool,
+    history_warned: bool,
     focus: Btn,
     /// Pixels scrolled up from the bottom of the chat (0 = latest).
     scroll: f32,
@@ -641,20 +649,22 @@ impl App {
     }
 
     fn settings_rows(&self) -> usize {
-        theme::THEMES.len() + 5
+        THEME_ROWS + 6
     }
 
     fn apply_setting(&mut self, row: usize) {
-        if row < theme::THEMES.len() {
-            self.settings.theme = row;
-        } else if row == theme::THEMES.len() {
+        if row < THEME_ROWS {
+            self.settings.theme = (self.settings.theme + 1) % theme::THEMES.len();
+        } else if row == THEME_ROWS {
             self.settings.drift = !self.settings.drift;
-        } else if row == theme::THEMES.len() + 1 {
+        } else if row == THEME_ROWS + 1 {
             self.settings.speak = !self.settings.speak;
             if !self.settings.speak {
                 self.stop_speaking();
             }
-        } else if row == theme::THEMES.len() + 4 {
+        } else if row == THEME_ROWS + 5 {
+            self.toggle_history();
+        } else if row == THEME_ROWS + 4 {
             self.settings.mic_blocked = !self.settings.mic_blocked;
             if self.settings.mic_blocked {
                 match self.vstate {
@@ -663,7 +673,7 @@ impl App {
                     VState::Idle => {}
                 }
             }
-        } else if row == theme::THEMES.len() + 3 {
+        } else if row == THEME_ROWS + 3 {
             self.settings.offline = !self.settings.offline;
             pawline_core::netgate::set_offline(self.settings.offline);
         } else {
@@ -690,27 +700,27 @@ impl App {
             let y = top + k as f32 * (rh + 4.0);
             let sel = k == self.settings_sel;
             fill(pm, &rrect(PAD - 2.0, y, w - 2.0 * PAD + 4.0, rh, 10.0), if sel { (70, 64, 110) } else { (44, 40, 64) }.rgba());
-            if k < theme::THEMES.len() {
-                let t = &theme::THEMES[k];
+            if k < THEME_ROWS {
+                let t = &theme::THEMES[self.settings.theme.min(theme::THEMES.len() - 1)];
                 for (i, c) in t.bg.iter().enumerate() {
                     fill(pm, &rrect(PAD + 8.0 + i as f32 * 18.0, y + 4.0, 18.0, 18.0, 4.0), (c.0, c.1, c.2, 255));
                 }
                 fill(pm, &rrect(PAD + 66.0, y + 4.0, 18.0, 18.0, 9.0), (t.accent.0, t.accent.1, t.accent.2, 255));
-                let label = format!("Theme: {}", t.name);
+                let label = format!("Theme: {} (Enter for next)", t.name);
                 self.text(pm, &label, PAD + 96.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
-                if k == self.settings.theme {
-                    self.text(pm, "selected", w - PAD - 74.0, y + 18.0, 12.0, (150, 230, 180), (0.0, h));
-                }
-            } else if k == theme::THEMES.len() + 4 {
+            } else if k == THEME_ROWS + 5 {
+                let label = format!("Keep conversation on this computer: {}", if self.settings.keep_history { "ON" } else { "off" });
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
+            } else if k == THEME_ROWS + 4 {
                 let label = format!("Microphone: {}", if self.settings.mic_blocked { "BLOCKED (voice input off)" } else { "allowed when you press the mic button" });
                 self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
-            } else if k == theme::THEMES.len() + 3 {
+            } else if k == THEME_ROWS + 3 {
                 let label = format!("Offline mode (Pawline's own online features): {}", if self.settings.offline { "ON" } else { "off" });
                 self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
-            } else if k == theme::THEMES.len() + 2 {
+            } else if k == THEME_ROWS + 2 {
                 let label = format!("Text size: {}% (Enter to change)", self.settings.text_pct);
                 self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
-            } else if k == theme::THEMES.len() + 1 {
+            } else if k == THEME_ROWS + 1 {
                 let label = format!("Speak replies aloud (local engine): {}", if self.settings.speak { "on" } else { "off" });
                 self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), (0.0, h));
             } else {
@@ -720,10 +730,10 @@ impl App {
         }
         let note_y = top + self.settings_rows() as f32 * (rh + 4.0) + 14.0;
         self.text(pm, "Up/Down choose, Enter applies, Esc closes.", PAD + 4.0, note_y, 12.0, (190, 185, 215), (0.0, h));
-        self.text(pm, "Saved on this computer only; no request text.", PAD + 4.0, note_y + 18.0, 12.0, (190, 185, 215), (0.0, h));
+        self.text(pm, "Settings are saved on this computer; no request text.", PAD + 4.0, note_y + 18.0, 12.0, (190, 185, 215), (0.0, h));
         // Offline mode covers Pawline's built-in requests only. Say so, and say when a custom speech command is configured.
         let mut ny = note_y + 36.0;
-        let mut notes = vec!["Offline mode stops Pawline's own requests only, not apps you open.".to_string()];
+        let mut notes = vec!["Offline mode stops Pawline's own requests only, not apps you open.".to_string(), history::NOTE.to_string()];
         let custom: Vec<&str> = ["PAWLINE_STT_CMD", "PAWLINE_TTS_CMD", "PAWLINE_REC_CMD"].into_iter().filter(|k| std::env::var_os(k).is_some()).collect();
         if !custom.is_empty() {
             notes.push(format!("Custom command set ({}): Pawline cannot control whether it uses the network.", custom.join(", ")));
@@ -1144,10 +1154,41 @@ impl App {
         fill(pm, &rrect(x0 + cx, h / 2.0 - 9.0, 2.0, 18.0, 1.0), (255, 255, 255, 255));
     }
 
+    /// Turn conversation keeping on or off. On saves from now; off deletes the file, and if it cannot be deleted it stays on and says so.
+    fn toggle_history(&mut self) {
+        let Some(p) = history_path() else {
+            self.push(false, "error", "No place to keep a conversation file was found, so nothing is saved.".into(), None);
+            return;
+        };
+        if self.settings.keep_history {
+            match history::delete(&p) {
+                Ok(()) => self.settings.keep_history = false,
+                Err(e) => self.push(false, "error", format!("Could not delete the saved conversation ({e}), so saving stays ON."), None),
+            }
+        } else {
+            self.settings.keep_history = true;
+            self.persist_history();
+        }
+    }
+
+    fn persist_history(&mut self) {
+        if !self.settings.keep_history {
+            return;
+        }
+        let lines: Vec<history::Line> = self.msgs.iter().filter(|m| m.kind != "welcome" && history::keep_kind(m.user, &m.kind)).map(|m| history::Line { user: m.user, text: m.text.clone() }).collect();
+        if let Some(p) = history_path() {
+            if history::save(&p, &lines).is_err() && !self.history_warned {
+                self.history_warned = true;
+                self.msgs.push(Msg { user: false, kind: "restored".into(), text: "Could not save the conversation file. It is only kept in memory.".into(), md: false, thumb: None, quote: None });
+            }
+        }
+    }
+
     fn push(&mut self, user: bool, kind: &str, text: String, quote: Option<String>) {
         let thumb = if user { None } else { saved_picture(&text).and_then(|p| thumb::load(&p, THUMB_W, THUMB_H)) };
         self.msgs.push(Msg { user, kind: kind.into(), text, md: false, thumb, quote });
         self.scroll = 0.0;
+        self.persist_history();
     }
 
     /// Skill-menu rows matching what is typed (only a bare "/word", nothing else on screen).
@@ -2780,10 +2821,24 @@ fn main() {
         bubbles: Vec::new(),
         toast: None,
         reply: None,
-        msgs: vec![Msg { user: false, kind: "message".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it. Right-click a message (or Ctrl+R) to reply to it.".into(), thumb: None, quote: None }],
+        msgs: {
+            let mut v = vec![Msg { user: false, kind: "welcome".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it. Right-click a message (or Ctrl+R) to reply to it.".into(), thumb: None, quote: None }];
+            let keep = settings_path().map(|p| theme::load(&p).keep_history).unwrap_or(false);
+            if keep {
+                let old = history_path().map(|p| history::load(&p)).unwrap_or_default();
+                if !old.is_empty() {
+                    v.push(Msg { user: false, kind: "restored".into(), md: false, thumb: None, quote: None, text: format!("Restored {} earlier messages from the file you chose to keep on this computer. Pending tasks and confirm cards are not restored.", old.len()) });
+                    for l in old {
+                        v.push(Msg { user: l.user, kind: if l.user { "user".into() } else { "message".into() }, md: false, thumb: None, quote: None, text: l.text });
+                    }
+                }
+            }
+            v
+        },
         confirm: None,
         confirm_thumbs: Vec::new(),
         mic_told: false,
+        history_warned: false,
         focus: Btn::No,
         scroll: 0.0,
         plan_scroll: 0.0,

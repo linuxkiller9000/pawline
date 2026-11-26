@@ -64,11 +64,13 @@ pub struct Settings {
     pub speak: bool,
     /// Voice input blocked: the mic button records nothing. Off (allowed) by default; pressing the button is the user's act.
     pub mic_blocked: bool,
+    /// Opt-in: keep the plain chat lines in a private file on this computer. Off by default.
+    pub keep_history: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { text_pct: 100, offline: false, theme: 0, drift: true, speak: false, mic_blocked: false }
+        Settings { text_pct: 100, offline: false, theme: 0, drift: true, speak: false, mic_blocked: false, keep_history: false }
     }
 }
 
@@ -86,6 +88,7 @@ pub fn load(path: &Path) -> Settings {
                 Some(("speak", v)) => s.speak = v.trim() == "on",
                 Some(("offline", v)) => s.offline = v.trim() == "on",
                 Some(("mic", v)) => s.mic_blocked = v.trim() == "blocked",
+                Some(("history", v)) => s.keep_history = v.trim() == "on",
                 Some(("text", v)) => s.text_pct = v.trim().parse().ok().filter(|p| TEXT_SIZES.contains(p)).unwrap_or(100),
                 _ => {}
             }
@@ -98,7 +101,7 @@ pub fn save(path: &Path, s: &Settings) -> std::io::Result<()> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
-    std::fs::write(path, format!("theme={}\ndrift={}\nspeak={}\ntext={}\noffline={}\nmic={}\n", THEMES[s.theme.min(THEMES.len() - 1)].name, if s.drift { "on" } else { "off" }, if s.speak { "on" } else { "off" }, s.text_pct, if s.offline { "on" } else { "off" }, if s.mic_blocked { "blocked" } else { "allowed" }))
+    std::fs::write(path, format!("theme={}\ndrift={}\nspeak={}\ntext={}\noffline={}\nmic={}\nhistory={}\n", THEMES[s.theme.min(THEMES.len() - 1)].name, if s.drift { "on" } else { "off" }, if s.speak { "on" } else { "off" }, s.text_pct, if s.offline { "on" } else { "off" }, if s.mic_blocked { "blocked" } else { "allowed" }, if s.keep_history { "on" } else { "off" }))
 }
 
 /// Gradient offset along the diagonal for a moment in time: a slow back-and-forth, 0 when drift is off.
@@ -117,10 +120,10 @@ mod tests {
         let d = std::env::temp_dir().join(format!("pawline-theme-{}", std::process::id()));
         let f = d.join("ui-settings.txt");
         assert_eq!(load(&f), Settings::default());
-        save(&f, &Settings { text_pct: 100, offline: false, theme: 2, drift: false, speak: true, mic_blocked: false }).unwrap();
-        assert_eq!(load(&f), Settings { text_pct: 100, offline: false, theme: 2, drift: false, speak: true, mic_blocked: false });
+        save(&f, &Settings { text_pct: 100, offline: false, theme: 2, drift: false, speak: true, mic_blocked: false, keep_history: false }).unwrap();
+        assert_eq!(load(&f), Settings { text_pct: 100, offline: false, theme: 2, drift: false, speak: true, mic_blocked: false, keep_history: false });
         std::fs::write(&f, "theme=Nope\ndrift=maybe\nspeak=maybe\njunk").unwrap();
-        assert_eq!(load(&f), Settings { text_pct: 100, offline: false, theme: 0, drift: true, speak: false, mic_blocked: false });
+        assert_eq!(load(&f), Settings { text_pct: 100, offline: false, theme: 0, drift: true, speak: false, mic_blocked: false, keep_history: false });
         let t = std::fs::read_to_string(&f).unwrap();
         assert!(!t.contains("request"));
         assert_eq!(drift_offset(5.0, 300.0, false), 0.0);

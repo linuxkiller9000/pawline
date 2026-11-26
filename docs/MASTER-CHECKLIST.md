@@ -184,3 +184,12 @@ signing or release commitment without approval. Publishing needs the user's expl
 - Simulated restarts, not a real process kill. Rename/move/copy undo across restart not separately tested. Conversation/pending-task recovery after a crash is still NOT built (needs the opt-in local history decision above).
 - 14c notice: the first-recording notice is now route-specific (voice::mic_notice). Local/deleted wording appears only for the built-in route; a custom REC/STT route says Pawline cannot check where that command sends or keeps audio or text. Unit-tested, Xvfb pixels checked (the sandbox has no real recorder, so the built-in-recorder notice has no screenshot).
 - Process: tools/safe_ship.sh validates (tests exit and per-suite failures, Windows build) before any commit/push/bundle; refusal verified with failing harmless commands.
+
+### 15 slice 2: opt-in conversation history (PARTIAL; off by default, no approval inferred)
+- Settings row "Keep conversation on this computer" (history= key, default off). Nothing is written unless the user switches it on. Saved: typed lines and Pawline's plain replies only (history.txt, 0600, atomic temp+rename, max 100 lines, symlink not followed, oversize/corrupt files read as empty). Never saved: the unsent draft, confirm cards, pending tasks, errors, thumbnails, audio. Turning it off deletes the file; if the delete fails it stays ON and says so.
+- On start with it ON, earlier lines are restored with a visible "Restored N earlier messages" note; pending tasks and confirm cards are not restored.
+- 5 unit tests in history.rs (round trip incl. Arabic/newlines, privacy mode + no temp, cap/corrupt/oversize, symlink + idempotent delete, kind filter). Xvfb pixels: on, restart-restore, off-deletes (file gone) verified.
+- Settings screen now has ONE theme row (Enter cycles) so the notes stay unclipped at the fixed 470 px window; checked at 100% and 150% with custom commands set.
+- Windows: the file mode is only set on Unix; on Windows it relies on the profile folder permissions (build only, never run).
+- Not done: this is chat text only, so "recover pending tasks after a crash" is still unbuilt. The data-dir file is not encrypted. The user has not chosen this feature on or off for themselves.
+- Custom-route mic notice now says Pawline submits nothing to its chat until Enter but the command may already have sent audio/text elsewhere.
