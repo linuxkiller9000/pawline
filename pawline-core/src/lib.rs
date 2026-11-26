@@ -21,6 +21,7 @@ pub mod imagegen;
 pub mod intent;
 pub mod journal;
 pub mod math;
+pub mod netgate;
 pub mod organize;
 pub mod plan;
 pub mod platform;

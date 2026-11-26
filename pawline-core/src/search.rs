@@ -55,6 +55,7 @@ fn enc_query(s: &str) -> String {
 }
 
 fn get_json(url: &str) -> Result<serde_json::Value, PawError> {
+    crate::netgate::check()?;
     let body = ureq::get(url)
         .header("User-Agent", "Pawline/0.1 (personal desktop assistant; https://github.com/linuxkiller9000/pawline)")
         .call()

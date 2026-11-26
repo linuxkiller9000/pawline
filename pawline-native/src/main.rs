@@ -639,7 +639,7 @@ impl App {
     }
 
     fn settings_rows(&self) -> usize {
-        theme::THEMES.len() + 3
+        theme::THEMES.len() + 4
     }
 
     fn apply_setting(&mut self, row: usize) {
@@ -652,6 +652,9 @@ impl App {
             if !self.settings.speak {
                 self.stop_speaking();
             }
+        } else if row == theme::THEMES.len() + 3 {
+            self.settings.offline = !self.settings.offline;
+            pawline_core::netgate::set_offline(self.settings.offline);
         } else {
             let i = theme::TEXT_SIZES.iter().position(|p| *p == self.settings.text_pct).unwrap_or(0);
             self.settings.text_pct = theme::TEXT_SIZES[(i + 1) % theme::TEXT_SIZES.len()];
@@ -687,6 +690,9 @@ impl App {
                 if k == self.settings.theme {
                     self.text(pm, "selected", w - PAD - 74.0, y + 22.0, 12.0, (150, 230, 180), (0.0, h));
                 }
+            } else if k == theme::THEMES.len() + 3 {
+                let label = format!("Offline mode (no network at all): {}", if self.settings.offline { "ON" } else { "off" });
+                self.text(pm, &label, PAD + 10.0, y + 22.0, 14.0, (255, 255, 255), (0.0, h));
             } else if k == theme::THEMES.len() + 2 {
                 let label = format!("Text size: {}% (Enter to change)", self.settings.text_pct);
                 self.text(pm, &label, PAD + 10.0, y + 22.0, 14.0, (255, 255, 255), (0.0, h));
@@ -2774,6 +2780,7 @@ fn main() {
         settings: {
             let s = settings_path().map(|p| theme::load(&p)).unwrap_or_default();
             theme::set_text_pct(s.text_pct);
+            pawline_core::netgate::set_offline(s.offline);
             s
         },
         settings_open: false,

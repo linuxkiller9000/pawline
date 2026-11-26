@@ -79,6 +79,7 @@ impl UreqHttp {
 
 impl Http for UreqHttp {
     fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpReply, PawError> {
+        crate::netgate::check()?;
         let mut r = self.agent.get(url).header("User-Agent", UA);
         for (k, v) in headers {
             r = r.header(*k, *v);
@@ -86,6 +87,7 @@ impl Http for UreqHttp {
         Self::finish(r.call().map_err(|e| PawError::Exec(format!("network problem: {e}")))?)
     }
     fn post(&self, url: &str, headers: &[(&str, &str)], body: &str) -> Result<HttpReply, PawError> {
+        crate::netgate::check()?;
         let mut r = self.agent.post(url).header("User-Agent", UA).header("Content-Type", "application/json");
         for (k, v) in headers {
             r = r.header(*k, *v);

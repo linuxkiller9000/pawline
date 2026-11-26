@@ -1214,6 +1214,18 @@ pub fn confirm_inner(state: &mut UiState) -> UiReply {
 }
 
 fn finish(state: &mut UiState, r: UiReply, spent: std::time::Duration) -> UiReply {
+    // Offline mode: an online request never reaches a card (a card would promise a send). The gate in netgate still stops any sender.
+    if r.kind == "confirm" && pawline_core::netgate::is_offline() {
+        use pawline_core::plan::Operation as O;
+        let online = state.pending.as_ref().is_some_and(|p| p.ops.iter().any(|o| matches!(o, O::Search { .. } | O::Weather { .. } | O::AskOnline { .. } | O::ChatOnline { .. } | O::DeckDraft { .. } | O::GenerateImage { .. })));
+        if online {
+            state.pending = None;
+            state.pending_request = None;
+            state.online_pending = None;
+            state.confirm_preview.clear();
+            return reply("message", "Offline mode is on, so I did not prepare this online request and nothing was sent. Turn offline mode off in Settings to use it.".into());
+        }
+    }
     if r.kind == "confirm" {
         state.carried += spent;
         return r;
@@ -1301,6 +1313,27 @@ mod memory_tests {
         // no place: asks, no card, nothing sent
         let r = handle_text(&mut st, "what is the weather");
         assert!(r.text.contains("Which place") && st.pending.is_none());
+    }
+
+    #[test]
+    fn offline_mode_prepares_no_online_request_and_keeps_local_work_working() {
+        use pawline_core::netgate;
+        netgate::set_offline_for_this_thread(Some(true));
+        let root = org_root("offline14");
+        let mut st = new_state(root.clone());
+        for q in ["what's the weather in Cairo?", "search the web for niri compositor", "wiki tux the penguin", "what is a strong password", "generate a picture of a fox with pollinations", "write a presentation about cats"] {
+            let before = netgate::attempts();
+            let r = handle_text(&mut st, q);
+            assert!(r.kind == "message" && r.text.contains("Offline mode is on") && r.text.contains("nothing was sent"), "{q}: {} {}", r.kind, r.text);
+            assert!(st.pending.is_none(), "{q}");
+            assert_eq!(netgate::attempts(), before, "{q}");
+        }
+        // local work is unaffected: a delete still shows its card
+        std::fs::create_dir_all(root.join("kp")).unwrap();
+        let r = handle_text(&mut st, "delete the folder kp");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        let _ = cancel(&mut st);
+        netgate::set_offline_for_this_thread(None);
     }
 
     #[test]
