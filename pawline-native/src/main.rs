@@ -738,7 +738,7 @@ impl App {
     }
 
     fn settings_rows(&self) -> usize {
-        THEME_ROWS + 6
+        THEME_ROWS + 7
     }
 
     fn apply_setting(&mut self, row: usize) {
@@ -751,6 +751,9 @@ impl App {
             if !self.settings.speak {
                 self.stop_speaking();
             }
+        } else if row == THEME_ROWS + 6 {
+            self.settings.assist = !self.settings.assist;
+            bridge::set_assist_enabled(self.settings.assist);
         } else if row == THEME_ROWS + 5 {
             self.toggle_history();
         } else if row == THEME_ROWS + 4 {
@@ -859,6 +862,9 @@ impl App {
                 self.settings_fill(pm, PAD + 66.0, y + 4.0, 18.0, 18.0, 9.0, (t.accent.0, t.accent.1, t.accent.2, 255));
                 let label = format!("Theme: {} (Enter for next)", t.name);
                 self.text(pm, &label, PAD + 96.0, y + 18.0, 14.0, (255, 255, 255), clip);
+            } else if k == THEME_ROWS + 6 {
+                let label = format!("AI suggestions (local model): {}", if self.settings.assist { "on" } else { "off" });
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
             } else if k == THEME_ROWS + 5 {
                 let label = format!("Keep conversation on this computer: {}", if self.settings.keep_history { "ON" } else { "off" });
                 self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
@@ -3235,6 +3241,7 @@ fn main() {
             let s = settings_path().map(|p| theme::load(&p)).unwrap_or_default();
             theme::set_text_pct(s.text_pct);
             pawline_core::netgate::set_offline(s.offline);
+            bridge::set_assist_enabled(s.assist);
             s
         },
         settings_open: false,

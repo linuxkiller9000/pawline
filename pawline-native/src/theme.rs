@@ -66,11 +66,15 @@ pub struct Settings {
     pub mic_blocked: bool,
     /// Opt-in: keep the plain chat lines in a private file on this computer. Off by default.
     pub keep_history: bool,
+    /// AI behaviour switch: when Pawline does not understand a request, the small embedded local model
+    /// may suggest what was meant. On by default (the behaviour before this switch existed); it never
+    /// uses the network. Off means the model is never woken and the plain parse error is the whole reply.
+    pub assist: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { text_pct: 100, offline: false, theme: 0, drift: true, speak: false, mic_blocked: false, keep_history: false }
+        Settings { text_pct: 100, offline: false, theme: 0, drift: true, speak: false, mic_blocked: false, keep_history: false, assist: true }
     }
 }
 
@@ -99,6 +103,7 @@ pub fn load(path: &Path) -> Settings {
                 Some(("offline", v)) => s.offline = v.trim() == "on",
                 Some(("mic", v)) => s.mic_blocked = v.trim() == "blocked",
                 Some(("history", v)) => s.keep_history = v.trim() == "on",
+                Some(("assist", v)) => s.assist = v.trim() != "off",
                 Some(("text", v)) => s.text_pct = v.trim().parse().ok().filter(|p| TEXT_SIZES.contains(p)).unwrap_or(100),
                 _ => {}
             }
@@ -111,7 +116,7 @@ pub fn save(path: &Path, s: &Settings) -> std::io::Result<()> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
-    std::fs::write(path, format!("theme={}\ndrift={}\nspeak={}\ntext={}\noffline={}\nmic={}\nhistory={}\n", THEMES[s.theme.min(THEMES.len() - 1)].name, if s.drift { "on" } else { "off" }, if s.speak { "on" } else { "off" }, s.text_pct, if s.offline { "on" } else { "off" }, if s.mic_blocked { "blocked" } else { "allowed" }, if s.keep_history { "on" } else { "off" }))
+    std::fs::write(path, format!("theme={}\ndrift={}\nspeak={}\ntext={}\noffline={}\nmic={}\nhistory={}\nassist={}\n", THEMES[s.theme.min(THEMES.len() - 1)].name, if s.drift { "on" } else { "off" }, if s.speak { "on" } else { "off" }, s.text_pct, if s.offline { "on" } else { "off" }, if s.mic_blocked { "blocked" } else { "allowed" }, if s.keep_history { "on" } else { "off" }, if s.assist { "on" } else { "off" }))
 }
 
 /// Gradient offset along the diagonal for a moment in time: a slow back-and-forth, 0 when drift is off.
@@ -127,9 +132,9 @@ mod tests {
     use super::*;
     #[test]
     fn reset_look_restores_look_and_keeps_every_privacy_switch() {
-        let mut s = Settings { text_pct: 150, offline: true, theme: 2, drift: false, speak: true, mic_blocked: true, keep_history: true };
+        let mut s = Settings { text_pct: 150, offline: true, theme: 2, drift: false, speak: true, mic_blocked: true, keep_history: true, assist: false };
         reset_look(&mut s);
-        assert_eq!(s, Settings { offline: true, mic_blocked: true, keep_history: true, ..Settings::default() });
+        assert_eq!(s, Settings { offline: true, mic_blocked: true, keep_history: true, assist: false, ..Settings::default() });
     }
 
     #[test]
@@ -137,10 +142,10 @@ mod tests {
         let d = std::env::temp_dir().join(format!("pawline-theme-{}", std::process::id()));
         let f = d.join("ui-settings.txt");
         assert_eq!(load(&f), Settings::default());
-        save(&f, &Settings { text_pct: 100, offline: false, theme: 2, drift: false, speak: true, mic_blocked: false, keep_history: false }).unwrap();
-        assert_eq!(load(&f), Settings { text_pct: 100, offline: false, theme: 2, drift: false, speak: true, mic_blocked: false, keep_history: false });
-        std::fs::write(&f, "theme=Nope\ndrift=maybe\nspeak=maybe\njunk").unwrap();
-        assert_eq!(load(&f), Settings { text_pct: 100, offline: false, theme: 0, drift: true, speak: false, mic_blocked: false, keep_history: false });
+        save(&f, &Settings { text_pct: 100, offline: false, theme: 2, drift: false, speak: true, mic_blocked: false, keep_history: false, assist: false }).unwrap();
+        assert_eq!(load(&f), Settings { text_pct: 100, offline: false, theme: 2, drift: false, speak: true, mic_blocked: false, keep_history: false, assist: false });
+        std::fs::write(&f, "theme=Nope\ndrift=maybe\nspeak=maybe\nassist=maybe\njunk").unwrap();
+        assert_eq!(load(&f), Settings { text_pct: 100, offline: false, theme: 0, drift: true, speak: false, mic_blocked: false, keep_history: false, assist: true });
         let t = std::fs::read_to_string(&f).unwrap();
         assert!(!t.contains("request"));
         assert_eq!(drift_offset(5.0, 300.0, false), 0.0);
@@ -234,6 +239,7 @@ mod update_survival_tests {
         assert!(!s.drift, "drift kept");
         assert_eq!(s.text_pct, 100);
         assert!(!s.offline && !s.speak && !s.mic_blocked && !s.keep_history, "later keys default");
+        assert!(s.assist, "a file from before the AI-suggestions switch keeps suggestions on (the behaviour it had)");
         // The upgrade path: loading the old file and saving it again preserves the old choices.
         save(&f, &s).unwrap();
         let s2 = load(&f);

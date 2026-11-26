@@ -397,6 +397,27 @@ fn typo_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
 
 pub static ONLINE_CHAT_UI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// "AI suggestions" setting (item 20): when off, a parser gap never wakes the embedded model and the
+/// plain parse error is the whole reply. On by default, which is the behaviour before the setting existed.
+pub static ASSIST_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+std::thread_local! {
+    static THREAD_ASSIST_ENABLED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+pub fn set_assist_enabled(on: bool) {
+    ASSIST_ENABLED.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// For tests only: override the setting for the CURRENT thread, so parallel tests do not see each other's switch.
+pub fn set_assist_enabled_for_this_thread(v: Option<bool>) {
+    THREAD_ASSIST_ENABLED.with(|c| c.set(v));
+}
+
+pub fn assist_enabled() -> bool {
+    THREAD_ASSIST_ENABLED.with(|c| c.get()).unwrap_or_else(|| ASSIST_ENABLED.load(std::sync::atomic::Ordering::SeqCst))
+}
+
 /// The one place the picture-ready line is written, so both completion arms always label
 /// AI-generated pictures the same way (tested below).
 fn picture_ready_label(provider: &pawline_core::imagegen::ImageProvider, detail: &str) -> String {
@@ -598,7 +619,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     // Length gate: beyond ASSIST_INPUT_MAX the assist only churns until its timeout (measured 33.7s on a
     // 10k-char input, then it disables itself). Skip it; the note at the error reply says what happened.
     let too_long_for_assist = r.is_err() && !assist_len_ok(input);
-    if r.is_err() && !too_long_for_assist {
+    if r.is_err() && !too_long_for_assist && assist_enabled() {
         if !state.assist_tried {
             state.assist_tried = true;
             state.assist = NeedleAssist::embedded().ok().map(|a| pawline_core::assist::TimedAssist::new(std::sync::Arc::new(a), ASSIST_LIMIT));
@@ -1432,6 +1453,19 @@ mod memory_tests {
         assert!(t0.elapsed() < std::time::Duration::from_secs(5), "no 30s assist timeout burn: {:?}", t0.elapsed());
         assert!(r.text.contains("too long for the local AI reader"), "{}", r.text);
         assert!(!st.assist_tried, "the assist was never woken");
+    }
+
+    #[test]
+    fn ai_suggestions_off_never_wakes_the_model() {
+        set_assist_enabled_for_this_thread(Some(false));
+        let mut st = new_state(org_root("assistoff"));
+        let t0 = std::time::Instant::now();
+        let r = handle_text(&mut st, &"x".repeat(100));
+        set_assist_enabled_for_this_thread(None);
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "no 35 MB model load, no 30s timeout: {:?}", t0.elapsed());
+        assert!(!st.assist_tried, "the assist was never woken");
+        assert!(st.assist.is_none(), "no model was loaded");
+        assert!(!r.text.is_empty(), "the plain parse-error reply still reaches the user");
     }
 
     #[test]
