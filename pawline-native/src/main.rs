@@ -306,6 +306,9 @@ struct App {
     serial: u32,
     #[cfg(unix)]
     kb: Option<wl_keyboard::WlKeyboard>,
+    /// Event-loop handle, used to install client-side key repeat (Wayland compositors do not repeat keys for clients).
+    #[cfg(unix)]
+    lh: Option<calloop::LoopHandle<'static, App>>,
     #[cfg(unix)]
     ptr: Option<wl_pointer::WlPointer>,
     w: u32,
@@ -2213,7 +2216,16 @@ impl SeatHandler for App {
     fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, cap: Capability) {
         if cap == Capability::Keyboard && self.kb.is_none() {
-            self.kb = self.seat.as_mut().unwrap().get_keyboard(qh, &seat, None).ok();
+            self.kb = match self.lh.clone() {
+                // with client-side repeat: a held key repeats at the rate the compositor announces
+                Some(lh) => self
+                    .seat
+                    .as_mut()
+                    .unwrap()
+                    .get_keyboard_with_repeat(qh, &seat, None, lh, Box::new(|app: &mut App, _, e| app.key(e)))
+                    .ok(),
+                None => self.seat.as_mut().unwrap().get_keyboard(qh, &seat, None).ok(),
+            };
             if let (Some(m), None) = (&self.ddm, &self.ddev) {
                 self.ddev = Some(m.get_data_device(qh, &seat));
             }
@@ -2828,6 +2840,8 @@ fn main() {
         #[cfg(unix)]
         kb: None,
         #[cfg(unix)]
+        lh: None,
+        #[cfg(unix)]
         ptr: None,
         w: COMPACT,
         h: COMPACT,
@@ -2959,8 +2973,12 @@ fn main() {
         }
     }
 
-    let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+    let mut event_loop: EventLoop<'static, App> = EventLoop::try_new().unwrap();
     let handle = event_loop.handle();
+    #[cfg(unix)]
+    {
+        app.lh = Some(handle.clone());
+    }
     #[cfg(unix)]
     if let (Some(c), Some(q)) = (conn_opt.clone(), queue_opt) {
         WaylandSource::new(c, q).insert(handle.clone()).unwrap();
