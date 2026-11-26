@@ -464,6 +464,32 @@ fn delete_conversation_query(input: &str) -> Option<String> {
     None
 }
 
+/// Named-conversation phrases (item 19). Returns the name BYTE FOR BYTE from the original
+/// input; matching is ASCII case-insensitive on the fixed words only. The window validates the
+/// name, derives the file slug, and owns every file effect. `want` selects the phrase family.
+fn named_conversation_query(input: &str, want: &str) -> Option<String> {
+    let t = input.trim().trim_end_matches(['.', '!']).trim_end();
+    let prefixes: &[&str] = match want {
+        "name" => &["name this conversation", "call this conversation", "name our conversation", "rename this conversation"],
+        "new" => &["new conversation called", "new chat called", "start a new conversation called", "start a conversation called", "start a new chat called"],
+        "switch" => &["switch to conversation", "switch to the conversation", "switch back to conversation", "switch back to the conversation", "open conversation", "open the conversation", "continue conversation", "continue the conversation", "go back to conversation"],
+        _ => return None,
+    };
+    for p in prefixes {
+        if let Some(rest) = t.get(p.len()..).filter(|_| t.get(..p.len()).map(|h| h.eq_ignore_ascii_case(p)).unwrap_or(false)) {
+            if rest.is_empty() {
+                return Some(String::new());
+            }
+            if let Some(r) = rest.strip_prefix(' ') {
+                // quoted names keep their inner text only; no shell, no path, this is a label
+                let r = r.trim().trim_matches('"').trim_matches('\'').trim();
+                return Some(r.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     state.online_pending = None;
     state.confirm_preview.clear();
@@ -539,6 +565,30 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                     return reply("message", "Say \"list conversations\" to see the saved conversations and their numbers, then for example \"delete conversation 2\". Nothing was deleted.".into());
                 }
             }
+        }
+        if let Some(name) = named_conversation_query(input, "name") {
+            if name.is_empty() {
+                return reply("message", "Say the name too, for example: name this conversation trip planning".into());
+            }
+            let mut r = reply("nameconv", "The window names the current conversation. (Terminal sessions keep no history file.)".into());
+            r.plan = Some(name);
+            return r;
+        }
+        if let Some(name) = named_conversation_query(input, "new") {
+            if name.is_empty() {
+                return reply("message", "Say the name too, for example: new conversation called trip planning".into());
+            }
+            let mut r = reply("newconv", "The window starts a named conversation. (Terminal sessions keep no history file.)".into());
+            r.plan = Some(name);
+            return r;
+        }
+        if let Some(name) = named_conversation_query(input, "switch") {
+            if name.is_empty() {
+                return reply("message", "Say which conversation, for example: switch to conversation trip planning. Say \"list conversations\" to see them.".into());
+            }
+            let mut r = reply("switchconv", "The window names exactly what loads and asks first. (Terminal sessions keep no history file.)".into());
+            r.plan = Some(name);
+            return r;
         }
         if matches!(low, "export history" | "export my history" | "export saved history" | "export my saved history" | "export saved conversation" | "export saved conversations" | "export my saved conversation" | "export my saved conversations" | "export chat history") {
             // The window owns the history files: it shows the exact target path and asks first.
@@ -1902,6 +1952,42 @@ mod memory_tests {
             let r = handle_text(&mut st, p);
             assert_eq!(r.kind, "delhist", "{p}: {}", r.text);
         }
+    }
+
+    #[test]
+    fn named_conversation_phrases_are_app_level_and_names_are_verbatim() {
+        let root = org_root("namedconv");
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "name this conversation Trip Planning");
+        assert_eq!(r.kind, "nameconv", "{}", r.text);
+        assert_eq!(r.plan.as_deref(), Some("Trip Planning"), "the name travels byte for byte");
+        let r = handle_text(&mut st, "new conversation called trip planning");
+        assert_eq!(r.kind, "newconv", "{}", r.text);
+        assert_eq!(r.plan.as_deref(), Some("trip planning"));
+        let r = handle_text(&mut st, "switch to conversation Trip Planning");
+        assert_eq!(r.kind, "switchconv", "{}", r.text);
+        assert_eq!(r.plan.as_deref(), Some("Trip Planning"));
+        for p in ["name this conversation", "new conversation called", "switch to conversation"] {
+            let r = handle_text(&mut st, p);
+            assert_eq!(r.kind, "message", "{p} asks for the missing name: {}", r.text);
+        }
+        // Existing neighbours are untouched.
+        let r = handle_text(&mut st, "new conversation");
+        assert_eq!(r.kind, "clearchat", "plain new conversation still clears: {}", r.text);
+        assert!(st.pending.is_none(), "no engine plan may pend from any of these");
+        let names: Vec<String> = std::fs::read_dir(&root).unwrap().flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+        assert_eq!(names, vec!["Downloads"], "nothing created or deleted: {names:?}");
+    }
+
+    #[test]
+    fn slugify_makes_safe_file_names() {
+        assert_eq!(crate::history::slugify("Trip Planning"), Some("trip-planning".to_string()));
+        assert_eq!(crate::history::slugify("  my  notes!! "), Some("my-notes".to_string()));
+        assert_eq!(crate::history::slugify("c/d\\e\\f"), Some("c-d-e-f".to_string()), "no path separators survive");
+        assert_eq!(crate::history::slugify("..."), None, "nothing usable is an honest error, not an invented name");
+        let slug = crate::history::slugify("averyveryveryverylongconversationname").unwrap();
+        assert_eq!(slug, "averyveryveryverylongcon");
+        assert_eq!(slug.len(), 24, "capped at 24");
     }
 
     #[test]

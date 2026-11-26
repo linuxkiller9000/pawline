@@ -126,30 +126,13 @@ pub fn delete(path: &Path) -> std::io::Result<()> {
 /// (item 19: export). Returns the text and the number of saved lines; empty text when nothing
 /// is saved. Read-only: files are read through `load`, which skips missing/oversized/corrupt ones.
 pub fn render_export(dir: &Path) -> (String, usize) {
-    let mut files: Vec<(bool, std::path::PathBuf)> = Vec::new();
-    let cur = dir.join("history.txt");
-    if cur.symlink_metadata().map(|m| m.is_file()).unwrap_or(false) {
-        files.push((false, cur));
-    }
-    let mut arch: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("history-archived-") && n.ends_with(".txt"))
-                .unwrap_or(false)
-        })
-        .collect();
-    arch.sort();
-    files.extend(arch.into_iter().map(|p| (true, p)));
     let mut out = String::new();
     let mut total = 0usize;
-    for (archived, f) in files {
-        if archived {
-            out.push_str(&format!("--- archived copy: {} ---\n", f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+    for (src, f) in collect(dir) {
+        match &src {
+            Src::Current => {}
+            Src::Named(slug) => out.push_str(&format!("--- conversation: {slug} ---\n")),
+            Src::Archived => out.push_str(&format!("--- archived copy: {} ---\n", f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())),
         }
         for l in load(&f) {
             total += 1;
@@ -173,29 +156,17 @@ pub struct ConvEntry {
 
 /// List the current saved conversation and every archived copy in `dir`. Read-only.
 pub fn list_dir(dir: &Path) -> Vec<ConvEntry> {
-    let mut out: Vec<ConvEntry> = Vec::new();
-    let cur = dir.join("history.txt");
-    if cur.symlink_metadata().map(|m| m.is_file()).unwrap_or(false) {
-        out.push(ConvEntry { lines: load(&cur).len(), path: cur, label: "current saved conversation".into(), current: true });
-    }
-    let mut arch: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+    collect(dir)
         .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("history-archived-") && n.ends_with(".txt"))
-                .unwrap_or(false)
+        .map(|(src, path)| {
+            let (label, current) = match &src {
+                Src::Current => ("current saved conversation".to_string(), true),
+                Src::Named(slug) => (format!("conversation \"{slug}\""), false),
+                Src::Archived => (format!("archived copy {}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()), false),
+            };
+            ConvEntry { lines: load(&path).len(), path, label, current }
         })
-        .collect();
-    arch.sort();
-    for p in arch {
-        let label = format!("archived copy {}", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-        out.push(ConvEntry { lines: load(&p).len(), path: p, label, current: false });
-    }
-    out
+        .collect()
 }
 
 /// Write `text` to `target` without ever replacing an existing file: a temporary sibling is written
@@ -235,11 +206,95 @@ pub const SEARCH_HIT_MAX: usize = 100;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hit {
-    /// True when the line comes from an archived copy (made by "new conversation"), not the current file.
-    pub archived: bool,
+    /// Which saved file the line comes from.
+    pub source: Src,
     /// True when the user said the line, false when Pawline did.
     pub user: bool,
     pub text: String,
+}
+
+/// Which saved-conversation file a line or listing entry comes from (item 19).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Src {
+    /// history.txt - the live saved conversation.
+    Current,
+    /// history-named-<slug>.txt - a conversation the user named and switched away from.
+    Named(String),
+    /// history-archived-<epoch>.txt - a dead copy made by "new conversation".
+    Archived,
+}
+
+/// A name the user gave a conversation, made safe as a file-name part: lowercase ASCII letters,
+/// digits and single dashes, at most 24 chars. None when nothing usable remains (the caller
+/// says so honestly instead of inventing a name).
+pub fn slugify(name: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut dash = false;
+    for c in name.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            if dash && !out.is_empty() {
+                out.push('-');
+            }
+            dash = false;
+            out.push(c.to_ascii_lowercase());
+        } else {
+            dash = true;
+        }
+        if out.len() >= 24 {
+            break;
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+pub fn named_path(dir: &Path, slug: &str) -> std::path::PathBuf {
+    dir.join(format!("history-named-{slug}.txt"))
+}
+
+/// The name of the conversation the window is currently in, kept in a tiny state file so
+/// "switch back" still works after a restart. Plain text, one line; never a secret.
+pub fn read_current_name(dir: &Path) -> Option<String> {
+    let t = std::fs::read_to_string(dir.join("current-conversation")).ok()?;
+    let t = t.trim();
+    if t.is_empty() { None } else { Some(t.chars().take(60).collect()) }
+}
+
+pub fn write_current_name(dir: &Path, name: Option<&str>) -> std::io::Result<()> {
+    match name {
+        Some(n) => std::fs::write(dir.join("current-conversation"), format!("{n}
+")),
+        None => match std::fs::remove_file(dir.join("current-conversation")) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        },
+    }
+}
+
+/// Every saved-conversation file in `dir`: current first, then named (slug order), then
+/// archived (name order). Unrelated files are never included.
+fn collect(dir: &Path) -> Vec<(Src, std::path::PathBuf)> {
+    let mut out: Vec<(Src, std::path::PathBuf)> = Vec::new();
+    let cur = dir.join("history.txt");
+    if cur.symlink_metadata().map(|m| m.is_file()).unwrap_or(false) {
+        out.push((Src::Current, cur));
+    }
+    let mut named: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut arch: Vec<std::path::PathBuf> = Vec::new();
+    for p in std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()) {
+        let Some(n) = p.file_name().and_then(|n| n.to_str()) else { continue };
+        if let Some(slug) = n.strip_prefix("history-named-").and_then(|r| r.strip_suffix(".txt")) {
+            if !slug.is_empty() {
+                named.push((slug.to_string(), p));
+            }
+        } else if n.starts_with("history-archived-") && n.ends_with(".txt") {
+            arch.push(p);
+        }
+    }
+    named.sort();
+    arch.sort();
+    out.extend(named.into_iter().map(|(s, p)| (Src::Named(s), p)));
+    out.extend(arch.into_iter().map(|p| (Src::Archived, p)));
+    out
 }
 
 /// Search the saved conversation and every archived copy in `dir` for a case-insensitive substring
@@ -248,33 +303,14 @@ pub struct Hit {
 /// clipped to SEARCH_HIT_MAX chars, plus the total number of matching lines.
 pub fn search_dir(dir: &Path, query: &str) -> (Vec<Hit>, usize) {
     let q = query.to_lowercase();
-    let mut files: Vec<(bool, std::path::PathBuf)> = Vec::new();
-    let cur = dir.join("history.txt");
-    if cur.symlink_metadata().map(|m| m.is_file()).unwrap_or(false) {
-        files.push((false, cur));
-    }
-    let mut arch: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("history-archived-") && n.ends_with(".txt"))
-                .unwrap_or(false)
-        })
-        .collect();
-    arch.sort();
-    files.extend(arch.into_iter().map(|p| (true, p)));
     let mut hits = Vec::new();
     let mut total = 0usize;
-    for (archived, f) in files {
+    for (src, f) in collect(dir) {
         for l in load(&f) {
             if l.text.to_lowercase().contains(&q) {
                 total += 1;
                 if hits.len() < SEARCH_MAX_HITS {
-                    hits.push(Hit { archived, user: l.user, text: l.text.chars().take(SEARCH_HIT_MAX).collect() });
+                    hits.push(Hit { source: src.clone(), user: l.user, text: l.text.chars().take(SEARCH_HIT_MAX).collect() });
                 }
             }
         }
@@ -368,9 +404,9 @@ mod search_tests {
         let (hits, total) = search_dir(&d, "CMAKE");
         assert_eq!(total, 3);
         assert_eq!(hits.len(), 3);
-        assert!(!hits[0].archived && hits[0].user);
-        assert!(!hits[1].archived && !hits[1].user);
-        assert!(hits[2].archived, "the archived copy is searched and labelled");
+        assert!(hits[0].source == Src::Current && hits[0].user);
+        assert!(hits[1].source == Src::Current && !hits[1].user);
+        assert!(hits[2].source == Src::Archived, "the archived copy is searched and labelled");
         let (hits, total) = search_dir(&d, "nothing here matches");
         assert_eq!((hits.len(), total), (0, 0));
         let _ = std::fs::remove_dir_all(&d);

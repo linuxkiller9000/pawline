@@ -299,6 +299,8 @@ enum AppAction {
     ExportHistory { target: std::path::PathBuf, text: String },
     /// One saved-conversation file chosen from a fresh listing (item 19: per-conversation delete).
     DeleteConversation { path: std::path::PathBuf, label: String, current: bool, lines: usize },
+    /// Load a named conversation's file as the live one (item 19).
+    SwitchConversation { target: std::path::PathBuf, name: String },
 }
 
 enum Req {
@@ -405,6 +407,9 @@ struct App {
     history_warned: bool,
     /// First message index the history file may hold: switching history ON mid-session starts from then, not from what was already on screen.
     hist_from: usize,
+    /// Name of the conversation the window is in (item 19), mirrored in the data dir's
+    /// current-conversation state file so it survives restarts. None = unnamed.
+    conv_name: Option<String>,
     focus: Btn,
     /// Pixels scrolled up from the bottom of the chat (0 = latest).
     scroll: f32,
@@ -1333,7 +1338,7 @@ impl App {
         };
         let (hits, total) = history::search_dir(&dir, q);
         if total == 0 {
-            let has_files = history_path().map(|p| p.is_file()).unwrap_or(false) || !Self::history_archives().is_empty();
+            let has_files = !history::list_dir(&dir).is_empty();
             let text = if has_files {
                 format!("No saved line contains \"{q}\". Searched the saved conversation and archived copies; the unsaved lines on this screen were not searched.")
             } else {
@@ -1349,7 +1354,11 @@ impl App {
         };
         for h in &hits {
             let who = if h.user { "You" } else { "Pawline" };
-            let where_ = if h.archived { " (archived copy)" } else { "" };
+            let where_ = match &h.source {
+                history::Src::Current => String::new(),
+                history::Src::Named(slug) => format!(" (conversation \"{slug}\")"),
+                history::Src::Archived => " (archived copy)".to_string(),
+            };
             text.push_str(&format!("\n{who}{where_}: {}", h.text));
         }
         if total > hits.len() {
@@ -1372,6 +1381,20 @@ impl App {
         v
     }
 
+    /// Named-conversation files (history-named-*.txt), sorted (item 19).
+    fn history_named_files() -> Vec<std::path::PathBuf> {
+        let Some(dir) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else { return vec![] };
+        let mut v: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("history-named-") && n.ends_with(".txt")).unwrap_or(false))
+            .collect();
+        v.sort();
+        v
+    }
+
     /// Turn conversation keeping on or off. On saves from now; off deletes the saved file AND every
     /// archived copy (they are the same retained chat text). If anything cannot be deleted it stays
     /// on and says so.
@@ -1382,19 +1405,29 @@ impl App {
         };
         if self.settings.keep_history {
             let archives = Self::history_archives();
+            let named = Self::history_named_files();
             let mut failed: Vec<String> = Vec::new();
             if let Err(e) = history::delete(&p) {
                 failed.push(format!("history.txt: {e}"));
             }
-            for a in &archives {
+            for a in archives.iter().chain(named.iter()) {
                 if let Err(e) = std::fs::remove_file(a) {
                     failed.push(format!("{}: {e}", a.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
                 }
             }
+            if let Some(d) = p.parent() {
+                if let Err(e) = std::fs::remove_file(d.join("current-conversation")) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        failed.push(format!("current-conversation: {e}"));
+                    }
+                }
+            }
             if failed.is_empty() {
                 self.settings.keep_history = false;
-                if !archives.is_empty() {
-                    self.push(false, "message", format!("Also deleted {} archived conversation file(s).", archives.len()), None);
+                self.conv_name = None;
+                let extra = archives.len() + named.len();
+                if extra > 0 {
+                    self.push(false, "message", format!("Also deleted {extra} archived or named conversation file(s) and the current conversation's name."), None);
                 }
             } else {
                 self.push(false, "error", format!("Could not delete everything ({}), so saving stays ON.", failed.join(", ")), None);
@@ -1404,6 +1437,129 @@ impl App {
             self.settings.keep_history = true;
             self.persist_history();
         }
+    }
+
+    /// Shared gate for the named-conversation commands (item 19): they keep things on disk, so
+    /// they need history keeping. Returns the data dir when usable; otherwise says so honestly.
+    fn named_conv_gate(&mut self) -> Option<std::path::PathBuf> {
+        if !self.settings.keep_history {
+            self.push(false, "message", "Naming and switching conversations keeps them on disk, so history keeping has to be on: turn it on in Settings first. Nothing was changed.".into(), None);
+            self.draw();
+            return None;
+        }
+        let Some(dir) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
+            self.push(false, "error", "No place to keep conversation files was found, so nothing was changed.".into(), None);
+            self.draw();
+            return None;
+        };
+        Some(dir)
+    }
+
+    /// "name this conversation X" (item 19). Reversible and nothing is written but the tiny
+    /// state file, so no confirm card; the reply says exactly what the name changes.
+    fn name_conversation(&mut self, name: &str) {
+        let name = name.trim();
+        let Some(dir) = self.named_conv_gate() else { return };
+        let Some(slug) = history::slugify(name) else {
+            self.push(false, "error", "That name has no letters or numbers I can use in a file name. Try adding Latin letters or digits. Nothing was changed.".into(), None);
+            self.draw();
+            return;
+        };
+        if self.conv_name.as_deref().and_then(history::slugify).as_deref() == Some(slug.as_str()) {
+            self.push(false, "message", format!("This conversation is already called \"{name}\". Nothing was changed."), None);
+            self.draw();
+            return;
+        }
+        if history::named_path(&dir, &slug).exists() {
+            self.push(false, "error", format!("A saved conversation called \"{name}\" already exists. Say \"switch to conversation {name}\" to open it, or pick another name. Nothing was changed."), None);
+            self.draw();
+            return;
+        }
+        match history::write_current_name(&dir, Some(name)) {
+            Ok(()) => {
+                self.conv_name = Some(name.to_string());
+                self.push(false, "message", format!("This conversation is now called \"{name}\". Its lines keep saving as you go; when you switch away or start another conversation, they are kept as history-named-{slug}.txt. Nothing was sent."), None);
+            }
+            Err(e) => self.push(false, "error", format!("Could not write the name ({e}). Nothing was changed."), None),
+        }
+        self.draw();
+    }
+
+    /// "new conversation called X" (item 19): same no-card flow as "new conversation" - the
+    /// current one is stashed with its disclosure note, the fresh one gets the name.
+    fn new_named_conversation(&mut self, name: &str) {
+        let name = name.trim();
+        let Some(dir) = self.named_conv_gate() else { return };
+        let Some(slug) = history::slugify(name) else {
+            self.push(false, "error", "That name has no letters or numbers I can use in a file name. Try adding Latin letters or digits. Nothing was changed.".into(), None);
+            self.draw();
+            return;
+        };
+        if history::named_path(&dir, &slug).exists() {
+            self.push(false, "error", format!("A saved conversation called \"{name}\" already exists. Say \"switch to conversation {name}\" to open it. Nothing was changed."), None);
+            self.draw();
+            return;
+        }
+        if self.conv_name.as_deref().and_then(history::slugify).as_deref() == Some(slug.as_str()) {
+            self.push(false, "message", format!("You are already in this conversation, and it is already called \"{name}\". Nothing was changed."), None);
+            self.draw();
+            return;
+        }
+        let (_, note) = self.stash_current_conversation();
+        self.conv_name = Some(name.to_string());
+        let saved_name = history::write_current_name(&dir, Some(name));
+        self.hist_from = 1;
+        self.msgs.clear();
+        self.msgs.push(Msg { user: false, kind: "welcome".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it. Right-click a message (or Ctrl+R) to reply to it.".into(), thumb: None, quote: None });
+        if let Some(n) = note {
+            self.msgs.push(Msg { user: false, kind: "restored".into(), md: false, text: n, thumb: None, quote: None });
+        }
+        match saved_name {
+            Ok(()) => self.msgs.push(Msg { user: false, kind: "message".into(), md: false, text: format!("New conversation \"{name}\" started. I remember none of the earlier lines, and none of them can trigger anything now. Nothing was sent or deleted."), thumb: None, quote: None }),
+            Err(e) => self.msgs.push(Msg { user: false, kind: "error".into(), md: false, text: format!("New conversation started, but its name could not be saved ({e}); it is unnamed. Nothing else was changed."), thumb: None, quote: None }),
+        }
+        self.scroll = 0.0;
+        self.draw();
+    }
+
+    /// "switch to conversation X" (item 19): the card names exactly what loads and where the
+    /// current one goes; the decide arm does the file swap with rollback on failure.
+    fn ask_switch_conversation(&mut self, name: &str) {
+        let name = name.trim();
+        let Some(dir) = self.named_conv_gate() else { return };
+        let Some(slug) = history::slugify(name) else {
+            self.push(false, "error", "That name has no letters or numbers I can use in a file name. Say \"list conversations\" to see the saved ones. Nothing was changed.".into(), None);
+            self.draw();
+            return;
+        };
+        if self.conv_name.as_deref().and_then(history::slugify).as_deref() == Some(slug.as_str()) {
+            self.push(false, "message", format!("You are already in conversation \"{name}\". Nothing was changed."), None);
+            self.draw();
+            return;
+        }
+        let target = history::named_path(&dir, &slug);
+        if !target.is_file() {
+            self.push(false, "error", format!("There is no saved conversation called \"{name}\". Say \"list conversations\" to see them. Nothing was changed."), None);
+            self.draw();
+            return;
+        }
+        let k = history::load(&target).len();
+        let cur_desc = match &self.conv_name {
+            Some(n) => format!(" \"{n}\""),
+            None => String::new(),
+        };
+        let kept = if self.conv_name.is_some() {
+            " as its own named file".to_string()
+        } else if history_path().map(|p| p.exists()).unwrap_or(false) {
+            " as an archived copy".to_string()
+        } else {
+            String::new()
+        };
+        self.confirm = Some(format!("Switch to conversation \"{name}\" ({k} saved lines)? They load into this window. The current conversation{cur_desc} is kept first{kept}. Nothing is deleted and nothing is sent."));
+        self.app_pending = Some(AppAction::SwitchConversation { target, name: name.to_string() });
+        self.focus = Btn::No;
+        self.plan_scroll = 0.0;
+        self.draw();
     }
 
     /// "list conversations" (item 19): read-only numbered listing of the current saved
@@ -1428,7 +1584,15 @@ impl App {
         let total = entries.len();
         let mut text = String::from("Saved conversations (nothing was written or deleted):");
         for (i, e) in entries.iter().take(20).enumerate() {
-            text.push_str(&format!("\n{}. {} - {} saved lines", i + 1, e.label, e.lines));
+            let label = if e.current {
+                match &self.conv_name {
+                    Some(n) => format!("current saved conversation \"{n}\""),
+                    None => e.label.clone(),
+                }
+            } else {
+                e.label.clone()
+            };
+            text.push_str(&format!("\n{}. {} - {} saved lines", i + 1, label, e.lines));
         }
         if total > 20 {
             text.push_str(&format!("\n... and {} more archived copies", total - 20));
@@ -1479,8 +1643,16 @@ impl App {
         let archives = Self::history_archives();
         let na = archives.len();
         targets.extend(archives);
+        let named = Self::history_named_files();
+        let nn = named.len();
+        targets.extend(named);
+        if let Some(d) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+            if d.join("current-conversation").exists() {
+                targets.push(d.join("current-conversation"));
+            }
+        }
         if targets.is_empty() {
-            self.push(false, "message", "There is no saved conversation to delete: no history file and no archived copies exist. Nothing was done.".into(), None);
+            self.push(false, "message", "There is no saved conversation to delete: no history file and no archived or named copies exist. Nothing was done.".into(), None);
             self.draw();
             return;
         }
@@ -1489,7 +1661,10 @@ impl App {
         if na > 0 {
             text.push_str(&format!("\n- {na} archived conversation file(s) (history-archived-*.txt)"));
         }
-        text.push_str("\nHistory keeping will also turn OFF. Nothing else is touched.");
+        if nn > 0 {
+            text.push_str(&format!("\n- {nn} named conversation file(s) (history-named-*.txt)"));
+        }
+        text.push_str("\nHistory keeping will also turn OFF, and the current conversation's name (if any) is forgotten. Nothing else is touched.");
         self.confirm = Some(text);
         self.app_pending = Some(AppAction::DeleteHistory(targets));
         self.focus = Btn::No;
@@ -1544,25 +1719,47 @@ impl App {
     /// "New conversation": drop every bubble but the welcome line. The saved history file is NOT
     /// erased silently: with history ON its earlier lines are moved aside to a dated archive name
     /// first, so nothing the user chose to keep is lost (item 19).
+    /// Move the saved current conversation aside for a new or switched conversation (item 19):
+    /// to its own named file when it has a name (latest state wins there), else to a dated
+    /// archived copy. Returns (where history.txt went, the note for the view).
+    fn stash_current_conversation(&mut self) -> (Option<std::path::PathBuf>, Option<String>) {
+        if !self.settings.keep_history {
+            return (None, None);
+        }
+        let Some(p) = history_path() else { return (None, None) };
+        if !p.exists() {
+            return (None, None);
+        }
+        if let Some(slug) = self.conv_name.as_deref().and_then(history::slugify) {
+            let dest = history::named_path(p.parent().unwrap_or(std::path::Path::new(".")), &slug);
+            let fname = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            return match std::fs::rename(&p, &dest) {
+                Ok(()) => (Some(dest), Some(format!("Your saved conversation was kept as conversation \"{}\" ({fname}) in the Pawline data folder; say \"switch to conversation {}\" to bring it back.", self.conv_name.as_deref().unwrap_or(&slug), self.conv_name.as_deref().unwrap_or(&slug)))),
+                Err(e) => (None, Some(format!("Could not move the saved conversation aside ({e}); it stays as it was and will still load next time."))),
+            };
+        }
+        let stamp = {
+            let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            format!("history-archived-{t}.txt")
+        };
+        let dest = p.with_file_name(stamp.clone());
+        match std::fs::rename(&p, &dest) {
+            Ok(()) => (Some(dest), Some(format!("Your saved conversation was kept as {stamp} in the Pawline data folder; it is not loaded again. Delete it there if you don't want it."))),
+            Err(e) => (None, Some(format!("Could not move the saved conversation aside ({e}); it stays as it was and will still load next time."))),
+        }
+    }
+
     fn clear_conversation_view(&mut self) {
-        let mut note: Option<String> = None;
+        let (_, note) = self.stash_current_conversation();
         if self.settings.keep_history {
-            if let Some(p) = history_path() {
-                if p.exists() {
-                    let stamp = {
-                        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                        format!("history-archived-{t}.txt")
-                    };
-                    let dest = p.with_file_name(stamp.clone());
-                    match std::fs::rename(&p, &dest) {
-                        Ok(()) => note = Some(format!("Your saved conversation was kept as {stamp} in the Pawline data folder; it is not loaded again. Delete it there if you don't want it.")),
-                        Err(e) => note = Some(format!("Could not move the saved conversation aside ({e}); it stays as it was and will still load next time.")),
-                    }
-                }
-            }
             self.hist_from = 1; // only the welcome line remains, and it is never saved
         } else {
             self.hist_from = 1;
+        }
+        // A plain "new conversation" starts unnamed.
+        self.conv_name = None;
+        if let Some(d) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+            let _ = history::write_current_name(&d, None);
         }
         self.msgs.clear();
         self.msgs.push(Msg { user: false, kind: "welcome".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it. Right-click a message (or Ctrl+R) to reply to it.".into(), thumb: None, quote: None });
@@ -2149,6 +2346,7 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
                 let msg = match &act {
                     AppAction::ExportHistory { .. } => "Cancelled. Nothing was written.",
                     AppAction::DeleteHistory(_) | AppAction::DeleteConversation { .. } => "Cancelled. Nothing was deleted.",
+                    AppAction::SwitchConversation { .. } => "Cancelled. Nothing was changed.",
                 };
                 self.push(false, "message", msg.into(), None);
                 self.draw();
@@ -2178,12 +2376,53 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
                     }
                     if failed.is_empty() {
                         self.settings.keep_history = false;
+                        self.conv_name = None;
                         if let Some(p) = settings_path() {
                             let _ = theme::save(&p, &self.settings);
                         }
                         self.push(false, "message", format!("Deleted the saved conversation and archived copies ({gone} files). History keeping is now OFF; turn it back on in Settings if you want it. Nothing else was touched."), None);
                     } else {
                         self.push(false, "error", format!("Deleted {gone} files, but these could not be deleted: {}. History keeping stays as it was.", failed.join(", ")), None);
+                    }
+                    self.draw();
+                }
+                AppAction::SwitchConversation { target, name } => {
+                    // Stash the current conversation first; if the swap itself fails, put it
+                    // back so the on-screen conversation and its file never disagree.
+                    let (stashed, note) = self.stash_current_conversation();
+                    let Some(cur) = history_path() else {
+                        self.push(false, "error", "No place for the conversation file was found. Nothing was changed.".into(), None);
+                        self.draw();
+                        return;
+                    };
+                    match std::fs::rename(&target, &cur) {
+                        Ok(()) => {
+                            let lines = history::load(&cur);
+                            let dir = cur.parent().map(|d| d.to_path_buf());
+                            if let Some(d) = &dir {
+                                let _ = history::write_current_name(d, Some(&name));
+                            }
+                            self.conv_name = Some(name.clone());
+                            self.hist_from = 1;
+                            self.msgs.clear();
+                            self.msgs.push(Msg { user: false, kind: "welcome".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it. Right-click a message (or Ctrl+R) to reply to it.".into(), thumb: None, quote: None });
+                            let mut head = format!("Switched to conversation \"{name}\": {} saved lines loaded. None of them can trigger anything by themselves.", lines.len());
+                            if let Some(n) = note {
+                                head.push(' ');
+                                head.push_str(&n);
+                            }
+                            self.msgs.push(Msg { user: false, kind: "restored".into(), md: false, text: head, thumb: None, quote: None });
+                            for l in lines {
+                                self.msgs.push(Msg { user: l.user, kind: if l.user { "user".into() } else { "message".into() }, md: false, thumb: None, quote: None, text: l.text });
+                            }
+                            self.scroll = 0.0;
+                        }
+                        Err(e) => {
+                            if let Some(back) = stashed {
+                                let _ = std::fs::rename(&back, &cur);
+                            }
+                            self.push(false, "error", format!("Could not switch ({e}). The current conversation is back as it was; nothing was changed."), None);
+                        }
                     }
                     self.draw();
                 }
@@ -2227,6 +2466,21 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
         }
         if r.kind == "exphist" {
             self.ask_export_history();
+            return;
+        }
+        if r.kind == "nameconv" {
+            let n = r.plan.clone().unwrap_or_default();
+            self.name_conversation(&n);
+            return;
+        }
+        if r.kind == "newconv" {
+            let n = r.plan.clone().unwrap_or_default();
+            self.new_named_conversation(&n);
+            return;
+        }
+        if r.kind == "switchconv" {
+            let n = r.plan.clone().unwrap_or_default();
+            self.ask_switch_conversation(&n);
             return;
         }
         if r.kind == "listconv" {
@@ -3404,6 +3658,7 @@ fn main() {
         mic_told: false,
         history_warned: false,
         hist_from: 0,
+        conv_name: history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())).and_then(|d| history::read_current_name(&d)),
         focus: Btn::No,
         scroll: 0.0,
         plan_scroll: 0.0,
