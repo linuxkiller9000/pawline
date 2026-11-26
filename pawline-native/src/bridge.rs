@@ -354,6 +354,8 @@ pub struct UiState {
     pub action_candidate: Option<pawline_core::actions::Candidate>,
     /// A saved action whose delete card is on screen; only the card's Approve removes it.
     pub action_delete_pending: Option<String>,
+    /// A fact-check against a web page whose disclosure card is on screen; only the card's Approve sends the request.
+    pub check_url_pending: Option<String>,
     pub undo_batch: Option<usize>,
     /// Offline conversation: a few recent lines, memory only, never written to disk.
     pub chat: pawline_core::chat::ChatState,
@@ -1227,6 +1229,9 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
     if let Some(name) = state.action_delete_pending.take() {
         return action_delete_exec(state, &name);
     }
+    if let Some(url) = state.check_url_pending.take() {
+        return url_check_exec(state, &url);
+    }
     let plan = match state.pending.take() {
         Some(p) => p,
         None => return reply("error", "Nothing waiting for confirmation.".into()),
@@ -1319,6 +1324,7 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
         organize_pending: None,
         action_candidate: None,
         action_delete_pending: None,
+        check_url_pending: None,
         undo_batch: None,
         carried: std::time::Duration::ZERO,
         engine: Engine::new(root.clone()),
@@ -1535,10 +1541,29 @@ static DECK_CHECK: std::sync::Mutex<Option<(String, usize, usize)>> = std::sync:
 /// "check the draft against <file>": word-level comparison of the reviewed draft against a local text file
 /// the user chose. Never edits the draft; the result is a review list and is repeated on the save card.
 fn deck_check_command(state: &mut UiState, input: &str) -> Option<UiReply> {
-    let path = pawline_core::deckcheck::parse_check_command(input)?;
+    let target = pawline_core::deckcheck::parse_check_command(input)?;
     let Some(text) = DECK_DRAFT.lock().unwrap().clone() else {
-        return Some(reply("message", "There is no reviewed draft to check. Ask me to write a presentation about a topic first, then say \"check the draft against <file>\". Nothing was changed.".into()));
+        return Some(reply("message", "There is no reviewed draft to check. Ask me to write a presentation about a topic first, then say \"check the draft against <file or web address>\". Nothing was changed.".into()));
     };
+    if let pawline_core::deckcheck::CheckTarget::Url(url) = target {
+        if let Err(e) = pawline_core::deckcheck::valid_source_url(&url) {
+            return Some(reply("failed", format!("I can't check against that address: {e}. Nothing was fetched.")));
+        }
+        if pawline_core::netgate::is_offline() {
+            return Some(reply("failed", "Offline mode is on, so I cannot fetch a web page. Nothing was fetched. Turn offline mode off in Settings and say the check again if you want it.".into()));
+        }
+        // Only this card's Approve may send the request; drop any other pending card first.
+        state.pending = None;
+        state.pending_request = None;
+        pawline_core::pending::clear(&state.root);
+        state.online_pending = None;
+        state.organize_pending = None;
+        state.action_delete_pending = None;
+        state.check_url_pending = Some(url.clone());
+        let card = format!("Check the draft against a web page?\n\nThis sends one request to {url} - the site sees your IP address and a \"Pawline\" user-agent. Only the page text is read; it is used once for the word-level check in memory and is never saved to disk or sent anywhere else. Nothing from your machine or your draft is uploaded.");
+        return Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{card}"), plan: Some(card) });
+    }
+    let pawline_core::deckcheck::CheckTarget::File(path) = target else { return None; };
     let home = std::fs::canonicalize(&state.root).unwrap_or_else(|_| state.root.clone());
     let src = match pawline_core::deckcheck::read_source_text(&home, &path) {
         Ok(t) => t,
@@ -1556,6 +1581,27 @@ fn deck_check_command(state: &mut UiState, input: &str) -> Option<UiReply> {
     let not_found = checks.iter().filter(|c| !c.found()).count();
     *DECK_CHECK.lock().unwrap() = Some((path.clone(), not_found, checks.len()));
     Some(reply("message", format!("{}\n\nThe draft is unchanged. Say \"save the presentation\" to see the file name and confirm - the card repeats how many lines were not found.", pawline_core::deckcheck::check_review_text(&path, &checks))))
+}
+
+/// The disclosure card's Approve for a web-page fact-check: fetch once and compare. Page text stays in memory.
+fn url_check_exec(state: &mut UiState, url: &str) -> UiReply {
+    let Some(text) = DECK_DRAFT.lock().unwrap().clone() else {
+        return reply("message", "There is no reviewed draft to check any more. Nothing was fetched.".into());
+    };
+    let (slides, rep) = match pawline_core::deck::compose(&text) {
+        Ok(s) => s,
+        Err(e) => return reply("failed", format!("I can't build that draft: {e}. Nothing was fetched.")),
+    };
+    let _ = rep;
+    let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(30));
+    match pawline_core::deckcheck::fetch_and_check(&http, url, &slides) {
+        Ok(r) => {
+            let not_found = r.checks.iter().filter(|c| !c.found()).count();
+            *DECK_CHECK.lock().unwrap() = Some((url.to_string(), not_found, r.checks.len()));
+            reply("message", format!("{}\n\nThe draft is unchanged. Say \"save the presentation\" to see the file name and confirm - the card repeats how many lines were not found.", r.review))
+        }
+        Err(e) => reply("failed", format!("I can't check against that page: {e}. Nothing was changed.")),
+    }
 }
 
 /// "save the presentation" after a draft was shown: a second card with the full file path.
@@ -1761,6 +1807,7 @@ pub fn cancel(state: &mut UiState) -> UiReply {
     state.online_pending = None;
     state.organize_pending = None;
     state.action_delete_pending = None;
+    state.check_url_pending = None;
     reply("message", "Cancelled. Nothing was done.".into())
 }
 
@@ -2221,6 +2268,38 @@ mod memory_tests {
         assert!(rr.text.contains("dd") || rr.kind == "executed", "{}", rr.text);
         let r = handle_text(&mut st, "save that as d1");
         assert!(r.text.contains("only create-folder, create-file and copy"), "{}", r.text);
+    }
+
+    #[test]
+    fn checking_the_draft_against_a_web_page_needs_the_disclosure_card_first() {
+        let _deck_guard = DECK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = org_root("deckcheckurl");
+        let mut st = new_state(root.clone());
+        *DECK_DRAFT.lock().unwrap() = None;
+        *DECK_CHECK.lock().unwrap() = None;
+        pawline_core::netgate::set_offline_for_this_thread(Some(false));
+        // no draft: refused, no card, no request
+        let r = handle_text(&mut st, "check the draft against https://example.com/rain");
+        assert!(r.text.contains("no reviewed draft to check") && st.check_url_pending.is_none(), "{}", r.text);
+        // offline: refused before any card, nothing fetched
+        *DECK_DRAFT.lock().unwrap() = Some("# Water\n## Rain\n- Falls from clouds\n".into());
+        pawline_core::netgate::set_offline_for_this_thread(Some(true));
+        let r = handle_text(&mut st, "check the draft against https://example.com/rain");
+        assert!(r.kind == "failed" && r.text.contains("Offline mode is on"), "{}", r.text);
+        assert!(st.check_url_pending.is_none(), "offline never stages a request");
+        pawline_core::netgate::set_offline_for_this_thread(Some(false));
+        // online: a disclosure card names what is sent; typing never approves it
+        let r = handle_text(&mut st, "check the draft against https://example.com/rain");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(r.text.contains("https://example.com/rain") && r.text.contains("IP address") && r.text.contains("never saved to disk"), "{}", r.text);
+        assert!(st.check_url_pending.is_some(), "the card holds the exact address");
+        // a bad scheme never reaches a card
+        let r = handle_text(&mut st, "check the draft against http://example.com/rain");
+        assert!(r.kind != "confirm", "{}", r.text);
+        // cancel clears the staged request; confirm then has nothing to run
+        assert!(cancel(&mut st).text.contains("Nothing was done"));
+        assert!(st.check_url_pending.is_none(), "cancel clears the staged check");
+        pawline_core::netgate::set_offline_for_this_thread(None);
     }
 
     #[test]
