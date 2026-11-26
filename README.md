@@ -37,6 +37,19 @@ This is an experiment: the normal keyword parser stays the default and is
 unchanged. Please try your usual "it didn't understand me" phrasings with
 laya on and tell me which suggestions read wrong.
 
+## KDE Plasma 6 panel widget (new, optional)
+
+pawline-plasmoid.tar.gz is a Plasma 6 panel widget: a small icon with a
+status dot (grey off, green open, cyan working, yellow needs confirmation),
+hover for the text, click to open or close Pawline. Install:
+
+    kpackagetool6 --type Plasma/Applet --install pawline-plasmoid.tar.gz
+
+Then right-click the panel, "Add Widgets", find "Pawline", drag it in.
+NOT RUNTIME-TESTED: the build sandbox has no Plasma session. The widget is
+statically checked only - please do the 30-second check in the repo's
+integrations/README.md and tell me if the dot never leaves grey.
+
 # Pawline v0.3.0-test.3 - test binaries (pre-release)
 
 Test builds of commit 49042aa (successor line, on top of v0.3.0-test.2).
