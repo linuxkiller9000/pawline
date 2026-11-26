@@ -436,7 +436,20 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             state.online_pending = None;
             if matches!(low, "new chat" | "new conversation") {
                 state.chat = Default::default();
+                // Must RETURN here: "new" is a create verb, so falling through would make a file
+                // called "conversation" (found 2026-11-26, item 19). The "clearchat" kind lets the
+                // window clear its view; terminal mode just prints the text.
+                return reply(
+                    "clearchat",
+                    "New conversation started. I remember none of the earlier lines, and none of them can trigger anything now. Nothing was sent or deleted.".into(),
+                );
             }
+            // Also return for the forget phrases: the chat engine's own forget reply is bypassed
+            // because these lines were already cleared above; saying so twice would confuse.
+            return reply(
+                "message",
+                "This chat is forgotten: its lines are cleared from memory and none of them can trigger anything now. Nothing was sent or deleted.".into(),
+            );
         }
         if matches!(low, "chat online" | "start online chat" | "turn on online chat" | "online chat" | "chat online on") {
             state.online_chat = true;
@@ -1657,6 +1670,27 @@ mod memory_tests {
     }
 
     #[test]
+    fn new_conversation_never_creates_a_file() {
+        // Regression (2026-11-26): "new" is a create verb, so a fall-through made a file called
+        // "conversation". The command must only clear conversation state.
+        let root = org_root("newconv");
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "new conversation");
+        assert_eq!(r.kind, "clearchat", "{}", r.text);
+        assert!(r.text.contains("Nothing was sent or deleted"), "{}", r.text);
+        let mut names: Vec<String> = std::fs::read_dir(&root).unwrap().flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+        names.sort();
+        assert_eq!(names, vec!["Downloads"], "nothing may be created: {names:?}");
+        assert!(st.pending.is_none(), "no plan may be pending");
+        let r = handle_text(&mut st, "forget our chat");
+        assert_eq!(r.kind, "message", "{}", r.text);
+        assert!(r.text.contains("forgotten"), "{}", r.text);
+        let mut names: Vec<String> = std::fs::read_dir(&root).unwrap().flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+        names.sort();
+        assert_eq!(names, vec!["Downloads"], "nothing may be created: {names:?}");
+    }
+
+    #[test]
     fn generated_pictures_are_labelled_ai_and_unchecked() {
         // Unit test of the exact formatter both completion arms use (behavioural coverage of the
         // full generate flow would need a stubbed HTTP engine; the consent card is tested separately).
@@ -2014,7 +2048,28 @@ mod memory_tests {
         let mut st = new_state(root.clone());
         assert_eq!(handle_text(&mut st, "shrink long.mp4").kind, "confirm");
         let h = std::thread::spawn(move || confirm_exec(&mut st));
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Cancel must land DURING the encode, not during the probe that precedes it: a fixed sleep
+        // races the probe on loaded machines and flaked (2026-11-26). The encode's output is an
+        // unnamed (O_TMPFILE) file by design, so nothing appears in the folder; watch /proc for the
+        // encode's own ffmpeg child (the libx264 one, not mkvideo's mpeg4 one) instead.
+        let our_pid = std::process::id().to_string();
+        let encode_running = || {
+            std::fs::read_dir("/proc").into_iter().flatten().flatten().any(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                if !name.chars().all(|c| c.is_ascii_digit()) {
+                    return false;
+                }
+                let ppid_ok = std::fs::read_to_string(format!("/proc/{name}/stat"))
+                    .map(|st| st.rsplit(") ").next().and_then(|rest| rest.split_whitespace().nth(1).map(|p| p == our_pid)).unwrap_or(false))
+                    .unwrap_or(false);
+                ppid_ok && std::fs::read_to_string(format!("/proc/{name}/cmdline")).map(|c| c.contains("libx264")).unwrap_or(false)
+            })
+        };
+        let started = (0..2000).find(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            encode_running()
+        });
+        assert!(started.is_some(), "the encode never started (no libx264 ffmpeg child seen)");
         request_cancel();
         let r = h.join().unwrap();
         assert!(r.text.contains("Cancelled"), "{}", r.text);

@@ -1192,6 +1192,37 @@ impl App {
         }
     }
 
+    /// "New conversation": drop every bubble but the welcome line. The saved history file is NOT
+    /// erased silently: with history ON its earlier lines are moved aside to a dated archive name
+    /// first, so nothing the user chose to keep is lost (item 19).
+    fn clear_conversation_view(&mut self) {
+        let mut note: Option<String> = None;
+        if self.settings.keep_history {
+            if let Some(p) = history_path() {
+                if p.exists() {
+                    let stamp = {
+                        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                        format!("history-archived-{t}.txt")
+                    };
+                    let dest = p.with_file_name(stamp.clone());
+                    match std::fs::rename(&p, &dest) {
+                        Ok(()) => note = Some(format!("Your saved conversation was kept as {stamp} in the Pawline data folder; it is not loaded again. Delete it there if you don't want it.")),
+                        Err(e) => note = Some(format!("Could not move the saved conversation aside ({e}); it stays as it was and will still load next time.")),
+                    }
+                }
+            }
+            self.hist_from = 1; // only the welcome line remains, and it is never saved
+        } else {
+            self.hist_from = 1;
+        }
+        self.msgs.clear();
+        self.msgs.push(Msg { user: false, kind: "welcome".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it. Right-click a message (or Ctrl+R) to reply to it.".into(), thumb: None, quote: None });
+        if let Some(n) = note {
+            self.msgs.push(Msg { user: false, kind: "restored".into(), md: false, text: n, thumb: None, quote: None });
+        }
+        self.scroll = 0.0;
+    }
+
     fn persist_history(&mut self) {
         if !self.settings.keep_history {
             return;
@@ -1735,6 +1766,9 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
 
     fn on_reply(&mut self, r: UiReply, preview: Vec<Vec<u8>>) {
         self.busy = false;
+        if r.kind == "clearchat" {
+            self.clear_conversation_view();
+        }
         self.push(false, &r.kind, r.text.clone(), None);
         if r.kind == "md" {
             if let Some(m) = self.msgs.last_mut() {
