@@ -1,4 +1,16 @@
 fn main() {
+
+    // Build-time integrity check (item 16/20): the committed weights must be byte-identical to the
+    // audited upstream artifact (docs/LICENSE-AUDIT.md, 2026-11-26). A swapped or corrupted
+    // needle3.cact fails the build loudly instead of shipping a wrong model.
+    if std::env::var("CARGO_CFG_TARGET_OS").is_ok_and(|t| t != "windows") {
+        use sha2::Digest;
+        let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/needle3.cact")).expect("needle3.cact missing");
+        let got = format!("{:x}", sha2::Sha256::digest(&bytes));
+        let want = "c9d915eca282ed42d1a09b143b592adb4cc6744ffe2d294adf5cfc5548170c38";
+        assert!(got == want, "needle3.cact sha256 mismatch: got {got}, want {want} (see docs/LICENSE-AUDIT.md)");
+        println!("cargo:rerun-if-changed=needle3.cact");
+    }
     // The Cactus runtime we ship is a Linux static library. Windows builds have no embedded assist: lib.rs provides
     // stubs that report it as unavailable, so nothing is linked here.
     if std::env::var("CARGO_CFG_TARGET_OS").is_ok_and(|t| t == "windows") {

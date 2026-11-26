@@ -81,6 +81,18 @@ impl Needle {
         Ok(Needle { handle })
     }
 
+    /// Test-only: try to load ARBITRARY bytes as if they were the weights, so the corruption
+    /// test can probe the runtime's validation without touching the known-good embedded bytes.
+    #[cfg(not(windows))]
+    #[doc(hidden)]
+    pub fn probe_load_for_test(bytes: &[u8]) -> Result<(), NeedleError> {
+        let h = unsafe { cactus_load(bytes.as_ptr(), bytes.len() as u64) };
+        if h < 0 {
+            return Err(NeedleError(format!("cactus_load: {}", last_error())));
+        }
+        Ok(())
+    }
+
     /// Propose tool calls for an input. Returns the runtime's JSON reply.
     pub fn propose(&self, input: &str, max_tokens: i32) -> Result<String, NeedleError> {
         let inp = CString::new(input).map_err(|e| NeedleError(e.to_string()))?;
