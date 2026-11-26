@@ -390,7 +390,7 @@ impl Validator {
 
         for d in directives {
             match d {
-                Directive::Create { kind, names, parent } => {
+                Directive::Create { kind, names, parent, parents } => {
                     // "make a folder called a in models": if "models" is a real folder, that is where it goes
                     // (the plan asks for a yes). Nothing found: the whole text stays the name, as before.
                     let (names_split, base_split) = self.split_in_destination(names, parent, &sim)?;
@@ -416,20 +416,40 @@ impl Validator {
                         let name = Self::apply_ext_hint(n, kind);
                         let path = self.normalize(&base.join(&name))?;
                         let path = self.real_confine(&path)?;
-                        // parent must exist on disk or earlier in this plan
+                        // The parent must exist on disk or earlier in this plan. Missing parents are
+                        // a friendly message naming the nearest missing folder, never a raw OS error;
+                        // "with parent folders" creates them as their own confirmed steps.
+                        let mut missing: Vec<PathBuf> = vec![];
                         let mut anc = path.parent().map(|p| p.to_path_buf());
                         while let Some(a) = anc {
                             if a.exists() || will_exist.contains(&a) || a == self.root {
                                 break;
                             }
+                            missing.push(a.clone());
                             let next = a.parent().map(|p| p.to_path_buf());
                             if next.as_deref() == Some(a.as_path()) || next.is_none() {
-                                return Err(PawError::Validation(format!(
-                                    "no such place: {}",
-                                    a.display()
-                                )));
+                                break;
                             }
                             anc = next;
+                        }
+                        if !missing.is_empty() && !parents {
+                            let kind_word = match kind {
+                                CreateKind::Dir => "folder",
+                                CreateKind::File { .. } => "file",
+                            };
+                            return Err(PawError::Validation(format!(
+                                "The folder {} does not exist yet, so nothing was created. To make the missing folder{} too, say: \"make a {} called {} in {} with parent folders\".",
+                                missing[0].display(),
+                                if missing.len() > 1 { "s" } else { "" },
+                                kind_word,
+                                n,
+                                missing[0].display()
+                            )));
+                        }
+                        for a in missing.iter().rev() {
+                            ops.push(Operation::CreateDir { path: a.clone() });
+                            sim.remember(a);
+                            will_exist.insert(a.clone());
                         }
                         if path.exists() && !will_exist.contains(&path) {
                             return Err(PawError::Validation(format!(

@@ -475,6 +475,13 @@ fn clean_loc_words(s: &str) -> String {
 /// "make a file inside pawline", "create files a.py, b.py in pawline": no "called".
 /// Explicit dotted file names are taken as typed. Anything else asks a specific question;
 /// names and contents are never invented.
+fn with_parents(parents: bool) -> impl Fn(Directive) -> Directive {
+    move |d| match d {
+        Directive::Create { kind, names, parent, .. } => Directive::Create { kind, names, parent, parents },
+        other => other,
+    }
+}
+
 fn parse_create_bare(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawError> {
     let words: Vec<&str> = cmd.split_whitespace().collect();
     let mut i = 1;
@@ -512,6 +519,7 @@ fn parse_create_bare(cmd: &str, base: Option<LocationRef>) -> Result<Directive, 
             kind: CreateKind::File { ext_hint: None },
             names,
             parent: loc.or(base).unwrap_or(LocationRef::CurrentDir),
+            parents: false,
         });
     }
     let place = match loc.as_ref().or(base.as_ref()) {
@@ -525,14 +533,27 @@ fn parse_create_bare(cmd: &str, base: Option<LocationRef>) -> Result<Directive, 
 }
 
 /// Parse a create clause: "<verb> [a] [kind] [in <loc>] called|named <names>"
+/// Strip a trailing "with parent folders" style ask: create the missing folders above too.
+fn strip_parents_suffix(cmd: &str) -> (&str, bool) {
+    let t = cmd.trim_end_matches(['.', '!', ' ']);
+    let l = t.to_ascii_lowercase();
+    for s in [" with parent folders", " with parent directories", " with parents", " and parent folders", " and parents"] {
+        if let Some(p) = l.strip_suffix(s) {
+            return (&cmd[..p.len()], true);
+        }
+    }
+    (cmd, false)
+}
+
 fn parse_create(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawError> {
+    let (cmd, parents) = strip_parents_suffix(cmd);
     let lc = cmd.to_ascii_lowercase();
     // Split on the keyword found case-insensitively, but keep the user's own
     // letters on both sides (a folder called "Pets" is not "pets").
     let split_at = |kw: &str| lc.find(kw).map(|i| (cmd[..i].to_string(), cmd[i + kw.len()..].to_string()));
     let (names_part, before_names) = match split_at(" called ").or_else(|| split_at(" named ")) {
         Some((b, n)) => (n, b),
-        None => return parse_create_bare(cmd, base),
+        None => return parse_create_bare(cmd, base).map(with_parents(parents)),
     };
 
     // Kind and optional inline location live in the part before "called".
@@ -595,6 +616,7 @@ fn parse_create(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawEr
         kind,
         names,
         parent: loc.or(trailing_loc.take()).or(base).unwrap_or(LocationRef::CurrentDir),
+        parents,
     })
 }
 
@@ -893,14 +915,14 @@ mod file_request_tests {
     #[test]
     fn explicit_names_inside_a_folder() {
         for s in ["make a file called a.py inside pawline", "inside pawline make a file called a.py", "make a file a.py in pawline"] {
-            assert_eq!(parse(s).unwrap(), vec![Directive::Create { kind: CreateKind::File { ext_hint: None }, names: vec!["a.py".into()], parent: LocationRef::Named("pawline".into()) }], "{s}");
+            assert_eq!(parse(s).unwrap(), vec![Directive::Create { kind: CreateKind::File { ext_hint: None }, names: vec!["a.py".into()], parent: LocationRef::Named("pawline".into()), parents: false }], "{s}");
         }
-        assert_eq!(parse("create files a.py, b.py in pawline").unwrap(), vec![Directive::Create { kind: CreateKind::File { ext_hint: None }, names: vec!["a.py".into(), "b.py".into()], parent: LocationRef::Named("pawline".into()) }]);
+        assert_eq!(parse("create files a.py, b.py in pawline").unwrap(), vec![Directive::Create { kind: CreateKind::File { ext_hint: None }, names: vec!["a.py".into(), "b.py".into()], parent: LocationRef::Named("pawline".into()), parents: false }]);
         assert_eq!(parse("make files a.py, b.py inside the pawline folder").unwrap().len(), 1);
     }
     #[test]
     fn names_with_in_stay_names() {
-        assert_eq!(parse("make a folder called lost in space").unwrap(), vec![Directive::Create { kind: CreateKind::Dir, names: vec!["lost in space".into()], parent: LocationRef::CurrentDir }]);
+        assert_eq!(parse("make a folder called lost in space").unwrap(), vec![Directive::Create { kind: CreateKind::Dir, names: vec!["lost in space".into()], parent: LocationRef::CurrentDir, parents: false }]);
     }
     #[test]
     fn nameless_file_asks_and_invents_nothing() {

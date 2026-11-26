@@ -450,7 +450,15 @@ impl ExecutionBackend for DirectFsBackend {
             Operation::CreateDir { path } => {
                 let rel = self.rel(path)?;
                 self.tracked("create_dir", self.rel_str(path)?, None, |_| {
-                    self.root.create_dir(&rel)?;
+                    self.root.create_dir(&rel).map_err(|e| match e.kind() {
+                        // Backstop: the validator already names a missing parent; a race (removed
+                        // between plan and run) still never shows a raw OS error.
+                        std::io::ErrorKind::NotFound => PawError::Validation(format!(
+                            "The folder {} does not exist yet, so nothing was created.",
+                            path.parent().map(|p| p.display().to_string()).unwrap_or_else(|| "?".into())
+                        )),
+                        _ => PawError::Exec(e.to_string()),
+                    })?;
                     Ok(((), None))
                 })?;
                 Ok(done(op, "folder created"))
@@ -466,6 +474,11 @@ impl ExecutionBackend for DirectFsBackend {
                         .map_err(|e| {
                             if e.kind() == std::io::ErrorKind::AlreadyExists {
                                 PawError::Validation(format!("{} already exists", path.display()))
+                            } else if e.kind() == std::io::ErrorKind::NotFound {
+                                PawError::Validation(format!(
+                                    "The folder {} does not exist yet, so nothing was created.",
+                                    path.parent().map(|p| p.display().to_string()).unwrap_or_else(|| "?".into())
+                                ))
                             } else {
                                 PawError::Exec(e.to_string())
                             }

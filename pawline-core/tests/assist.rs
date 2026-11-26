@@ -41,8 +41,7 @@ fn assist_fills_parser_gaps() {
         reply: Ok(vec![Directive::Create {
             kind: CreateKind::Dir,
             names: vec!["sparkly".into()],
-            parent: LocationRef::CurrentDir,
-        }]),
+            parent: LocationRef::CurrentDir, parents: false }]),
     };
     let backend = DirectFsBackend::new(&root).unwrap();
     // Model-proposed creates wait for the user's yes like everything else
@@ -97,8 +96,7 @@ fn assist_cannot_escape_root() {
             reply: Ok(vec![Directive::Create {
                 kind: CreateKind::Dir,
                 names: vec![evil.into()],
-                parent: LocationRef::CurrentDir,
-            }]),
+                parent: LocationRef::CurrentDir, parents: false }]),
         };
         let r = engine.plan_with("conjure something", Some(&mock));
         // The validator must either refuse outright or, for a bare-ish name
@@ -173,7 +171,7 @@ fn confidently_wrong_proposals_do_not_execute() {
         // user asked something vague; model "confidently" creates a folder
         // they never named
         ("conjure something sparkly",
-         Directive::Create { kind: CreateKind::Dir, names: vec!["starlight".into()], parent: LocationRef::CurrentDir },
+         Directive::Create { kind: CreateKind::Dir, names: vec!["starlight".into()], parent: LocationRef::CurrentDir, parents: false },
          "starlight"),
         // model proposes deleting something the user never mentioned
         ("tidy things up",
@@ -226,8 +224,7 @@ fn confirmed_assist_plan_executes_as_shown() {
         reply: Ok(vec![Directive::Create {
             kind: CreateKind::Dir,
             names: vec!["starlight".into()],
-            parent: LocationRef::CurrentDir,
-        }]),
+            parent: LocationRef::CurrentDir, parents: false }]),
     };
     let backend = DirectFsBackend::new(&root).unwrap();
 
@@ -310,7 +307,7 @@ impl Assist for LateCreate {
     fn propose(&self, _input: &str) -> Result<Vec<Directive>, PawError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         std::thread::sleep(self.delay);
-        Ok(vec![Directive::Create { kind: CreateKind::Dir, names: vec!["late".into()], parent: LocationRef::CurrentDir }])
+        Ok(vec![Directive::Create { kind: CreateKind::Dir, names: vec!["late".into()], parent: LocationRef::CurrentDir, parents: false }])
     }
 }
 

@@ -21,7 +21,7 @@ pub enum SearchEngine {
 /// One parsed directive before paths are resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Directive {
-    Create { kind: CreateKind, names: Vec<String>, parent: LocationRef },
+    Create { kind: CreateKind, names: Vec<String>, parent: LocationRef, parents: bool },
     Delete { target: LocationRef },
     Rename { target: LocationRef, new_name: String },
     Move { target: LocationRef, dest: LocationRef },
