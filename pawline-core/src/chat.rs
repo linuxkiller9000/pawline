@@ -104,6 +104,10 @@ fn tok_is(tok: &str, word: &str) -> bool {
     n >= 5 && tok.chars().count() >= 4 && distance(tok, word) <= if n >= 8 { 2 } else { 1 }
 }
 
+fn you_like(t: &str) -> bool {
+    matches!(t, "you" | "yuo" | "yu" | "ya" | "u" | "uoy")
+}
+
 fn has_word(toks: &[&str], word: &str) -> bool {
     toks.iter().any(|t| tok_is(t, word))
 }
@@ -312,10 +316,16 @@ impl ChatState {
                 None => Outcome::Reply("Another what? I can do a joke or a hint. Say \"joke\" or \"hint\".".into()),
             };
         }
-        if (toks.len() <= 6 && (has_word(toks, "joke") || has_word(toks, "jokes"))) || n.contains("make me laugh") || n.contains("something funny") {
+        let joke_lead = toks.len() <= 2
+            || toks.first().is_some_and(|t| matches!(*t, "tell" | "tel" | "tlel" | "tll" | "got" | "any" | "know" | "give" | "say" | "have" | "hear" | "wanna" | "want" | "need" | "crack" | "one" | "another" | "more" | "please" | "can" | "could" | "do" | "a" | "joke" | "jokes" | "lets" | "let's"))
+            || (toks.first() == Some(&"i") && toks.get(1).is_some_and(|t| matches!(*t, "want" | "need" | "wanna" | "would")));
+        let funny = has_word(toks, "something") && has_word(toks, "funny") && toks.len() <= 5;
+        if (toks.len() <= 6 && joke_lead && (has_word(toks, "joke") || has_word(toks, "jokes"))) || n.contains("make me laugh") || funny {
             return Outcome::Reply(self.joke());
         }
         if (toks.len() <= 4 && (has_word(toks, "hint") || has_word(toks, "hints") || has_word(toks, "tips") || has_word(toks, "tip")))
+            || ((2..=3).contains(&toks.len()) && toks.first().is_some_and(|t| *t != "help" && tok_is(t, "help")))
+            || matches!(n, "what can you do" | "what can you do for me" | "what do you do" | "any ideas" | "give me an idea" | "give me ideas" | "what should i try" | "what can i ask")
             || n.contains("give me a hint")
             || n.contains("any tips")
             || n.contains("how do i use you")
@@ -338,14 +348,14 @@ impl ChatState {
         // 7. Small talk.
         let short = toks.len() <= 6;
         if short
-            && (n.contains("how are you") || n.contains("how r u") || n.contains("how are u") || n == "how are things" || n.contains("how's it going") || n.contains("hows it going") || n == "what's up" || n == "whats up" || n == "sup")
+            && (n.contains("how are you") || (toks.len() == 3 && toks[0] == "how" && toks[1] == "are" && you_like(toks[2])) || n.contains("how r u") || n.contains("how are u") || n == "how are things" || n.contains("how's it going") || n.contains("hows it going") || n == "what's up" || n == "whats up" || n == "sup")
         {
             return Outcome::Reply("Doing fine, thanks for asking. Ready when you are. I can make and tidy files, open apps, check the weather, search, do math and make slides. Say \"hint\" for an idea or \"joke\" for a laugh.".into());
         }
-        if short && (n.contains("who are you") || n.contains("what are you") || n.contains("your name") || n.contains("what is pawline") || n.contains("what's pawline")) {
+        if short && (n.contains("who are you") || (toks.len() >= 3 && toks[toks.len() - 3..toks.len() - 1] == ["who", "are"] && you_like(toks[toks.len() - 1])) || n.contains("what are you") || n.contains("your name") || n.contains("what is pawline") || n.contains("what's pawline")) {
             return Outcome::Reply("I'm Pawline, a small assistant for this computer. I do files, apps, weather, search, math and slides here, and I ask before I change anything. I can chat a little offline, and open conversation online needs your OK first.".into());
         }
-        if short && (toks.iter().any(|t| matches!(*t, "thanks" | "thank" | "thansk" | "thnks" | "thanx" | "thnx" | "thankyou" | "thanls" | "thamks" | "tanks")) || n == "thx" || n == "ty" || n.contains("thank you") || n.contains("cheers")) && !toks.iter().any(|t| is_action_word(t)) {
+        if short && ([toks.first(), toks.last()].iter().flatten().any(|t| matches!(**t, "thanks" | "thank" | "thansk" | "thnks" | "thanx" | "thnx" | "thankyou" | "thanls" | "thamks" | "tanks" | "thnaks" | "thnkas" | "thaks" | "thakns" | "thnak")) || n == "thx" || n == "ty" || n.contains("thank you") || n.contains("cheers")) && !toks.iter().any(|t| is_action_word(t)) {
             return Outcome::Reply("You're welcome.".into());
         }
         if short && (matches!(n, "bye" | "goodbye" | "good bye" | "see you" | "see ya" | "later" | "good night" | "goodnight" | "night" | "cya") || has_word(toks, "goodbye")) {

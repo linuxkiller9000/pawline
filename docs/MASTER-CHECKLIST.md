@@ -20,7 +20,7 @@ Legend: DONE = done for the scope written, not hardware-verified. PARTIAL = some
 | 6 | Weather and Q&A | (old 6) | DONE in English |
 | 7 | Basic presentations | (old 9) | DONE as a checkpoint |
 | 8 | Typo tolerance | new | PARTIAL: command, weather, search and question words (docs/TYPOS.md) |
-| 9 | Conversation, hints and jokes | new | PARTIAL: offline English chat + opt-in online chat with exact-text cards built (see docs/CHAT.md); open: on-screen indicator, opt-in local history (15/19), Arabic (11), held-out chat tests |
+| 9 | Conversation, hints and jokes | new | DONE for session-only scope (accepted by main 3:35): offline chat, hints, jokes, opt-in online chat with exact-text card. Separate: persistent history (15/19), Arabic (11) |
 | 10 | Presentation extras | new | OPEN |
 | 11 | Arabic functionality | new | OPEN |
 | 12 | Voice/audio completion | new | OPEN (runtime gates) |
@@ -167,3 +167,8 @@ signing or release commitment without approval. Publishing needs the user's expl
 
 ## Tracked gaps (file safety, item 17)
 - Rename with a quoted name containing spaces (rename the folder "a b" to c) fails: the quotes become part of the name. Delete/remove with quoted names works since 2026-11-26.
+
+## Tracked cross-item notes (from main, 3:35)
+- 14 privacy: claims for the earlier GET routes (Q&A, deck draft, search) and the new POST chat route must be stated per route, not generalized from one. The privacy facts on the chat card come from pollinations.ai/privacy (2026-11-17) only.
+- 18 performance: debug-build GUI typing latency is slow (long input redraw); measure and fix, no performance claim yet.
+- 21/25: provider terms and privacy pages must be read in full before release; the 2026-11-26 read was a skim (no full legal review claimed).

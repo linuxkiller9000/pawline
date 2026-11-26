@@ -1,3 +1,5 @@
+> NOTE: the roadmap numbering in this file is outdated. The master numbering (1-29) and statuses live in docs/MASTER-CHECKLIST.md.
+
 # Typo tolerance (roadmap step 8)
 
 Scope: misspelled COMMAND WORDS only (pawline-core/src/typo.rs). Local, deterministic, no model, no network.
@@ -39,3 +41,11 @@ Tests: `cargo test -p pawline-core typo` (a 26-sentence typo list plus names/tie
 16 final integration and packaging (old 10), 27 documentation (install, build, offline behaviour, platforms and limits, troubleshooting,
 clean uninstall from a verified inventory, user documents kept by default), 28 real-world testing (normal and wrong/ambiguous commands, long sessions,
 offline, after reboot, on the actual N5010 - a VM does not replace it). 27 and 28 are closeout gates; numbers 17-26 are not used.
+
+
+## Chat typo coverage (held-out, 2026-11-26)
+pawline-core/tests/chat_heldout.rs: 22 typo/phrase positives and 15 negative controls written after chat.rs, before any tuning.
+First run: 13/22 positives, 4 negatives wrongly triggered ("the jokes on you", "that was a thin joke book", "my friend tells jokes", "i like thanks giving").
+After fixing (joke needs a request form; thanks must be first or last word; added a few swap typos): 19/22 positives, 0/15 negatives. After tuning this set is regression only.
+Known misses: "how do i delte a folder" and "how can i reanme a file" (typo'd action word in a how-to) get the safe "discussion" reply instead of the hint; "tel me a joke please" was fixed by adding "tel".
+Voice: transcripts only fill the draft box; sending goes through the same typo gate as typed text, so a misheard command word is a suggestion, never a direct action. No voice-specific typo set exists yet (item 12).
