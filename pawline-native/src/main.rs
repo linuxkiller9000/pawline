@@ -1320,8 +1320,8 @@ impl App {
         let bar_y = self.input_box_top - 34.0;
         let bw = w - 2.0 * PAD + 4.0;
         let label = match &self.vstate {
-            VState::Listening { since, .. } => Some(format!("Listening {}:{:02}  (on this computer, not uploaded)", since.elapsed().as_secs() / 60, since.elapsed().as_secs() % 60)),
-            VState::Working => Some("Turning speech into text on this computer...".to_string()),
+            VState::Listening { since, .. } => Some(voice::listening_label(since.elapsed().as_secs(), std::env::var_os("PAWLINE_REC_CMD").is_some())),
+            VState::Working => Some(voice::working_label(std::env::var_os("PAWLINE_STT_CMD").is_some()).to_string()),
             VState::Idle if self.speaking.is_some() => Some("Speaking...".to_string()),
             VState::Idle => None,
         };

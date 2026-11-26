@@ -222,6 +222,16 @@ pub fn accept_transcript(job: u64, current_job: u64, waiting: bool, mic_blocked:
     job == current_job && waiting && !mic_blocked
 }
 
+/// Status-bar wording. Only the built-in route may claim local handling; a custom command may do anything.
+pub fn listening_label(secs: u64, custom_rec: bool) -> String {
+    let t = format!("Listening {}:{:02}", secs / 60, secs % 60);
+    if custom_rec { format!("{t}  (custom recorder, unchecked)") } else { format!("{t}  (on this computer, not uploaded)") }
+}
+
+pub fn working_label(custom_stt: bool) -> &'static str {
+    if custom_stt { "Speech to text: custom command, unchecked..." } else { "Turning speech into text on this computer..." }
+}
+
 /// A private temp WAV path (not created yet): runtime dir if present, else temp dir.
 pub fn temp_wav() -> PathBuf {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -443,6 +453,14 @@ mod tests {
         assert!(!accept_transcript(2, 3, true, false), "older job");
         assert!(!accept_transcript(3, 3, false, false), "cancelled (no longer waiting)");
         assert!(!accept_transcript(3, 3, true, true), "mic blocked while transcribing");
+    }
+
+    #[test]
+    fn status_labels_claim_local_only_for_the_built_in_route() {
+        assert!(listening_label(61, false).contains("1:01") && listening_label(61, false).contains("not uploaded"));
+        assert!(!listening_label(5, true).contains("not uploaded") && listening_label(5, true).contains("not checked"));
+        assert!(working_label(false).contains("on this computer"));
+        assert!(!working_label(true).contains("on this computer") && working_label(true).contains("not checked"));
     }
 
     #[test]
