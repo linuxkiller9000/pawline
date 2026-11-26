@@ -146,13 +146,15 @@ impl DirectFsBackend {
         }
         let mut text = String::new();
         Read::take(&mut src, crate::deck::MAX_SOURCE + 1).read_to_string(&mut text).map_err(|_| PawError::Validation("the outline is not readable UTF-8 text".into()))?;
-        let (slides, rep) = crate::deck::compose(&text).map_err(PawError::Validation)?;
+        let rd = crate::deck::confined_image_reader(&self.root_path, from.parent().unwrap_or(&self.root_path));
+        let (slides, rep) = crate::deck::compose_with(&text, &rd).map_err(PawError::Validation)?;
         self.publish_deck(&slides, rep.theme, to, "The outline is untouched.")
     }
 
     /// The reviewed draft text (held in memory by the UI) as a new deck: same build and no-replace publish as `deck`.
     pub fn deck_text(&self, text: &str, to: &Path) -> Result<String, PawError> {
-        let (slides, rep) = crate::deck::compose(text).map_err(PawError::Validation)?;
+        let rd = crate::deck::confined_image_reader(&self.root_path, &self.root_path);
+        let (slides, rep) = crate::deck::compose_with(text, &rd).map_err(PawError::Validation)?;
         self.publish_deck(&slides, rep.theme, to, "It was written from the draft you reviewed.")
     }
 

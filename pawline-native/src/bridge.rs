@@ -835,11 +835,12 @@ fn deck_save_command(state: &mut UiState, input: &str) -> Option<UiReply> {
     let Some(text) = DECK_DRAFT.lock().unwrap().clone() else {
         return Some(reply("message", "There is no reviewed draft to save. Ask me to write a presentation about a topic first. Nothing was changed.".into()));
     };
-    let (slides, rep) = match pawline_core::deck::compose(&text) {
+    let home = std::fs::canonicalize(&state.root).unwrap_or_else(|_| state.root.clone());
+    let rd = pawline_core::deck::confined_image_reader(&home, &home);
+    let (slides, rep) = match pawline_core::deck::compose_with(&text, &rd) {
         Ok(s) => s,
         Err(e) => return Some(reply("failed", format!("I can't build that draft: {e}. Nothing was changed."))),
     };
-    let home = std::fs::canonicalize(&state.root).unwrap_or_else(|_| state.root.clone());
     let dir = if home.join("Documents").is_dir() { home.join("Documents") } else { home };
     let to = pawline_core::deck::output_in(&dir, &slides[0].title);
     let op = Operation::DeckText { text, to };
@@ -863,13 +864,14 @@ fn deck_command(state: &mut UiState, input: &str) -> Option<UiReply> {
                 Ok(m) if m.len() <= pawline_core::deck::MAX_SOURCE => std::fs::read_to_string(&from).unwrap_or_default(),
                 _ => return Some(reply("failed", format!("{} is too big or unreadable (limit 256 KB of text).", from.display()))),
             };
-            let (slides, rep) = match pawline_core::deck::compose(&text) {
+            let rd = pawline_core::deck::confined_image_reader(&home, from.parent().unwrap_or(&home));
+            let (slides, rep) = match pawline_core::deck::compose_with(&text, &rd) {
                 Ok(s) => s,
                 Err(e) => return Some(reply("failed", format!("I can't make slides from {}: {e}. Nothing was changed.", from.display()))),
             };
             let to = pawline_core::deck::output_for(&from);
             let op = Operation::Deck { from, to };
-            let titles = slides.iter().enumerate().map(|(i, s)| format!("  {}. {} ({} line(s))", i + 1, s.title, s.bullets.len())).collect::<Vec<_>>().join("\n");
+            let titles = slides.iter().enumerate().map(|(i, s)| format!("  {}. {} ({} line(s)){}", i + 1, s.title, s.bullets.len(), s.image.as_ref().map(|im| format!("\n     [picture from {}: {} {}x{} px, {} KB. It is copied into the new .pptx; the original file is untouched]", im.path, if im.jpeg { "JPEG" } else { "PNG" }, im.w, im.h, im.data.len().div_ceil(1024))).unwrap_or_default())).collect::<Vec<_>>().join("\n");
             let summary = format!("1. {}\n{} slide(s) ({}):\n{titles}", op.describe(), slides.len(), rep.describe());
             state.pending = Some(Plan {
                 ops: vec![op],
@@ -1825,6 +1827,32 @@ mod memory_tests {
         let r = handle_text(&mut st, "make a presentation from bad.txt");
         assert!(r.kind == "failed" && r.text.contains("headings") && st.pending.is_none(), "{}", r.text);
         assert!(handle_text(&mut st, "make a presentation from a.png").kind == "message");
+    }
+
+    #[test]
+    fn presentation_with_a_picture_previews_it_reads_only_inside_home_and_writes_nothing_on_refusal() {
+        let root = org_root("deckpic");
+        let dl = root.join("Downloads");
+        let png: Vec<u8> = vec![137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 0, 0, 3, 1, 1, 0, 201, 254, 146, 239, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130];
+        std::fs::write(dl.join("dot.png"), &png).unwrap();
+        std::fs::write(dl.join("pic.md"), "# Talk\n## Dot\nimage: dot.png\n- a dot\n").unwrap();
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "make a presentation from pic");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(r.text.contains("[picture from dot.png: PNG 1x1 px") && r.text.contains("original file is untouched"), "{}", r.text);
+        assert!(!dl.join("pic.pptx").exists());
+        let d = confirm_exec(&mut st);
+        assert_eq!(d.kind, "executed", "{}", d.text);
+        let b = std::fs::read(dl.join("pic.pptx")).unwrap();
+        assert!(b.windows(png.len()).any(|w| w == &png[..]), "picture bytes are inside the pptx");
+        assert_eq!(std::fs::read(dl.join("dot.png")).unwrap(), png);
+        // outside home, missing, and not-a-picture: refused at preview, nothing planned or written
+        for (name, line) in [("out", "image: /etc/hostname"), ("gone", "image: nothere.png"), ("txt", "image: pic.md")] {
+            std::fs::write(dl.join(format!("{name}.md")), format!("# Talk\n## Dot\n{line}\n")).unwrap();
+            let r = handle_text(&mut st, &format!("make a presentation from {name}.md"));
+            assert!(r.kind == "failed" && r.text.contains("picture"), "{name}: {}", r.text);
+            assert!(!dl.join(format!("{name}.pptx")).exists());
+        }
     }
 
     #[test]

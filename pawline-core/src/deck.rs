@@ -24,6 +24,84 @@ pub struct Slide {
     pub table: Vec<Vec<String>>,
     /// `chart: bar|line|pie` under a slide draws the table's numbers as a native chart instead of a table.
     pub chart: Option<ChartKind>,
+    /// `image: <path>` under a slide places one picture the user chose (PNG or JPEG). Empty `data` = not read yet.
+    pub image: Option<ImageRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRef {
+    /// As written in the outline.
+    pub path: String,
+    pub data: Vec<u8>,
+    pub jpeg: bool,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// Reader for `compose_with`: `~/x` is under `home`, a relative path is under `base`, and the file is opened through a
+/// directory handle on `home` (no `..`, no symlink out of the home area). Only a plain file up to 5 MB is read.
+pub fn confined_image_reader(home: &Path, base: &Path) -> impl Fn(&str) -> Result<Vec<u8>, String> {
+    let (home, base) = (home.to_path_buf(), base.to_path_buf());
+    move |raw: &str| {
+        use std::io::Read;
+        let full = if let Some(r) = raw.strip_prefix("~/") { home.join(r) } else if raw.starts_with('/') { PathBuf::from(raw) } else { base.join(raw) };
+        let rel = full.strip_prefix(&home).map_err(|_| format!("{} is outside your home folder, so Pawline will not read it", full.display()))?;
+        let dir = cap_std::fs::Dir::open_ambient_dir(&home, cap_std::ambient_authority()).map_err(|e| e.to_string())?;
+        let mut f = dir.open(rel).map_err(|_| format!("{} can't be opened (missing, or it points outside your home folder)", full.display()))?.into_std();
+        let m = f.metadata().map_err(|e| e.to_string())?;
+        if !m.is_file() {
+            return Err(format!("{} is not a plain file", full.display()));
+        }
+        if m.len() > MAX_IMAGE as u64 {
+            return Err("the picture is bigger than 5 MB".into());
+        }
+        let mut d = vec![];
+        Read::take(&mut f, MAX_IMAGE as u64 + 1).read_to_end(&mut d).map_err(|e| e.to_string())?;
+        Ok(d)
+    }
+}
+
+pub const MAX_IMAGE: usize = 5 * 1024 * 1024;
+
+/// Check the bytes really are a PNG or JPEG of sane size and read their pixel size. Nothing else is accepted.
+pub fn sniff_image(d: &[u8]) -> Result<(bool, u32, u32), String> {
+    if d.len() > MAX_IMAGE {
+        return Err("the picture is bigger than 5 MB".into());
+    }
+    if d.len() > 24 && d.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) && &d[12..16] == b"IHDR" {
+        let w = u32::from_be_bytes([d[16], d[17], d[18], d[19]]);
+        let h = u32::from_be_bytes([d[20], d[21], d[22], d[23]]);
+        if w == 0 || h == 0 || w > 20000 || h > 20000 {
+            return Err("the PNG has an unusable size".into());
+        }
+        return Ok((false, w, h));
+    }
+    if d.len() > 4 && d[0] == 0xFF && d[1] == 0xD8 {
+        let mut i = 2;
+        while i + 9 < d.len() {
+            if d[i] != 0xFF {
+                i += 1;
+                continue;
+            }
+            let m = d[i + 1];
+            if m == 0xFF {
+                i += 1;
+                continue;
+            }
+            if (0xC0..=0xCF).contains(&m) && !matches!(m, 0xC4 | 0xC8 | 0xCC) {
+                let h = u16::from_be_bytes([d[i + 5], d[i + 6]]) as u32;
+                let w = u16::from_be_bytes([d[i + 7], d[i + 8]]) as u32;
+                if w == 0 || h == 0 || w > 20000 || h > 20000 {
+                    return Err("the JPEG has an unusable size".into());
+                }
+                return Ok((true, w, h));
+            }
+            let l = u16::from_be_bytes([d[i + 2], d[i + 3]]) as usize;
+            i += 2 + l.max(2);
+        }
+        return Err("the JPEG header could not be read".into());
+    }
+    Err("only PNG and JPEG pictures are supported (the file is neither)".into())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,8 +232,23 @@ fn take_theme(text: &str) -> Result<(Theme, String), String> {
 /// kept, only split, grouped and given titles). Outlines with "#" headings are used as written; plain paragraphs get
 /// one slide each; dense slides continue on a next slide instead of being refused or shrunk to unreadable text.
 pub fn compose(text: &str) -> Result<(Vec<Slide>, Report), String> {
+    compose_with(text, &|p| Err(format!("no place to read \"{p}\" from here")))
+}
+
+/// Like `compose`, and reads each `image:` picture through `read` (the caller confines it to the home area).
+pub fn compose_with(text: &str, read: &dyn Fn(&str) -> Result<Vec<u8>, String>) -> Result<(Vec<Slide>, Report), String> {
     let (theme, text) = take_theme(text)?;
-    let (slides, mut rep) = compose_inner(&text)?;
+    let (mut slides, mut rep) = compose_inner(&text)?;
+    for sl in slides.iter_mut() {
+        if let Some(im) = sl.image.as_mut() {
+            let d = read(&im.path).map_err(|e| format!("the picture \"{}\" on slide \"{}\" can't be used: {e}", im.path, sl.title))?;
+            let (jpeg, w, h) = sniff_image(&d).map_err(|e| format!("the picture \"{}\" on slide \"{}\" can't be used: {e}", im.path, sl.title))?;
+            im.data = d;
+            im.jpeg = jpeg;
+            im.w = w;
+            im.h = h;
+        }
+    }
     rep.theme = theme;
     Ok((slides, rep))
 }
@@ -172,8 +265,17 @@ fn compose_inner(text: &str) -> Result<(Vec<Slide>, Report), String> {
             content_titles.push(s.title.clone());
         }
         if i == 0 && s.bullets.len() <= 2 && s.table.is_empty() && first_is_title {
+            if s.image.is_some() {
+                return Err("the first (title) slide can't hold a picture. Put the image line under a \"## slide\" heading".into());
+            }
             out.push(s);
             continue;
+        }
+        if s.image.is_some() && !s.table.is_empty() {
+            return Err(format!("\"{}\" has both a picture and a table or chart. Put them on separate slides.", s.title));
+        }
+        if s.image.is_some() && (s.bullets.len() > 3 || s.bullets.iter().any(|(_, b)| b.chars().count() > SOFT_LINE)) {
+            return Err(format!("\"{}\" has a picture and too much text. A picture slide takes at most 3 short lines; move the rest to another slide", s.title));
         }
         if s.chart.is_some() && s.table.is_empty() {
             return Err(format!("\"{}\" has a chart line but no data. Put the numbers in a table under it: first column names, the other columns numbers", s.title));
@@ -187,6 +289,7 @@ fn compose_inner(text: &str) -> Result<(Vec<Slide>, Report), String> {
             out.push(s);
             continue;
         }
+        let img = s.image.clone();
         let mut groups: Vec<Vec<(u8, String)>> = vec![];
         for (lvl, b) in s.bullets {
             let parts = if lvl == 0 && b.chars().count() > SOFT_LINE { split_sentences(&b)? } else { vec![b] };
@@ -223,12 +326,12 @@ fn compose_inner(text: &str) -> Result<(Vec<Slide>, Report), String> {
             if title.chars().count() > MAX_TITLE_CHARS {
                 return Err(format!("the title \"{}...\" is too long once \"({}/{n})\" is added; shorten it", s.title.chars().take(30).collect::<String>(), k + 1));
             }
-            out.push(Slide { title, bullets: p, table: vec![], chart: None });
+            out.push(Slide { title, bullets: p, table: vec![], chart: None, image: if k == 0 { img.clone() } else { None } });
         }
     }
     // A Contents slide for longer talks: the original slide titles only (not continuations), after the title slide.
     if out.len() >= 5 && content_titles.len() >= 4 && content_titles.len() <= SLIDE_LINES + 2 {
-        out.insert(1, Slide { title: "Contents".into(), bullets: content_titles.into_iter().map(|t| (0, t)).collect(), table: vec![], chart: None });
+        out.insert(1, Slide { title: "Contents".into(), bullets: content_titles.into_iter().map(|t| (0, t)).collect(), table: vec![], chart: None, image: None });
         rep.agenda = true;
     }
     if out.len() > MAX_SLIDES {
@@ -299,10 +402,10 @@ fn parse_prose(text: &str) -> Result<Vec<Slide>, String> {
     let first = it.peek().unwrap();
     let ends = |l: &str| l.trim_end().ends_with(['.', '!', '?', ':', '\u{061F}']);
     if first.len() == 1 && first[0].chars().count() <= MAX_TITLE_CHARS && !ends(first[0]) {
-        slides.push(Slide { title: first[0].to_string(), bullets: vec![], table: vec![], chart: None });
+        slides.push(Slide { title: first[0].to_string(), bullets: vec![], table: vec![], chart: None, image: None });
         it.next();
     } else {
-        slides.push(Slide { title: "Presentation".into(), bullets: vec![], table: vec![], chart: None });
+        slides.push(Slide { title: "Presentation".into(), bullets: vec![], table: vec![], chart: None, image: None });
     }
     for p in it {
         let bullet_like = |l: &str| l.starts_with("- ") || l.starts_with("* ") || l.starts_with("+ ");
@@ -313,7 +416,7 @@ fn parse_prose(text: &str) -> Result<Vec<Slide>, String> {
             let sents = split_sent(&all.replace(" - ", " "), false).unwrap_or_else(|_| vec![all.clone()]);
             prose_title(sents)
         };
-        slides.push(Slide { title, bullets: rest, table: vec![], chart: None });
+        slides.push(Slide { title, bullets: rest, table: vec![], chart: None, image: None });
     }
     Ok(slides)
 }
@@ -400,14 +503,14 @@ pub fn parse_outline(text: &str) -> Result<Vec<Slide>, String> {
         if let Some(t) = line.strip_prefix("# ") {
             if !seen_title && slides.is_empty() {
                 seen_title = true;
-                slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None });
+                slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None, image: None });
                 continue;
             }
-            slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None });
+            slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None, image: None });
             continue;
         }
         if let Some(t) = line.strip_prefix("## ").or_else(|| line.strip_prefix("### ")) {
-            slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None });
+            slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None, image: None });
             continue;
         }
         let Some(cur) = slides.last_mut() else {
@@ -421,6 +524,17 @@ pub fn parse_outline(text: &str) -> Result<Vec<Slide>, String> {
                 "pie" => ChartKind::Pie,
                 other => return Err(format!("I don't know the chart type \"{other}\". Use chart: bar, chart: line or chart: pie")),
             });
+            continue;
+        }
+        if tl.len() >= 6 && tl.is_char_boundary(6) && tl[..6].eq_ignore_ascii_case("image:") {
+            if cur.image.is_some() {
+                return Err(format!("\"{}\" has two image lines. One picture per slide.", cur.title));
+            }
+            let p = tl[6..].trim().trim_matches('"');
+            if p.is_empty() {
+                return Err("an image line needs a file path, like image: ~/Pictures/cat.png".into());
+            }
+            cur.image = Some(ImageRef { path: p.to_string(), data: vec![], jpeg: false, w: 0, h: 0 });
             continue;
         }
         if tl.starts_with('|') && tl.ends_with('|') && tl.len() >= 3 {
@@ -746,7 +860,24 @@ fn slide_xml(s: &Slide, is_title: bool) -> String {
         } else {
             { let z = body_size(&s.bullets); s.bullets.iter().map(|(l, b)| para_sz(*l as u32, b, z)).collect() }
         };
-        if s.table.is_empty() {
+        if let Some(im) = s.image.as_ref().filter(|i| !i.data.is_empty()) {
+            let mut y = 1500000i64;
+            if !s.bullets.is_empty() {
+                let h = 380000 * s.bullets.len() as i64 + 150000;
+                let paras: String = s.bullets.iter().map(|(l, b)| para_sz(*l as u32, b, 2000)).collect();
+                shapes.push_str(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Content\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"838200\" y=\"1500000\"/><a:ext cx=\"10515600\" cy=\"{h}\"/></a:xfrm></p:spPr><p:txBody><a:bodyPr><a:noAutofit/></a:bodyPr><a:lstStyle/>{paras}</p:txBody></p:sp>"));
+                y = 1500000 + h + 100000;
+            }
+            let (bw, bh) = (10515600i64, 6400000 - y);
+            let (mut cx, mut cy) = (bw, bw * im.h as i64 / im.w as i64);
+            if cy > bh {
+                cy = bh;
+                cx = bh * im.w as i64 / im.h as i64;
+            }
+            let x = 838200 + (bw - cx) / 2;
+            let name = im.path.rsplit('/').next().unwrap_or("picture");
+            shapes.push_str(&format!("<p:pic><p:nvPicPr><p:cNvPr id=\"5\" name=\"Picture\" descr=\"{}\"/><p:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"rId2\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>", esc(name)));
+        } else if s.table.is_empty() {
             shapes.push_str(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Content\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr><a:noAutofit/></a:bodyPr><a:lstStyle/>{paras}</p:txBody></p:sp>"));
         } else {
             let mut y = 1825625i64;
@@ -808,7 +939,7 @@ pub fn build_pptx(slides: &[Slide]) -> Vec<u8> {
 
 pub fn build_pptx_themed(slides: &[Slide], theme: Theme) -> Vec<u8> {
     let mut files: Vec<(String, Vec<u8>)> = vec![];
-    let mut ct = format!("{HDR}<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Default Extension=\"xlsx\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\"/><Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/><Override PartName=\"/ppt/slideMasters/slideMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml\"/><Override PartName=\"/ppt/slideLayouts/slideLayout1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/><Override PartName=\"/ppt/slideLayouts/slideLayout2.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/><Override PartName=\"/ppt/theme/theme1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.theme+xml\"/>");
+    let mut ct = format!("{HDR}<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Default Extension=\"png\" ContentType=\"image/png\"/><Default Extension=\"jpeg\" ContentType=\"image/jpeg\"/><Default Extension=\"xlsx\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\"/><Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/><Override PartName=\"/ppt/slideMasters/slideMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml\"/><Override PartName=\"/ppt/slideLayouts/slideLayout1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/><Override PartName=\"/ppt/slideLayouts/slideLayout2.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/><Override PartName=\"/ppt/theme/theme1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.theme+xml\"/>");
     for i in 1..=slides.len() {
         ct.push_str(&format!("<Override PartName=\"/ppt/slides/slide{i}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>"));
     }
@@ -847,6 +978,11 @@ pub fn build_pptx_themed(slides: &[Slide], theme: Theme) -> Vec<u8> {
             files.push((format!("ppt/charts/chart{n}.xml"), chart_xml(s).into_bytes()));
             files.push((format!("ppt/charts/_rels/chart{n}.xml.rels"), rels(&[("rId1".into(), "package", format!("../embeddings/Microsoft_Excel_Sheet{n}.xlsx"))]).into_bytes()));
             files.push((format!("ppt/embeddings/Microsoft_Excel_Sheet{n}.xlsx"), chart_xlsx(s)));
+        }
+        if let Some(im) = s.image.as_ref().filter(|i| !i.data.is_empty()) {
+            let ext = if im.jpeg { "jpeg" } else { "png" };
+            sr.push(("rId2".into(), "image", format!("../media/image{n}.{ext}")));
+            files.push((format!("ppt/media/image{n}.{ext}"), im.data.clone()));
         }
         files.push((format!("ppt/slides/_rels/slide{n}.xml.rels"), rels(&sr).into_bytes()));
     }
@@ -1110,6 +1246,9 @@ pub fn review_text(slides: &[Slide], rep: &Report) -> String {
         }
         if let Some(k) = sl.chart {
             s.push_str(&format!("  [{} chart drawn from this table; the numbers are exactly the ones below]\n", match k { ChartKind::Bar => "bar", ChartKind::Line => "line", ChartKind::Pie => "pie" }));
+        }
+        if let Some(im) = &sl.image {
+            s.push_str(&format!("  [picture from {}: {} {}x{} px, {} KB, placed as is, with the file name as its alt text]\n", im.path, if im.jpeg { "JPEG" } else { "PNG" }, im.w, im.h, im.data.len().div_ceil(1024)));
         }
         for (ri, r) in sl.table.iter().enumerate() {
             s.push_str(&format!("  | {} |{}\n", r.join(" | "), if ri == 0 { "  (table header)" } else { "" }));
@@ -1461,6 +1600,108 @@ mod tests {
         for th in ["light", "dark"] {
             let (sl, r) = compose(&format!("theme: {th}\n{C}")).unwrap();
             std::fs::write(format!("/tmp/deck/charts/{th}.pptx"), build_pptx_themed(&sl, r.theme)).unwrap();
+        }
+    }
+
+    fn tiny_png(w: u32, h: u32) -> Vec<u8> {
+        let mut raw = vec![];
+        for y in 0..h {
+            raw.push(0u8);
+            for x in 0..w {
+                raw.extend_from_slice(&[(x * 255 / w) as u8, (y * 255 / h) as u8, 120]);
+            }
+        }
+        let (mut a, mut b) = (1u32, 0u32);
+        for v in &raw {
+            a = (a + *v as u32) % 65521;
+            b = (b + a) % 65521;
+        }
+        let mut z = vec![0x78, 0x01];
+        let n = raw.len();
+        z.push(1);
+        z.extend_from_slice(&(n as u16).to_le_bytes());
+        z.extend_from_slice(&(!(n as u16)).to_le_bytes());
+        z.extend_from_slice(&raw);
+        z.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        let chunk = |t: &[u8; 4], d: &[u8]| {
+            let mut c = (d.len() as u32).to_be_bytes().to_vec();
+            let mut td = t.to_vec();
+            td.extend_from_slice(d);
+            c.extend_from_slice(&td);
+            c.extend_from_slice(&crc32(&td).to_be_bytes());
+            c
+        };
+        let mut out = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        let mut ih = w.to_be_bytes().to_vec();
+        ih.extend_from_slice(&h.to_be_bytes());
+        ih.extend_from_slice(&[8, 2, 0, 0, 0]);
+        out.extend(chunk(b"IHDR", &ih));
+        out.extend(chunk(b"IDAT", &z));
+        out.extend(chunk(b"IEND", &[]));
+        out
+    }
+
+    fn home_with_png() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("pawline-img-{}-{:?}", std::process::id(), std::thread::current().id()).replace(['(', ')', ' '], ""));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("Pictures")).unwrap();
+        std::fs::write(d.join("Pictures/cat.png"), tiny_png(40, 30)).unwrap();
+        std::fs::write(d.join("Pictures/notes.png"), b"this is text, not a picture at all").unwrap();
+        d
+    }
+
+    #[test]
+    fn picture_slide_is_embedded_after_a_confined_read() {
+        let home = home_with_png();
+        let rd = confined_image_reader(&home, &home);
+        let (sl, rep) = compose_with("# T\n## Cat\nimage: ~/Pictures/cat.png\n- a cat\n", &rd).unwrap();
+        let im = sl[1].image.as_ref().unwrap();
+        assert_eq!((im.w, im.h, im.jpeg), (40, 30, false));
+        let b = build_pptx_themed(&sl, rep.theme);
+        let t = String::from_utf8_lossy(&b);
+        assert!(t.contains("ppt/media/image2.png") && t.contains("<p:pic>") && t.contains("descr=\"cat.png\"") && t.contains("../media/image2.png"));
+        assert!(review_text(&sl, &rep).contains("picture from ~/Pictures/cat.png: PNG 40x30 px"));
+        // relative to the outline's folder
+        let rd2 = confined_image_reader(&home, &home.join("Pictures"));
+        assert!(compose_with("# T\n## Cat\nimage: cat.png\n", &rd2).is_ok());
+    }
+
+    #[test]
+    fn picture_refusals_fail_closed() {
+        let home = home_with_png();
+        let rd = confined_image_reader(&home, &home);
+        let e = |o: &str| compose_with(o, &rd).unwrap_err();
+        assert!(e("# T\n## A\nimage: /etc/passwd\n").contains("outside your home"));
+        assert!(e("# T\n## A\nimage: ~/../etc/passwd\n").contains("can't be opened"));
+        assert!(e("# T\n## A\nimage: ~/Pictures/notes.png\n").contains("neither"));
+        assert!(e("# T\n## A\nimage: ~/Pictures/none.png\n").contains("can't be opened"));
+        assert!(e("# T\n## A\nimage: ~/Pictures\n").contains("not a plain file"));
+        assert!(e("# T\n## A\nimage: ~/Pictures/cat.png\nimage: ~/Pictures/cat.png\n").contains("two image lines"));
+        assert!(e("# T\n## A\nimage: ~/Pictures/cat.png\n| a | b |\n| 1 | 2 |\n").contains("separate slides"));
+        assert!(e("# T\n## A\nimage:\n").contains("needs a file path") || e("# T\n## A\nimage:   \n").contains("needs"));
+        std::fs::write(home.join("Pictures/big.png"), vec![0u8; MAX_IMAGE + 10]).unwrap();
+        assert!(e("# T\n## A\nimage: ~/Pictures/big.png\n").contains("5 MB"));
+        #[cfg(unix)]
+        {
+            let out = std::env::temp_dir().join(format!("pawline-outside-{}.png", std::process::id()));
+            std::fs::write(&out, tiny_png(4, 4)).unwrap();
+            std::os::unix::fs::symlink(&out, home.join("Pictures/link.png")).unwrap();
+            assert!(e("# T\n## A\nimage: ~/Pictures/link.png\n").contains("can't be opened"));
+        }
+        assert!(e("# T\nimage: ~/Pictures/cat.png\n").contains("title) slide"));
+        assert!(e("# T\n## A\nimage: ~/Pictures/cat.png\n- 1\n- 2\n- 3\n- 4\n").contains("too much text"));
+        // plain compose (used for AI-written drafts) never reads a file
+        assert!(compose("# T\n## A\nimage: ~/Pictures/cat.png\n").unwrap_err().contains("no place to read"));
+    }
+
+    #[test]
+    #[ignore]
+    fn write_image_sample() {
+        let home = std::path::PathBuf::from("/tmp/deck/img");
+        let rd = confined_image_reader(&home, &home);
+        for th in ["light", "dark"] {
+            let (sl, r) = compose_with(&format!("theme: {th}\n# Pics\n## PNG wide\nimage: ~/wide.png\n## JPEG tall with text\n- a caption line\nimage: ~/tall.jpg\n"), &rd).unwrap();
+            std::fs::write(format!("/tmp/deck/img/{th}.pptx"), build_pptx_themed(&sl, r.theme)).unwrap();
         }
     }
 }
