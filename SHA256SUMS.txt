@@ -1,2 +1,4 @@
 47ab2ea4ca7976279b3be73863b20246e7192d995c8ce70befd41c44fd38389b  pawline-v0.3.0-test.1-linux-x86_64
 3af9d12ead6c1be7971266c2d533563c47a1e342ebdf5e2ef1116f4c1bd428bd  pawline-v0.3.0-test.1-windows-x86_64.exe
+4eabaeab13536e79831e7c3d95b61555d28bcc36df6e7f5d0f396595c5e079bd  pawline-v0.3.0-test.2-linux-x86_64
+71bd310abeddb393fa0cedd508b2d67cde59015e052d375d77025e58dfb90c1e  pawline-v0.3.0-test.2-windows-x86_64.exe
