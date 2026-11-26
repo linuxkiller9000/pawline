@@ -16,13 +16,15 @@ audits mentioned in the docs are author-written.
     chmod +x pawline-v0.3.0-test.1-linux-x86_64
     ./pawline-v0.3.0-test.1-linux-x86_64
 
-## IMPORTANT: pre-AVX processors (e.g. Intel i3-370M)
-The embedded AI-model runtime contains AVX/AVX2/BMI instructions. On a
-pre-AVX processor the "AI suggestions (local model)" feature may crash with
-an illegal instruction. On first run: press Ctrl+comma to open Settings and
-set "AI suggestions (local model)" to OFF. With it off, that code never runs;
-everything else (commands, files, search, voice) does not use it. Turning it
-on and reporting whether it crashes is a wanted test.
+## Pre-AVX processors (e.g. Intel i3-370M): expected to work
+The embedded AI-model runtime contains AVX/AVX2/BMI instructions, but they are
+behind CPU dispatch: the full "AI suggestions (local model)" path was tested
+under qemu CPU emulation set to Westmere (the i3-370M's class) and completed a
+real inference without an illegal instruction. Emulation is not silicon, so
+the confirmation test is on the real machine: use it, and if AI suggestions
+ever crash with "illegal instruction", open Settings (Ctrl+comma), set
+"AI suggestions (local model)" to OFF (everything else keeps working) and
+report it.
 
 ## Source
 github.com/linuxkiller9000/pawline at tag v0.3.0-test.1 (GPL-3.0).
