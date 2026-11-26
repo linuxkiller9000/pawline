@@ -146,7 +146,7 @@ impl DirectFsBackend {
         }
         let mut text = String::new();
         Read::take(&mut src, crate::deck::MAX_SOURCE + 1).read_to_string(&mut text).map_err(|_| PawError::Validation("the outline is not readable UTF-8 text".into()))?;
-        let slides = crate::deck::parse_outline(&text).map_err(PawError::Validation)?;
+        let (slides, _) = crate::deck::compose(&text).map_err(PawError::Validation)?;
         let bytes = crate::deck::build_pptx(&slides);
         refuse_clobber(&self.root, &rt)?;
         self.tracked("copy", self.rel_str(to)?, None, |id| {

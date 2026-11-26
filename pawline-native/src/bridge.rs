@@ -637,14 +637,14 @@ fn deck_command(state: &mut UiState, input: &str) -> Option<UiReply> {
                 Ok(m) if m.len() <= pawline_core::deck::MAX_SOURCE => std::fs::read_to_string(&from).unwrap_or_default(),
                 _ => return Some(reply("failed", format!("{} is too big or unreadable (limit 256 KB of text).", from.display()))),
             };
-            let slides = match pawline_core::deck::parse_outline(&text) {
+            let (slides, rep) = match pawline_core::deck::compose(&text) {
                 Ok(s) => s,
                 Err(e) => return Some(reply("failed", format!("I can't make slides from {}: {e}. Nothing was changed.", from.display()))),
             };
             let to = pawline_core::deck::output_for(&from);
             let op = Operation::Deck { from, to };
             let titles = slides.iter().enumerate().map(|(i, s)| format!("  {}. {} ({} line(s))", i + 1, s.title, s.bullets.len())).collect::<Vec<_>>().join("\n");
-            let summary = format!("1. {}\n{} slide(s):\n{titles}", op.describe(), slides.len());
+            let summary = format!("1. {}\n{} slide(s) ({}):\n{titles}", op.describe(), slides.len(), rep.describe());
             state.pending = Some(Plan {
                 ops: vec![op],
                 needs_confirmation: true,
@@ -1392,7 +1392,7 @@ mod memory_tests {
         // a bad outline and a non-outline file never plan anything
         std::fs::write(dl.join("bad.txt"), "just words").unwrap();
         let r = handle_text(&mut st, "make a presentation from bad.txt");
-        assert!(r.kind == "failed" && r.text.contains("heading") && st.pending.is_none(), "{}", r.text);
+        assert!(r.kind == "failed" && r.text.contains("headings") && st.pending.is_none(), "{}", r.text);
         assert!(handle_text(&mut st, "make a presentation from a.png").kind == "message");
     }
 
