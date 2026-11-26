@@ -176,6 +176,40 @@ fn undo_survives_an_application_restart_for_delete_and_create_dir() {
     assert_eq!(std::fs::read(root.join("b.txt")).unwrap(), b"beta", "unrelated file untouched");
 }
 
+/// Restart: rename, move and copy undone from the journal by a brand-new Engine (15a).
+#[test]
+fn undo_survives_an_application_restart_for_rename_move_and_copy() {
+    let (root, mut e) = setup("restart-rmc");
+    let be = DirectFsBackend::new(&root).unwrap();
+    std::fs::write(root.join("old.txt"), b"rename-me").unwrap();
+    std::fs::create_dir(root.join("inbox")).unwrap();
+    std::fs::create_dir(root.join("dest")).unwrap();
+    std::fs::write(root.join("inbox/m.txt"), b"move-me").unwrap();
+    std::fs::write(root.join("c.txt"), b"copy-me").unwrap();
+    assert!(matches!(go(&mut e, &be, "rename old.txt to new.txt"), Response::Executed(_)), "rename");
+    assert!(matches!(go(&mut e, &be, "move inbox/m.txt to dest"), Response::Executed(_)), "move");
+    assert!(matches!(go(&mut e, &be, "copy c.txt to dest"), Response::Executed(_)), "copy");
+    assert!(root.join("new.txt").exists() && root.join("dest/m.txt").exists() && root.join("dest/c.txt").exists());
+    drop(e);
+    drop(be);
+
+    // New app instance over the same home: undo walks the journal newest-first.
+    let mut e2 = Engine::new(root.clone());
+    let be2 = DirectFsBackend::new(&root).unwrap();
+    assert!(be2.recovery_notes().is_empty(), "a clean exit leaves nothing to recover");
+    assert!(matches!(go(&mut e2, &be2, "undo"), Response::Executed(_)), "undo copy after restart");
+    assert!(!root.join("dest/c.txt").exists(), "copy removed");
+    assert_eq!(std::fs::read(root.join("c.txt")).unwrap(), b"copy-me", "copy source untouched");
+    assert!(matches!(go(&mut e2, &be2, "undo"), Response::Executed(_)), "undo move after restart");
+    assert_eq!(std::fs::read(root.join("inbox/m.txt")).unwrap(), b"move-me", "moved file put back");
+    assert!(!root.join("dest/m.txt").exists());
+    assert!(matches!(go(&mut e2, &be2, "undo"), Response::Executed(_)), "undo rename after restart");
+    assert_eq!(std::fs::read(root.join("old.txt")).unwrap(), b"rename-me", "renamed file put back");
+    assert!(!root.join("new.txt").exists());
+    let spent = e2.handle("undo", &be2, false);
+    assert!(matches!(&spent, Err(PawError::Validation(m)) if m.contains("nothing to undo")), "nothing left to undo says so");
+}
+
 /// A crash after the intent line but before the change: the next start settles it and says so.
 #[test]
 fn crash_after_intent_before_change_is_reported_at_next_start_and_leaves_no_partial_state() {
