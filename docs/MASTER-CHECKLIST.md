@@ -147,7 +147,7 @@ Status: OPEN. No update server exists; any version check is a network request an
 - Supported platforms and known limitations.
 - Troubleshooting guide.
 - How to uninstall cleanly without leaving unwanted files.
-Status: OPEN, drafted alongside the features. The uninstall guide is written from a verified inventory of the files, folders, models and settings Pawline
+Status: OPEN (PARTIAL draft in docs/USER-GUIDE-DRAFT.md), drafted alongside the features. The uninstall guide is written from a verified inventory of the files, folders, models and settings Pawline
 really creates; user-created documents are kept by default.
 
 ## 26. Real-world testing (user section 28)
