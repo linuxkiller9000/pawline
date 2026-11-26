@@ -234,3 +234,14 @@ Reading: the debug-build typing latency gap is real and large; release on this V
 - Item 18 slice 3 (sandbox VM 1 vCPU, Xvfb, release opt2 no LTO at 3f11f70, NOT the user's CPU): workload = opt-in history file of 100 messages x ~3990 chars (50 English, 50 Arabic, 558 KB, the app's own 100-message cap), history=on. Startup with it: first redraws 31-34 ms, RSS 22.6 MB. Typing 10 chars then 5 PageUp + 5 PageDown: 20 redraws at 30.4-32.9 ms (median ~31) vs ~5.9 ms with an empty chat. RSS after 22.8 MB. Screenshot /tmp/hist10kc.png shows Arabic lines rendered, RTL, not clipped.
   Repro: write /tmp/ad2/history.txt (lines "U|A<TAB>text") and ui-settings.txt with history=on; PAWLINE_PERF=1 PAWLINE_DATA=/tmp/ad2 pawline --open; xdotool type and PageUp/PageDown.
   Not measured: the 10k-line session-only chat beyond the 100-message cap, model load time/RSS (Needle model is compiled in; no separate load step measured), Wayland, battery, the user's CPU. A ~31 ms redraw on this VM may be several times slower on an old CPU; unmeasured there.
+
+### Item 19 status review (nothing new built; evidence per bullet, PARTIAL)
+- New/clear conversation: "new chat"/"forget our chat" (session lines). Covered by bridge tests.
+- Persistence: opt-in only, OFF by default, one Settings row, 100 messages x 4000 chars cap, unencrypted file disclosed (15b/15c, pixel proof hs150c, hist_restoredc).
+- Forget/delete: turning the row OFF deletes the file; "forget our chat" clears session lines. Per-conversation deletion does not exist (single conversation only).
+- Long-conversation limits: caps above; perf measured in item 18 slice 3 (~31 ms redraws at the cap, sandbox).
+- Old context causing actions: behavioural isolation test (16b); context never creates an action. Still open: multiple named conversations, export, search inside history.
+
+### Item 20 slice 1 (PARTIAL)
+- "reset settings" (also "restore defaults"): text size, theme, drift, spoken replies go back to defaults. Offline mode, mic block and saved-conversation switch are NOT changed and nothing is deleted (stated in the reply). Unit test (structural, author-written) plus GUI proof, release build at 8513133, Xvfb sandbox: Forest theme at 150% text with offline=on, mic=blocked became Dusk at 100%, file kept offline=on, mic=blocked (/tmp/rs0c.png before, /tmp/rs1c.png after).
+- Still open: adjustable voice/language, animation control beyond drift, AI behaviour switches, model download/remove/update/integrity (model is compiled in), settings surviving an update (no updater exists; file format is forward-tolerant: unknown lines ignored, bad values fall back).
