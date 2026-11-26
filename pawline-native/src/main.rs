@@ -2564,7 +2564,8 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
         if matches!(self.vstate, VState::Listening { .. }) {
             match e.keysym {
                 Keysym::Escape => self.cancel_listening(),
-                Keysym::Return | Keysym::KP_Enter => self.stop_listening(),
+                // Enter or F2 both stop and transcribe (F2 mirrors the mic button toggle).
+                Keysym::Return | Keysym::KP_Enter | Keysym::F2 => self.stop_listening(),
                 _ => {}
             }
             return;
@@ -2620,6 +2621,12 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
             return;
         }
         match e.keysym {
+            // F2 does what the mic button does: start or stop voice input (item 13 keyboard pass).
+            Keysym::F2 if self.confirm.is_none() => match self.vstate {
+                VState::Idle => self.start_listening(),
+                VState::Listening { .. } => self.stop_listening(),
+                VState::Working => {}
+            },
             Keysym::comma if self.ctrl && self.confirm.is_none() && !self.busy => {
                 self.settings_open = true;
                 self.settings_scroll = 0.0;
