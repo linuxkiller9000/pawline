@@ -32,3 +32,14 @@ Each entry: build + HEAD, environment, what ran, observed, evidence. Sandbox run
   (total answer time 33.7s) and was then disabled until restart (designed degradation; the message honestly says the
   stuck worker may still use CPU in the background). The plain parser then answered correctly and the app stayed responsive.
   No crash, no file writes. Consider a length gate before the assist so huge inputs skip it.
+
+## 2026-11-26 D offline / network loss (SANDBOX, terminal mode under a pty, debug build)
+- Offline mode ON (persisted ui-settings.txt): weather gets the refusal ("Offline mode is on... nothing was sent"),
+  NO disclosure card; local math unaffected. (This run exposed and we fixed terminal mode ignoring the setting; before the
+  fix the disclosure card still gated everything, so nothing was ever sent unapproved.)
+- True no-network start (unshare -rn, no interfaces): local math works; a weather request shows the disclosure card
+  FIRST (nothing sent pre-approval), and after a typed "yes" fails clean in 0.1s: "Could not reach the weather service
+  (Temporary failure in name resolution). Nothing was shown; check your connection and try again." No hang, no partial
+  writes (only the usual frequent-folders.json appeared). App fully responsive afterwards.
+- With network (control run through the same pty driver): card -> yes -> real geocoding reply with the place chooser.
+- Not covered: a connection dying MID-TRANSFER (both runs fail at lookup/connect time); reboot scenarios (E) open.
