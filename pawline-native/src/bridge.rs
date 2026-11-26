@@ -195,6 +195,7 @@ impl ExecutionBackend for UiBackend {
                 pawline_core::deck::author(&http, &t, cancelled, commit)
             })?;
             let (slides, rep) = pawline_core::deck::compose(&outline).map_err(PawError::Validation)?;
+            pawline_core::deck::reject_model_sources(&slides).map_err(PawError::Validation)?;
             let review = pawline_core::deck::review_text(&slides, &rep);
             if !deck_draft_finish(gen, outline) {
                 return Err(PawError::Exec("A newer request replaced this one. The older draft was discarded and nothing was kept.".into()));

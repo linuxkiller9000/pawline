@@ -26,6 +26,8 @@ pub struct Slide {
     pub chart: Option<ChartKind>,
     /// `image: <path>` under a slide places one picture the user chose (PNG or JPEG). Empty `data` = not read yet.
     pub image: Option<ImageRef>,
+    /// `source: <text or link>` is a note the USER wrote about where the slide's facts came from. Pawline never fetches or checks it.
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +62,8 @@ pub fn confined_image_reader(home: &Path, base: &Path) -> impl Fn(&str) -> Resul
         Ok(d)
     }
 }
+
+pub const MAX_SOURCE_NOTE: usize = 200;
 
 pub const MAX_IMAGE: usize = 5 * 1024 * 1024;
 
@@ -290,6 +294,7 @@ fn compose_inner(text: &str) -> Result<(Vec<Slide>, Report), String> {
             continue;
         }
         let img = s.image.clone();
+        let src = s.source.clone();
         let mut groups: Vec<Vec<(u8, String)>> = vec![];
         for (lvl, b) in s.bullets {
             let parts = if lvl == 0 && b.chars().count() > SOFT_LINE { split_sentences(&b)? } else { vec![b] };
@@ -326,12 +331,12 @@ fn compose_inner(text: &str) -> Result<(Vec<Slide>, Report), String> {
             if title.chars().count() > MAX_TITLE_CHARS {
                 return Err(format!("the title \"{}...\" is too long once \"({}/{n})\" is added; shorten it", s.title.chars().take(30).collect::<String>(), k + 1));
             }
-            out.push(Slide { title, bullets: p, table: vec![], chart: None, image: if k == 0 { img.clone() } else { None } });
+            out.push(Slide { title, bullets: p, table: vec![], chart: None, image: if k == 0 { img.clone() } else { None }, source: if k == 0 { src.clone() } else { None } });
         }
     }
     // A Contents slide for longer talks: the original slide titles only (not continuations), after the title slide.
     if out.len() >= 5 && content_titles.len() >= 4 && content_titles.len() <= SLIDE_LINES + 2 {
-        out.insert(1, Slide { title: "Contents".into(), bullets: content_titles.into_iter().map(|t| (0, t)).collect(), table: vec![], chart: None, image: None });
+        out.insert(1, Slide { title: "Contents".into(), bullets: content_titles.into_iter().map(|t| (0, t)).collect(), table: vec![], chart: None, image: None, source: None });
         rep.agenda = true;
     }
     if out.len() > MAX_SLIDES {
@@ -402,10 +407,10 @@ fn parse_prose(text: &str) -> Result<Vec<Slide>, String> {
     let first = it.peek().unwrap();
     let ends = |l: &str| l.trim_end().ends_with(['.', '!', '?', ':', '\u{061F}']);
     if first.len() == 1 && first[0].chars().count() <= MAX_TITLE_CHARS && !ends(first[0]) {
-        slides.push(Slide { title: first[0].to_string(), bullets: vec![], table: vec![], chart: None, image: None });
+        slides.push(Slide { title: first[0].to_string(), bullets: vec![], table: vec![], chart: None, image: None, source: None });
         it.next();
     } else {
-        slides.push(Slide { title: "Presentation".into(), bullets: vec![], table: vec![], chart: None, image: None });
+        slides.push(Slide { title: "Presentation".into(), bullets: vec![], table: vec![], chart: None, image: None, source: None });
     }
     for p in it {
         let bullet_like = |l: &str| l.starts_with("- ") || l.starts_with("* ") || l.starts_with("+ ");
@@ -416,7 +421,7 @@ fn parse_prose(text: &str) -> Result<Vec<Slide>, String> {
             let sents = split_sent(&all.replace(" - ", " "), false).unwrap_or_else(|_| vec![all.clone()]);
             prose_title(sents)
         };
-        slides.push(Slide { title, bullets: rest, table: vec![], chart: None, image: None });
+        slides.push(Slide { title, bullets: rest, table: vec![], chart: None, image: None, source: None });
     }
     Ok(slides)
 }
@@ -503,14 +508,14 @@ pub fn parse_outline(text: &str) -> Result<Vec<Slide>, String> {
         if let Some(t) = line.strip_prefix("# ") {
             if !seen_title && slides.is_empty() {
                 seen_title = true;
-                slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None, image: None });
+                slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None, image: None, source: None });
                 continue;
             }
-            slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None, image: None });
+            slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None, image: None, source: None });
             continue;
         }
         if let Some(t) = line.strip_prefix("## ").or_else(|| line.strip_prefix("### ")) {
-            slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None, image: None });
+            slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None, image: None, source: None });
             continue;
         }
         let Some(cur) = slides.last_mut() else {
@@ -524,6 +529,17 @@ pub fn parse_outline(text: &str) -> Result<Vec<Slide>, String> {
                 "pie" => ChartKind::Pie,
                 other => return Err(format!("I don't know the chart type \"{other}\". Use chart: bar, chart: line or chart: pie")),
             });
+            continue;
+        }
+        if tl.len() >= 7 && tl.is_char_boundary(7) && tl[..7].eq_ignore_ascii_case("source:") {
+            let t = tl[7..].trim();
+            if t.is_empty() || t.chars().count() > MAX_SOURCE_NOTE {
+                return Err(format!("\"{}\": a source line needs 1 to {MAX_SOURCE_NOTE} characters, for example: source: https://example.org/page (read by me on 2026-11-26)", cur.title));
+            }
+            if cur.source.is_some() {
+                return Err(format!("\"{}\" has two source lines. Put them in one line.", cur.title));
+            }
+            cur.source = Some(t.to_string());
             continue;
         }
         if tl.len() >= 6 && tl.is_char_boundary(6) && tl[..6].eq_ignore_ascii_case("image:") {
@@ -893,6 +909,9 @@ fn slide_xml(s: &Slide, is_title: bool) -> String {
                 shapes.push_str(&table_xml(&s.table, y));
             }
         }
+    }
+    if let Some(src) = &s.source {
+        shapes.push_str(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"9\" name=\"Source note\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"838200\" y=\"6330000\"/><a:ext cx=\"10515600\" cy=\"330000\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr wrap=\"square\" anchor=\"ctr\"><a:noAutofit/></a:bodyPr><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\" sz=\"1200\"><a:solidFill><a:schemeClr val=\"tx1\"><a:lumMod val=\"75000\"/><a:lumOff val=\"25000\"/></a:schemeClr></a:solidFill></a:rPr><a:t>Source noted by the author (not checked): {}</a:t></a:r></a:p></p:txBody></p:sp>", esc(src)));
     }
     format!("{HDR}<p:sld {NS}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{shapes}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>")
 }
@@ -1295,7 +1314,7 @@ pub fn edit_outline(text: &str, edit: &DraftEdit) -> Result<String, String> {
         if t.is_empty() {
             return Err("The new text is empty. Nothing changed.".into());
         }
-        if t.starts_with('|') || t.starts_with('#') || low.starts_with("image:") || low.starts_with("chart:") || low.starts_with("theme:") {
+        if t.starts_with('|') || t.starts_with('#') || low.starts_with("image:") || low.starts_with("source:") || low.starts_with("chart:") || low.starts_with("theme:") {
             return Err("That text would be read as outline syntax (a table, heading, image, chart or theme line), so I did not use it. Nothing changed.".into());
         }
         Ok(t.to_string())
@@ -1337,6 +1356,15 @@ pub fn edit_outline(text: &str, edit: &DraftEdit) -> Result<String, String> {
     Ok(res)
 }
 
+/// A model-written draft may not carry a "source:" line: Pawline cannot tell whether such a citation is real, and the slide
+/// would show it as if it were. The whole draft is discarded rather than the line silently dropped.
+pub fn reject_model_sources(slides: &[Slide]) -> Result<(), String> {
+    if slides.iter().any(|s| s.source.is_some()) {
+        return Err("The online model wrote a \"source\" line. Pawline can't tell if a source like that is real, so it threw the draft away. Nothing was kept. Try again, or write your own outline with your own source lines.".into());
+    }
+    Ok(())
+}
+
 /// Full review text for a draft: every slide and every bullet, as it will be saved.
 pub fn review_text(slides: &[Slide], rep: &Report) -> String {
     let mut s = format!("{} slide(s) ({}):\n", slides.len(), rep.describe());
@@ -1347,6 +1375,9 @@ pub fn review_text(slides: &[Slide], rep: &Report) -> String {
         }
         if let Some(k) = sl.chart {
             s.push_str(&format!("  [{} chart drawn from this table; the numbers are exactly the ones below]\n", match k { ChartKind::Bar => "bar", ChartKind::Line => "line", ChartKind::Pie => "pie" }));
+        }
+        if let Some(src) = &sl.source {
+            s.push_str(&format!("  [source noted by you: {src} (shown on the slide as \"not checked\"; Pawline did not open or verify it)]\n"));
         }
         if let Some(im) = &sl.image {
             s.push_str(&format!("  [picture from {}: {} {}x{} px, {} KB, placed as is, with the file name as its alt text]\n", im.path, if im.jpeg { "JPEG" } else { "PNG" }, im.w, im.h, im.data.len().div_ceil(1024)));
@@ -1838,5 +1869,32 @@ mod tests {
         // two slides with one title: refused, not guessed
         let dup = "# T\n## A\n- x\n## A\n- y\n";
         assert!(edit_outline(dup, &DraftEdit::Delete { slide: 2 }).unwrap_err().contains("2 times"));
+    }
+
+    #[test]
+    fn source_notes_are_the_users_words_labelled_unchecked() {
+        let (sl, rep) = compose("# T\n## Tea\n- Grown in many places\nsource: https://example.org/tea (read by me)\n").unwrap();
+        assert_eq!(sl[1].source.as_deref(), Some("https://example.org/tea (read by me)"));
+        let t = String::from_utf8_lossy(&build_pptx(&sl)).to_string();
+        assert!(t.contains("Source noted by the author (not checked): https://example.org/tea (read by me)"));
+        let r = review_text(&sl, &rep);
+        assert!(r.contains("did not open or verify it") && !r.to_lowercase().contains("verified by"), "{r}");
+        assert!(compose("# T\n## A\nsource:\n").is_err() && compose("# T\n## A\nsource: a\nsource: b\n").is_err());
+        assert!(compose(&format!("# T\n## A\nsource: {}\n", "x".repeat(201))).is_err());
+        // a source line cannot be added through a draft edit
+        let d = "# T\n## A\n- x\n## B\n- y\n";
+        assert!(edit_outline(d, &parse_edit_command("change slide 2 line 1 to source: https://x").unwrap()).unwrap_err().contains("outline syntax"));
+        assert!(reject_model_sources(&sl).is_err());
+        assert!(reject_model_sources(&compose(d).unwrap().0).is_ok());
+    }
+
+    #[test]
+    #[ignore]
+    fn write_source_sample() {
+        std::fs::create_dir_all("/tmp/deck/src").unwrap();
+        for th in ["light", "dark"] {
+            let (sl, r) = compose(&format!("theme: {th}\n# Tea\n## Where tea grows\n- Mostly in warm, wet regions\n- Picked by hand or machine\nsource: https://example.org/tea-growing (I read this page on 2026-11-26)\n")).unwrap();
+            std::fs::write(format!("/tmp/deck/src/{th}.pptx"), build_pptx_themed(&sl, r.theme)).unwrap();
+        }
     }
 }
