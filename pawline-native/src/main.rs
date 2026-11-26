@@ -93,6 +93,24 @@ fn menu_filter(t: &str) -> Vec<usize> {
 }
 
 #[cfg(test)]
+mod copy_conversation_tests {
+    use super::copy_conversation_count;
+
+    #[test]
+    fn whole_conversation_and_last_n_phrases() {
+        assert_eq!(copy_conversation_count("copy the conversation"), Some(None));
+        assert_eq!(copy_conversation_count("copy our chat"), Some(None));
+        assert_eq!(copy_conversation_count("copy everything."), Some(None));
+        assert_eq!(copy_conversation_count("copy the last 5 messages"), Some(Some(5)));
+        assert_eq!(copy_conversation_count("copy last 1 message"), Some(Some(1)));
+        // a file copy is never intercepted
+        assert_eq!(copy_conversation_count("copy the conversation file to Documents"), None);
+        assert_eq!(copy_conversation_count("copy the last slice of cake"), None);
+        assert_eq!(copy_conversation_count("copy pics to Documents"), None);
+    }
+}
+
+#[cfg(test)]
 mod view_cap_tests {
     use super::*;
 
@@ -272,6 +290,27 @@ impl Rgba for (u8, u8, u8) {
     fn rgba(self) -> (u8, u8, u8, u8) {
         (self.0, self.1, self.2, 255)
     }
+}
+
+/// "copy the conversation" / "copy the last 5 messages": Some(None) = all, Some(Some(k)) = last k.
+/// None when the line is not a copy-the-conversation request (a file "copy X to Y" is never one).
+fn copy_conversation_count(t: &str) -> Option<Option<usize>> {
+    let l = t.to_lowercase().trim_end_matches(['.', '!']).trim().to_string();
+    const WHOLE: &[&str] = &[
+        "copy our conversation", "copy the conversation", "copy conversation", "copy the whole conversation",
+        "copy whole conversation", "copy everything", "copy all messages", "copy all our messages", "copy the chat",
+        "copy chat", "copy our chat", "copy this conversation", "copy the full conversation", "copy the entire conversation",
+    ];
+    if WHOLE.contains(&l.as_str()) {
+        return Some(None);
+    }
+    for p in ["copy the last ", "copy last "] {
+        if let Some(r) = l.strip_prefix(p) {
+            let r = r.trim().trim_end_matches(" messages").trim_end_matches(" message").trim();
+            return r.parse::<usize>().ok().filter(|n| (1..=10000).contains(n)).map(Some);
+        }
+    }
+    None
 }
 
 fn history_path() -> Option<std::path::PathBuf> {
@@ -2331,6 +2370,35 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
                 self.draw();
                 return;
             }
+        }
+        // Copy the conversation (all of it or the last few messages) to the clipboard. Local only.
+        if let Some(count) = copy_conversation_count(&t) {
+            let (body, n_shown) = {
+                let view: Vec<&Msg> = match count {
+                    None => self.msgs.iter().collect(),
+                    Some(k) => self.msgs.iter().rev().take(k).collect::<Vec<_>>().into_iter().rev().collect(),
+                };
+                let body = view
+                    .iter()
+                    .map(|m| format!("{}: {}", if m.user { "You" } else { "Pawline" }, m.text))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                (body, view.len())
+            };
+            self.push(true, "user", t.clone(), quote.clone());
+            let note = if n_shown == 0 {
+                "Nothing to copy yet.".to_string()
+            } else if self.clip_copy(body) {
+                match count {
+                    Some(_) => format!("Copied the last {n_shown} message{} to the clipboard.", if n_shown == 1 { "" } else { "s" }),
+                    None => format!("Copied the whole conversation ({n_shown} message{}) to the clipboard.", if n_shown == 1 { "" } else { "s" }),
+                }
+            } else {
+                "No clipboard here, nothing copied.".to_string()
+            };
+            self.push(false, "message", note, None);
+            self.draw();
+            return;
         }
         self.push(true, "user", t.clone(), quote.clone());
         if matches!(t.to_lowercase().trim_end_matches(['.', '!']), "reset settings" | "restore default settings" | "restore defaults" | "reset to defaults") {
