@@ -1382,6 +1382,21 @@ mod memory_tests {
     }
 
     #[test]
+    #[ignore = "slow timing probe, run explicitly with --ignored --nocapture"]
+    fn assist_load_and_propose_timing() {
+        let t0 = std::time::Instant::now();
+        let raw = pawline_needle::assist::NeedleAssist::embedded().expect("embedded load");
+        println!("TIMING embedded() load: {:?}", t0.elapsed());
+        let a = pawline_core::assist::TimedAssist::new(std::sync::Arc::new(raw), ASSIST_LIMIT);
+        for inp in ["asdf qwer zxcv", "could you maybe tidy my stuff somehow please", "please would you tidy things up a bit"] {
+            let t = std::time::Instant::now();
+            let r = pawline_core::assist::Assist::propose(&a, inp);
+            let n = r.as_ref().map(|v| v.len()).unwrap_or(999);
+            println!("TIMING propose({:?}): ok={} n={} in {:?}", &inp[..inp.len().min(25)], r.is_ok(), n, t.elapsed());
+        }
+    }
+
+    #[test]
     fn over_long_input_skips_the_assist_and_says_so() {
         // boundary on the predicate, without waking the 35 MB model
         assert!(assist_len_ok(&"x".repeat(ASSIST_INPUT_MAX)));

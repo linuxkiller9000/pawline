@@ -67,11 +67,13 @@ Each entry: build + HEAD, environment, what ran, observed, evidence. Sandbox run
 
 ## 2026-11-26 item 18 first measurements + item 16 FINDING (SANDBOX, terminal mode, debug build)
 - Assist model load: RSS 11.3 MB -> 112.7 MB (+101 MB for the 35 MB model + runtime). Debug build, sandbox CPU.
-- FINDING (root cause unverified): two natural-language requests ("could you maybe tidy my stuff somehow please",
-  "please would you tidy things up a bit") each produced NO reply within 40s in terminal mode. The designed 30s
-  TimedAssist limit should have returned an error reply at ~30s. Candidates: NeedleAssist::embedded() load itself is
-  very slow on this CPU, or a runaway inference thread starves the main thread (the honest ASSIST_OFF_NOTE says stuck
-  work cannot be stopped). A 120s-window measurement was cut short by the harness limit, so whether a reply eventually
-  arrives is UNKNOWN. Short gibberish in scenario B answered in 2.1s, so this is input-shape dependent.
-  Next: measure embedded() load time alone, then propose() with a 120s window; if the timeout can be blown past, that
-  is an item 16 bug to fix (the UI would hang equally long).
+- FINDING RESOLVED 2026-11-26 (was reported as a possible no-reply hang; it is not one):
+  an ignored timing probe (bridge.rs assist_load_and_propose_timing) shows NeedleAssist::embedded() loads in
+  1.42s (debug, sandbox) and each propose() returns in 0.20-0.24s. Watching the live terminal process after
+  "could you maybe tidy my stuff somehow please": the app printed an ORGANIZE plan plus the "Type yes to do this"
+  confirm prompt within ~5s, then slept idle at the prompt (proc state S, wchan wait_woken, 1.6s total CPU, one
+  thread). It was waiting for approval by design, not hung. My earlier "no reply" reading grepped the log only
+  for "Took" lines, and the organize confirm path prints no "Took" until the confirm resolves - analysis error,
+  retracted. "please would you tidy things up a bit" is a plain parser reject in 1.7s (weak NL understanding,
+  honest message, no hang). Conclusion: no model hang exists on this input; propose() returns in ~0.2s so the
+  30s TimedAssist path is not engaged here. Item 16 "real model hang" concern: not reproducible on this evidence.
