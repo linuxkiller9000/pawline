@@ -56,7 +56,16 @@ fn enc_query(s: &str) -> String {
 
 fn get_json(url: &str) -> Result<serde_json::Value, PawError> {
     crate::netgate::check()?;
-    let body = ureq::get(url)
+    get_json_within(url, 20)
+}
+
+fn get_json_within(url: &str, secs: u64) -> Result<serde_json::Value, PawError> {
+    // A global timeout so a server that never answers cannot hang the engine thread (audit item 21).
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(secs))).build(),
+    );
+    let body = agent
+        .get(url)
         .header("User-Agent", "Pawline/0.1 (personal desktop assistant; https://github.com/linuxkiller9000/pawline)")
         .call()
         .map_err(|e| PawError::Exec(format!("search request failed: {e}")))?
@@ -125,6 +134,23 @@ fn duckduckgo_instant(query: &str) -> Result<String, PawError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_server_that_never_answers_times_out_instead_of_hanging() {
+        // Behavioural test on a real local socket (author-written): accepts, then stays silent.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = std::thread::spawn(move || {
+            let c = l.accept();
+            std::thread::sleep(std::time::Duration::from_secs(4));
+            drop(c);
+        });
+        let t = std::time::Instant::now();
+        let r = super::get_json_within(&format!("http://127.0.0.1:{port}/x"), 1);
+        assert!(r.is_err());
+        assert!(t.elapsed() < std::time::Duration::from_secs(3), "took {:?}", t.elapsed());
+        let _ = h.join();
+    }
+
     #[test]
     fn parser_wiring() {
         use crate::intent::parse;
