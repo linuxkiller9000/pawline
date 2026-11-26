@@ -82,6 +82,31 @@ static LAST_CHAT_ANSWER: std::sync::Mutex<Option<String>> = std::sync::Mutex::ne
 
 /// Longest the app waits for the local model. Not tuned against measured inference times; a timeout switches the assist off for the session.
 const ASSIST_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Longest the embedded assist gets to LOAD (its answers already have ASSIST_LIMIT). The load is
+/// native code with no cancel hook, so an over-running load keeps going in the background; the
+/// reply is not held hostage either way. Native anchor: a few seconds on a 2026 sandbox host.
+const NEEDLE_LOAD_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Wait for a worker's answer in 100 ms ticks so a cancel flag can win mid-wait instead of only
+/// at the end. None means timed out, cancelled, or the worker died; an over-running worker is
+/// abandoned, not killed (native code cannot be cancelled safely), which the caller must say.
+fn wait_ticks<T>(rx: std::sync::mpsc::Receiver<T>, limit: std::time::Duration, cancelled: &dyn Fn() -> bool) -> Option<T> {
+    let start = std::time::Instant::now();
+    loop {
+        if cancelled() {
+            return None;
+        }
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(v) => return Some(v),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if start.elapsed() >= limit {
+                    return None;
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+}
 /// Longer input than this never reaches the assist: a huge blob only burns the whole timeout and the
 /// parser's answer is the honest one anyway. The GUI input caps at 2000 (edit.rs MAX_CHARS); this is stricter.
 const ASSIST_INPUT_MAX: usize = 1000;
@@ -470,6 +495,15 @@ fn typo_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
 /// message, and turns a confident match into a pick that refills the input. Typing never
 /// approves anything: the picked text goes through the normal parser and its confirmations.
 /// Runs on the worker thread like the other assists, so the window stays responsive.
+/// Longest Laya gets to LOAD and to ANSWER before it is switched off for the session; a slow
+/// machine gets an honest message instead of a reply that hangs for minutes. Native anchors
+/// (2026-11-26, sandbox host, release build): load 3-9 s, route 1-2 s, so the bounds are generous
+/// for old CPUs. Esc is honoured mid-wait in 100 ms ticks, matching the thinking line's promise.
+#[cfg(all(feature = "laya", not(windows)))]
+const LAYA_LOAD_LIMIT: std::time::Duration = std::time::Duration::from_secs(180);
+#[cfg(all(feature = "laya", not(windows)))]
+const LAYA_ROUTE_LIMIT: std::time::Duration = std::time::Duration::from_secs(90);
+
 #[cfg(all(feature = "laya", not(windows)))]
 fn laya_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
     use std::sync::atomic::Ordering::SeqCst;
@@ -481,19 +515,56 @@ fn laya_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
                 // The first load reads ~660 MB from disk; on an old computer this is
                 // the slow part, so the thinking line appears before it starts.
                 notify_laya_thinking("Laya (experimental) is thinking... The model is local; the first suggestion of a session loads it, which can take a while on an old computer. You can keep typing; Esc stops the wait.");
-                state.laya = crate::laya::Laya::load(&dir).ok();
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::laya::Laya::load(&dir));
+                });
+                match wait_ticks(rx, LAYA_LOAD_LIMIT, &|| LAYA_CANCEL.load(SeqCst)) {
+                    Some(Ok(l)) => state.laya = Some(l),
+                    Some(Err(e)) => {
+                        state.laya_on = false;
+                        return Some(reply("error", format!("Laya did not load: {e}. Laya stays off; nothing else changed.")));
+                    }
+                    None => {
+                        state.laya_on = false;
+                        if LAYA_CANCEL.swap(false, SeqCst) {
+                            return Some(reply("message", "Stopped thinking. Nothing was suggested. Laya is off for now; say \"laya on\" to try again.".into()));
+                        }
+                        return Some(reply("message", format!("Laya took longer than {} seconds to load on this machine, so it is off for now. The load may still finish in the background; it changes nothing by itself. Say \"laya on\" to try again.", LAYA_LOAD_LIMIT.as_secs())));
+                    }
+                }
             }
         }
     }
     if LAYA_CANCEL.swap(false, SeqCst) {
         return Some(reply("message", "Stopped thinking. Nothing was suggested.".into()));
     }
-    let laya = state.laya.as_mut()?;
+    // The model moves into the worker for the route, so an over-running route can be abandoned:
+    // the worker keeps it, and this session never touches that instance again.
+    let mut laya = state.laya.take()?;
     notify_laya_thinking("Laya (experimental) is thinking... The model is local; the first suggestion of a session loads it, which can take a while on an old computer. You can keep typing; Esc stops the wait.");
-    let route = laya.route(input)?;
+    let text = input.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let r = laya.route(&text);
+        let _ = tx.send((laya, r));
+    });
+    let (laya_back, route) = match wait_ticks(rx, LAYA_ROUTE_LIMIT, &|| LAYA_CANCEL.load(SeqCst)) {
+        Some(pair) => pair,
+        None => {
+            if LAYA_CANCEL.swap(false, SeqCst) {
+                state.laya_on = false;
+                return Some(reply("message", "Stopped thinking. Nothing was suggested. Laya is off for now; say \"laya on\" to try again.".into()));
+            }
+            state.laya_on = false;
+            return Some(reply("message", format!("Laya took longer than {} seconds to answer, so it is off for now. The answer may still finish in the background; it changes nothing by itself. Say \"laya on\" to try again.", LAYA_ROUTE_LIMIT.as_secs())));
+        }
+    };
+    state.laya = Some(laya_back);
     if LAYA_CANCEL.swap(false, SeqCst) {
         return Some(reply("message", "Stopped thinking. Nothing was suggested.".into()));
     }
+    let route = route?;
     let sug = crate::laya::suggest(route.intent, input)?;
     let mut out = reply(
         "message",
@@ -728,6 +799,9 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             match crate::laya::model_dir() {
                 Some(dir) if crate::laya::model_present(&dir) => {
                     state.laya_on = true;
+                    if state.laya.is_none() {
+                        state.laya_tried = false; // fresh load attempt after an earlier timeout or cancel
+                    }
                     return reply("message", format!("{on_text} Model found at {}. It loads on the first suggestion (about 700 MB RAM while loaded). No network is used after setup.", dir.display()));
                 }
                 Some(_) => {
@@ -907,12 +981,23 @@ Nothing is sent from your machine, and after setup Laya works fully offline. You
             // A busy error is transient (an earlier abandoned inference still holds the native
             // session) and cheap, so it does not burn the one lazy-load attempt; other failures
             // (e.g. weights refused) do, so a broken load is not retried on every parser gap.
-            match NeedleAssist::embedded() {
-                Ok(a) => {
+            // The load itself is time-bounded (NEEDLE_LOAD_LIMIT): a machine too slow for the
+            // load gets the timed-out note instead of a reply that hangs for minutes.
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(NeedleAssist::embedded());
+            });
+            match wait_ticks(rx, NEEDLE_LOAD_LIMIT, &|| false) {
+                Some(Ok(a)) => {
                     state.assist = Some(pawline_core::assist::TimedAssist::new(std::sync::Arc::new(a), ASSIST_LIMIT));
                     state.assist_tried = true;
                 }
-                Err(e) => state.assist_tried = !e.0.contains("busy"),
+                Some(Err(e)) => state.assist_tried = !e.0.contains("busy"),
+                None => {
+                    state.assist_tried = true;
+                    state.assist_off_told = true;
+                    state.assist_notice = true;
+                }
             }
         }
         if let Some(a) = state.assist.as_ref() {
@@ -2238,6 +2323,35 @@ mod memory_tests {
         st.laya_on = true;
         let r = handle_text(&mut st, "laya off");
         assert!(r.text.contains("OFF") && !st.laya_on && st.laya.is_none(), "{}", r.text);
+    }
+
+    #[test]
+    fn wait_ticks_passes_a_prompt_answer_through() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let _ = tx.send(42);
+        });
+        assert_eq!(wait_ticks(rx, std::time::Duration::from_secs(5), &|| false), Some(42));
+    }
+
+    #[test]
+    fn wait_ticks_times_out_instead_of_hanging() {
+        let (_tx, rx) = std::sync::mpsc::channel::<u8>(); // never sent: the slow-machine case
+        let t = std::time::Instant::now();
+        let r = wait_ticks(rx, std::time::Duration::from_millis(300), &|| false);
+        let e = t.elapsed();
+        assert!(r.is_none(), "timed-out wait must give up, got {r:?}");
+        assert!(e >= std::time::Duration::from_millis(300) && e < std::time::Duration::from_secs(3), "elapsed {e:?}");
+    }
+
+    #[test]
+    fn wait_ticks_cancel_wins_mid_wait() {
+        let (_tx, rx) = std::sync::mpsc::channel::<u8>();
+        let t = std::time::Instant::now();
+        let r = wait_ticks(rx, std::time::Duration::from_secs(60), &|| true);
+        assert!(r.is_none(), "cancelled wait must give up, got {r:?}");
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "cancel must be prompt");
     }
 
     #[test]
