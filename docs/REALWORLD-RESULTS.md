@@ -52,3 +52,15 @@ Each entry: build + HEAD, environment, what ran, observed, evidence. Sandbox run
   one approved undo removed exactly one folder (49 on disk), a second undo correctly found nothing to undo.
 - C3 20 drift toggles + 8 theme cycles (GUI, xdotool): ui-settings.txt round-trips cleanly - drift back ON (even count),
   theme back to Dusk (8 mod 4 themes), all other fields intact, no corruption.
+
+## 2026-11-26 E after reboot, sandbox-adapted to relaunch (SANDBOX, Xvfb + terminal, debug build)
+- E1 default settings: no autostart or desktop entries exist (no installer), and the file-diff inventory run already
+  proved a first launch writes nothing. Covered by the inventory run, not re-run.
+- E2 persistence across relaunch (GUI, pixel proof e2_run2c/e2_run3c): pre-set Ocean theme, offline ON, history ON.
+  Relaunch applied all three: Ocean colours visible, "Restored 1 earlier messages..." with the saved line shown,
+  weather refused with NO card (offline persisted). ui-settings.txt and history.txt contents verified on disk.
+- E3 crash recovery (terminal): a seeded pending journal intent for a completed create_dir settles to
+  "recovered ... it had completed" + a commit line; one for a change that never happened settles to
+  "it had not completed" + an abort line, nothing created. (Deterministic seeded journal; a live kill -9
+  mid-write window is too narrow to time in the sandbox - the journal format is the same one exec writes.)
+- A real reboot (kernel, services, autostart reality) stays with the N5010 gate.
