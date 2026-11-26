@@ -261,3 +261,39 @@ fn parser_create_still_runs_immediately() {
     assert!(root.join("normal").is_dir());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+struct Panics;
+impl Assist for Panics {
+    fn propose(&self, _input: &str) -> Result<Vec<Directive>, PawError> {
+        panic!("simulated model crash");
+    }
+}
+
+/// Model failure modes: an error, an empty proposal and a crash all end the same way. The user gets the parser's plain
+/// explanation, nothing is executed, no file appears, and the engine keeps working afterwards.
+#[test]
+fn model_error_empty_and_panic_fail_safe_and_the_engine_survives() {
+    let root = sandbox("modelfail");
+    let mut engine = Engine::new(root.clone());
+    let backend = DirectFsBackend::new(&root).unwrap();
+    let gibberish = "frobnicate the zorp";
+    let err = Mock { calls: Cell::new(0), reply: Err("confidence 0.12".into()) };
+    let empty = Mock { calls: Cell::new(0), reply: Ok(vec![]) };
+    let mut msgs = vec![];
+    for a in [&err as &dyn Assist, &empty as &dyn Assist, &Panics as &dyn Assist] {
+        match engine.handle_with(gibberish, &backend, false, Some(a)) {
+            Err(e) => msgs.push(e.to_string()),
+            Ok(Response::Message(m)) => msgs.push(m),
+            Ok(Response::Executed(_)) => panic!("a failed model must never execute anything"),
+            Ok(Response::Failed { error, .. }) => msgs.push(error),
+            Ok(Response::Confirm(p)) => panic!("a failed model must not even propose a plan; assist #{} gave {} ops, notes {:?}", msgs.len(), p.ops.len(), p.notes),
+        }
+    }
+    for m in &msgs {
+        assert!(!m.contains("confidence") && !m.contains("panicked") && !m.contains("simulated"), "internal model detail leaked: {m}");
+    }
+    assert_eq!(std::fs::read_dir(&root).unwrap().filter(|e| !e.as_ref().unwrap().file_name().to_string_lossy().starts_with('.')).count(), 0, "nothing created");
+    // still usable after the crash
+    assert!(matches!(engine.handle("make a folder called after", &backend, false).unwrap(), Response::Executed(_)));
+    assert!(root.join("after").is_dir());
+}
