@@ -125,3 +125,65 @@ fn undo_after_the_file_was_changed_outside_does_not_destroy_the_newer_data() {
     assert_eq!(std::fs::read(root.join("p.txt")).unwrap(), b"someone else made this", "undo must not overwrite the re-created old name");
     assert_eq!(std::fs::read(root.join("q.txt")).unwrap(), b"P");
 }
+
+#[test]
+fn plan_then_swap_to_symlink_before_confirm_cannot_escape() {
+    // TOCTOU: the plan was checked while "victim" was an ordinary file; before the user confirms it becomes a symlink out of the home.
+    let (root, mut e, be) = home("toctou");
+    let outside = std::env::temp_dir().join(format!("pawline-fs-toctou-out-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), b"keep me").unwrap();
+    std::fs::write(root.join("victim"), b"mine").unwrap();
+    let plan = match e.handle("delete victim", &be, false).unwrap() {
+        Response::Confirm(p) => p,
+        _ => panic!("delete must ask first"),
+    };
+    std::fs::remove_file(root.join("victim")).unwrap();
+    std::os::unix::fs::symlink(outside.join("secret.txt"), root.join("victim")).unwrap();
+    let _ = e.execute_plan(plan, &be);
+    assert_eq!(std::fs::read(outside.join("secret.txt")).unwrap(), b"keep me", "the file behind the swapped-in symlink must survive");
+    std::fs::remove_dir_all(&outside).unwrap();
+}
+
+#[test]
+fn long_unicode_and_odd_names_fail_cleanly_or_work_never_half() {
+    let (root, mut e, be) = home("longnames");
+    let long = "x".repeat(300);
+    let r = go(&mut e, &be, &format!("make a file called \"{long}.txt\""));
+    assert!(!r.starts_with("OK"), "a name over the OS limit must be refused: {r}");
+    let ok255 = "y".repeat(251);
+    let r = go(&mut e, &be, &format!("make a file called \"{ok255}.txt\""));
+    assert!(r.starts_with("OK"), "a legal 255-byte name should work: {r}");
+    // composed vs decomposed e-acute are two different names on Linux: creating one must not clobber the other
+    let nfc = "caf\u{e9}.txt";
+    let nfd = "cafe\u{301}.txt";
+    assert!(go(&mut e, &be, &format!("make a file called \"{nfc}\"")).starts_with("OK"));
+    std::fs::write(root.join(nfc), b"composed").unwrap();
+    let r = go(&mut e, &be, &format!("make a file called \"{nfd}\""));
+    assert_eq!(std::fs::read(root.join(nfc)).unwrap(), b"composed", "{r}");
+    for bad in ["a/b", "..", "."] {
+        let r = go(&mut e, &be, &format!("make a file called \"{bad}\""));
+        assert!(!root.join("..").join("b").exists(), "{bad}: {r}");
+    }
+    // leftover check: nothing but intended files and the store
+    let names: Vec<String> = std::fs::read_dir(&root).unwrap().map(|x| x.unwrap().file_name().to_string_lossy().to_string()).collect();
+    assert!(names.iter().all(|n| !n.contains(".tmp") && !n.starts_with(".pawline-tmp")), "{names:?}");
+}
+
+#[test]
+fn hard_links_and_non_utf8_names_do_not_break_listing_or_delete() {
+    use std::os::unix::ffi::OsStrExt;
+    let (root, mut e, be) = home("hardlink");
+    let outside = std::env::temp_dir().join(format!("pawline-fs-hl-{}", std::process::id()));
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("orig.txt"), b"shared").unwrap();
+    std::fs::hard_link(outside.join("orig.txt"), root.join("hl.txt")).unwrap();
+    let _ = go(&mut e, &be, "delete hl.txt");
+    // deleting the home-side name must leave the other name intact (it is a link, data lives on)
+    assert_eq!(std::fs::read(outside.join("orig.txt")).unwrap(), b"shared");
+    std::fs::write(root.join(std::ffi::OsStr::from_bytes(b"bad\xff\xfename.txt")), b"x").unwrap();
+    let r = go(&mut e, &be, "list");
+    assert!(!r.starts_with("ERR"), "listing a folder with a non-UTF-8 name must not fail: {r}");
+    std::fs::remove_dir_all(&outside).unwrap();
+}
