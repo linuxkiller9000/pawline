@@ -64,3 +64,14 @@ Each entry: build + HEAD, environment, what ran, observed, evidence. Sandbox run
   "it had not completed" + an abort line, nothing created. (Deterministic seeded journal; a live kill -9
   mid-write window is too narrow to time in the sandbox - the journal format is the same one exec writes.)
 - A real reboot (kernel, services, autostart reality) stays with the N5010 gate.
+
+## 2026-11-26 item 18 first measurements + item 16 FINDING (SANDBOX, terminal mode, debug build)
+- Assist model load: RSS 11.3 MB -> 112.7 MB (+101 MB for the 35 MB model + runtime). Debug build, sandbox CPU.
+- FINDING (root cause unverified): two natural-language requests ("could you maybe tidy my stuff somehow please",
+  "please would you tidy things up a bit") each produced NO reply within 40s in terminal mode. The designed 30s
+  TimedAssist limit should have returned an error reply at ~30s. Candidates: NeedleAssist::embedded() load itself is
+  very slow on this CPU, or a runaway inference thread starves the main thread (the honest ASSIST_OFF_NOTE says stuck
+  work cannot be stopped). A 120s-window measurement was cut short by the harness limit, so whether a reply eventually
+  arrives is UNKNOWN. Short gibberish in scenario B answered in 2.1s, so this is input-shape dependent.
+  Next: measure embedded() load time alone, then propose() with a 120s window; if the timeout can be blown past, that
+  is an item 16 bug to fix (the UI would hang equally long).
