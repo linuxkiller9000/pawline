@@ -43,3 +43,12 @@ Each entry: build + HEAD, environment, what ran, observed, evidence. Sandbox run
   writes (only the usual frequent-folders.json appeared). App fully responsive afterwards.
 - With network (control run through the same pty driver): card -> yes -> real geocoding reply with the place chooser.
 - Not covered: a connection dying MID-TRANSFER (both runs fail at lookup/connect time); reboot scenarios (E) open.
+
+## 2026-11-26 C long sessions (SANDBOX, terminal mode under pty + Xvfb GUI, debug build)
+- C1 120 exchanges (math): 24.1s wall, no crash, no slowdown. Open fds constant at 3 before/during/after (no fd leak).
+  RSS 11.4 -> 15.2 MB over the 120 exchanges (session context growth, ~35 KB/exchange; debug build, sandbox only -
+  steady-state and GUI bubble growth remain item 18 numbers to measure separately).
+- C2 50 folder creates: all 50 journaled (journal = 50 intents + 50 commits + 1 undo_of = 101 lines, exactly consistent),
+  one approved undo removed exactly one folder (49 on disk), a second undo correctly found nothing to undo.
+- C3 20 drift toggles + 8 theme cycles (GUI, xdotool): ui-settings.txt round-trips cleanly - drift back ON (even count),
+  theme back to Dusk (8 mod 4 themes), all other fields intact, no corruption.
