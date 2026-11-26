@@ -1432,7 +1432,7 @@ fn deck_save_command(state: &mut UiState, input: &str) -> Option<UiReply> {
         Some((f, nf, total)) => format!("\nChecked against {f}: {nf} of {total} lines were NOT found there (word-level match, not understanding)."),
         None => String::new(),
     };
-    let summary = format!("1. {}\n{}{}", op.describe(), pawline_core::deck::review_text(&slides, &rep), check_note);
+    let summary = format!("1. {}{}\n{}", op.describe(), check_note, pawline_core::deck::review_text(&slides, &rep));
     state.pending = Some(Plan { ops: vec![op], needs_confirmation: true, confirmation_reasons: vec!["This saves one new .pptx file.".into()], assist_derived: false, notes: vec![] });
     state.pending_request = None;
             pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
