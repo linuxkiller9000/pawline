@@ -473,7 +473,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
         }
         return r;
     }
-    if let Some(r) = deck_write_command(state, input).or_else(|| deck_save_command(state, input)) {
+    if let Some(r) = deck_write_command(state, input).or_else(|| deck_save_command(state, input)).or_else(|| deck_edit_command(state, input)) {
         return r;
     }
     if let Some(r) = deck_command(state, input) {
@@ -825,6 +825,26 @@ fn deck_write_command(state: &mut UiState, input: &str) -> Option<UiReply> {
     state.pending_request = None;
     state.organize_pending = None;
     Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) })
+}
+
+/// "edit slide 2 title to ...", "change slide 2 line 1 to ...", "delete slide 3" on the reviewed draft. Only acts while a draft
+/// exists. The edited text replaces the draft in memory, any open save card is dropped (it holds the old text), and the full
+/// review is shown again. Nothing is saved or sent.
+fn deck_edit_command(state: &mut UiState, input: &str) -> Option<UiReply> {
+    let edit = pawline_core::deck::parse_edit_command(input)?;
+    let mut d = DECK_DRAFT.lock().unwrap();
+    let text = d.clone()?;
+    match pawline_core::deck::edit_outline(&text, &edit) {
+        Err(e) => Some(reply("message", e)),
+        Ok(new) => {
+            let (slides, rep) = pawline_core::deck::compose(&new).ok()?;
+            *d = Some(new);
+            if state.pending.as_ref().is_some_and(|p| p.ops.iter().any(|o| matches!(o, Operation::DeckText { .. }))) {
+                state.pending = None;
+            }
+            Some(reply("message", format!("Changed the draft as you typed it. NOTHING IS SAVED YET. Your wording was kept exactly and is not fact-checked.\n{}\n\nSay \"save the presentation\" to see the file name and confirm. An earlier save card, if open, was dropped.", pawline_core::deck::review_text(&slides, &rep))))
+        }
+    }
 }
 
 /// "save the presentation" after a draft was shown: a second card with the full file path.
@@ -1277,6 +1297,29 @@ mod memory_tests {
         let n = std::fs::read_dir(&root).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "pptx")).count();
         assert_eq!(n, 0, "nothing is written before the card is confirmed");
         assert!(cancel(&mut st).text.contains("Nothing was done"));
+    }
+
+    #[test]
+    fn editing_the_draft_shows_it_again_drops_the_old_save_card_and_saves_the_edited_text() {
+        let root = org_root("deckedit");
+        let mut st = new_state(root.clone());
+        *DECK_DRAFT.lock().unwrap() = None;
+        assert_ne!(handle_text(&mut st, "delete slide 2").text, "", "no draft: falls through to normal handling");
+        *DECK_DRAFT.lock().unwrap() = Some("# Water\n## Rain\n- Falls from clouds\n## Rivers\n- Flow to the sea\n## Sun\n- Lifts water up\n".into());
+        assert_eq!(handle_text(&mut st, "save the presentation").kind, "confirm");
+        let r = handle_text(&mut st, "change slide 2 line 1 to Falls from the sky");
+        assert!(r.text.contains("Falls from the sky") && r.text.contains("NOTHING IS SAVED") && st.pending.is_none(), "{}", r.text);
+        let r = handle_text(&mut st, "delete slide 9");
+        assert!(r.text.contains("no slide 9"), "{}", r.text);
+        assert!(DECK_DRAFT.lock().unwrap().as_ref().unwrap().contains("Falls from the sky"));
+        let r = handle_text(&mut st, "save the presentation");
+        assert!(r.kind == "confirm" && r.text.contains("Falls from the sky") && !r.text.contains("Falls from clouds"), "{}", r.text);
+        assert!(cancel(&mut st).text.contains("Nothing was done"));
+        let n = std::fs::read_dir(&root).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "pptx")).count();
+        assert_eq!(n, 0);
+        // a new request still wipes the edited draft
+        deck_draft_begin();
+        assert!(handle_text(&mut st, "save the presentation").text.contains("no reviewed draft"));
     }
 
     #[test]

@@ -1236,6 +1236,107 @@ pub fn is_save_command(input: &str) -> bool {
     matches!(low.as_str(), "save the presentation" | "save presentation" | "save the draft" | "save the deck" | "save the slides" | "save these slides" | "save it as a presentation")
 }
 
+/// A change the user asks for on the reviewed draft. Numbers are the slide and line numbers shown in the review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DraftEdit {
+    Title { slide: usize, text: String },
+    Line { slide: usize, line: usize, text: String },
+    Delete { slide: usize },
+}
+
+/// "edit slide 2 title to ...", "change slide 2 line 1 to ...", "delete slide 3". The new text is kept exactly as typed.
+pub fn parse_edit_command(input: &str) -> Option<DraftEdit> {
+    let t = input.trim().trim_end_matches(['.', '!']);
+    let low = t.to_lowercase();
+    let num = |w: &str| w.parse::<usize>().ok().filter(|n| *n >= 1 && *n <= 99);
+    let lw: Vec<&str> = low.split_whitespace().collect();
+    let tw: Vec<&str> = t.split_whitespace().collect();
+    if lw.len() == 3 && matches!(lw[0], "delete" | "remove") && lw[1] == "slide" {
+        return Some(DraftEdit::Delete { slide: num(lw[2])? });
+    }
+    if lw.len() >= 6 && matches!(lw[0], "edit" | "change" | "set") && lw[1] == "slide" && lw[3] == "title" && lw[4] == "to" {
+        return Some(DraftEdit::Title { slide: num(lw[2])?, text: tw[5..].join(" ") });
+    }
+    if lw.len() >= 7 && matches!(lw[0], "edit" | "change" | "set") && lw[1] == "slide" && lw[3] == "line" && lw[5] == "to" {
+        return Some(DraftEdit::Line { slide: num(lw[2])?, line: num(lw[4])?, text: tw[6..].join(" ") });
+    }
+    None
+}
+
+fn is_heading(l: &str) -> bool {
+    l.starts_with("# ") || l.starts_with("## ") || l.starts_with("### ")
+}
+
+/// Apply an edit to the draft's outline text. Only the named heading or line changes; everything else stays byte for byte.
+/// The result must still compose, otherwise nothing changes. Typed text is never "corrected".
+pub fn edit_outline(text: &str, edit: &DraftEdit) -> Result<String, String> {
+    let (slides, rep) = compose(text)?;
+    let slide_no = match edit { DraftEdit::Title { slide, .. } | DraftEdit::Line { slide, .. } | DraftEdit::Delete { slide } => *slide };
+    if slide_no > slides.len() {
+        return Err(format!("There is no slide {slide_no}. The draft has {} slide(s).", slides.len()));
+    }
+    let sl = &slides[slide_no - 1];
+    if rep.agenda && slide_no == 2 {
+        return Err("Slide 2 is the Contents slide Pawline added from the other titles. Edit or delete the slides it lists instead.".into());
+    }
+    if sl.title.ends_with(')') && sl.title.rsplit_once(" (").is_some_and(|(_, k)| k.trim_end_matches(')').split_once('/').is_some_and(|(a, b)| a.parse::<u32>().is_ok() && b.parse::<u32>().is_ok())) {
+        return Err(format!("Slide {slide_no} is one part of a long slide that was split. Edit the original wording another way; nothing changed."));
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let heads: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| is_heading(l)).filter(|(_, l)| l.trim_start_matches('#').trim() == sl.title).map(|(i, _)| i).collect();
+    if heads.len() != 1 {
+        return Err(format!("I can't tell which heading is slide {slide_no} (\"{}\" appears {} times). Nothing changed.", sl.title, heads.len()));
+    }
+    let h = heads[0];
+    let end = (h + 1..lines.len()).find(|&i| is_heading(lines[i])).unwrap_or(lines.len());
+    let clean = |t: &str| -> Result<String, String> {
+        let t = t.trim();
+        let low = t.to_lowercase();
+        if t.is_empty() {
+            return Err("The new text is empty. Nothing changed.".into());
+        }
+        if t.starts_with('|') || t.starts_with('#') || low.starts_with("image:") || low.starts_with("chart:") || low.starts_with("theme:") {
+            return Err("That text would be read as outline syntax (a table, heading, image, chart or theme line), so I did not use it. Nothing changed.".into());
+        }
+        Ok(t.to_string())
+    };
+    let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    match edit {
+        DraftEdit::Title { text: nt, .. } => {
+            let nt = clean(nt)?;
+            if nt.chars().count() > MAX_TITLE_CHARS {
+                return Err(format!("Titles are limited to {MAX_TITLE_CHARS} characters. Nothing changed."));
+            }
+            let pre: String = lines[h].chars().take_while(|c| *c == '#').collect();
+            out[h] = format!("{pre} {nt}");
+        }
+        DraftEdit::Line { line, text: nt, .. } => {
+            let nt = clean(nt)?;
+            let body: Vec<usize> = (h + 1..end).filter(|&i| { let l = lines[i].trim(); !l.is_empty() && !l.starts_with('|') && !l.to_lowercase().starts_with("chart:") && !l.to_lowercase().starts_with("image:") }).collect();
+            let Some(&i) = body.get(line - 1) else {
+                return Err(format!("Slide {slide_no} has {} line(s); there is no line {line}. Nothing changed.", body.len()));
+            };
+            let l = lines[i];
+            let indent = &l[..l.len() - l.trim_start().len()];
+            let rest = l.trim_start();
+            let marker = ["- ", "* ", "+ "].iter().find(|m| rest.starts_with(**m)).copied().unwrap_or("");
+            out[i] = format!("{indent}{marker}{nt}");
+        }
+        DraftEdit::Delete { .. } => {
+            if h == lines.iter().position(|l| is_heading(l)).unwrap_or(0) {
+                return Err("Slide 1 is the title slide, so I won't delete it. Nothing changed.".into());
+            }
+            out.drain(h..end);
+        }
+    }
+    let mut res = out.join("\n");
+    if text.ends_with('\n') {
+        res.push('\n');
+    }
+    compose(&res).map_err(|e| format!("That change would break the draft ({e}). Nothing changed."))?;
+    Ok(res)
+}
+
 /// Full review text for a draft: every slide and every bullet, as it will be saved.
 pub fn review_text(slides: &[Slide], rep: &Report) -> String {
     let mut s = format!("{} slide(s) ({}):\n", slides.len(), rep.describe());
@@ -1703,5 +1804,39 @@ mod tests {
             let (sl, r) = compose_with(&format!("theme: {th}\n# Pics\n## PNG wide\nimage: ~/wide.png\n## JPEG tall with text\n- a caption line\nimage: ~/tall.jpg\n"), &rd).unwrap();
             std::fs::write(format!("/tmp/deck/img/{th}.pptx"), build_pptx_themed(&sl, r.theme)).unwrap();
         }
+    }
+
+    const D: &str = "# Water\nsubtitle\n## Rain\n- Falls from clouds\n- Wets things\n## Rivers\n- Flow to the sea\n";
+
+    #[test]
+    fn draft_edits_change_only_what_was_named_and_keep_typed_text_verbatim() {
+        let e = parse_edit_command("Change slide 2 line 2 to Wets the gorund").unwrap();
+        assert_eq!(e, DraftEdit::Line { slide: 2, line: 2, text: "Wets the gorund".into() });
+        let t = edit_outline(D, &e).unwrap();
+        assert_eq!(t, D.replace("Wets things", "Wets the gorund"), "typo in the user's text is not rewritten");
+        let t = edit_outline(D, &parse_edit_command("edit slide 3 title to Streams").unwrap()).unwrap();
+        assert_eq!(t, D.replace("## Rivers", "## Streams"));
+        let t = edit_outline(D, &parse_edit_command("delete slide 2").unwrap()).unwrap();
+        assert_eq!(t, "# Water\nsubtitle\n## Rivers\n- Flow to the sea\n");
+        assert!(parse_edit_command("delete slide").is_none() && parse_edit_command("delete slide x").is_none() && parse_edit_command("delete the slide 2 file").is_none());
+    }
+
+    #[test]
+    fn draft_edit_refusals_change_nothing() {
+        let ed = |c: &str| edit_outline(D, &parse_edit_command(c).unwrap()).unwrap_err();
+        assert!(ed("delete slide 1").contains("title slide"));
+        assert!(ed("delete slide 9").contains("no slide 9"));
+        assert!(ed("change slide 2 line 5 to x").contains("no line 5"));
+        assert!(ed("change slide 2 line 1 to image: ~/secret.png").contains("outline syntax"));
+        assert!(ed("change slide 2 line 1 to | a | b |").contains("outline syntax"));
+        assert!(ed("edit slide 2 title to # sneaky").contains("outline syntax"));
+        let long = "x".repeat(81);
+        assert!(ed(&format!("edit slide 2 title to {long}")).contains("limited"));
+        // a draft can never gain a picture or file read through an edit
+        let t = edit_outline(D, &parse_edit_command("change slide 2 line 1 to see image: here").unwrap()).unwrap();
+        assert!(compose(&t).unwrap().0[1].image.is_none());
+        // two slides with one title: refused, not guessed
+        let dup = "# T\n## A\n- x\n## A\n- y\n";
+        assert!(edit_outline(dup, &DraftEdit::Delete { slide: 2 }).unwrap_err().contains("2 times"));
     }
 }
