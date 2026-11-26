@@ -261,3 +261,36 @@ mod home_tests {
         assert_eq!(data_dir_from(&env(&[("HOME", "/h")]), false), Some("/h/.local/share/pawline".into()));
     }
 }
+
+/// Why a file name cannot be created on Windows, or None. Pure rule: Windows device names (CON, PRN, AUX, NUL,
+/// COM1-9, LPT1-9, with or without an extension), the characters < > : " | ? * and control characters, and names
+/// ending in a dot or space. Enforced only when running on Windows (Linux allows all of these).
+pub fn windows_name_problem(name: &str) -> Option<&'static str> {
+    if name.chars().any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') || (c as u32) < 32) {
+        return Some("contains a character Windows does not allow in names");
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Some("ends with a dot or a space, which Windows drops");
+    }
+    let stem = name.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    let dev = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT")) && stem.len() == 4 && stem.as_bytes()[3].is_ascii_digit() && stem.as_bytes()[3] != b'0');
+    if dev {
+        return Some("is a reserved Windows device name");
+    }
+    None
+}
+
+#[cfg(test)]
+mod winname_tests {
+    use super::windows_name_problem as p;
+    #[test]
+    fn reserved_and_bad_names() {
+        for bad in ["CON", "nul", "Aux.txt", "com1", "LPT9.log", "a:b", "x?", "end.", "sp ", "q\"r", "t\u{1}"] {
+            assert!(p(bad).is_some(), "{bad}");
+        }
+        for ok in ["kitten paws", "console", "COM0", "com10", "notes.txt", "اسم", "a.b.c"] {
+            assert!(p(ok).is_none(), "{ok}");
+        }
+    }
+}

@@ -408,6 +408,11 @@ impl Validator {
                         if n == "." || n == ".." {
                             return Err(PawError::UnsafePath(format!("bad name \"{n}\"")));
                         }
+                        if cfg!(windows) {
+                            if let Some(why) = crate::platform::windows_name_problem(n) {
+                                return Err(PawError::UnsafePath(format!("\"{n}\" {why}")));
+                            }
+                        }
                         let name = Self::apply_ext_hint(n, kind);
                         let path = self.normalize(&base.join(&name))?;
                         let path = self.real_confine(&path)?;
