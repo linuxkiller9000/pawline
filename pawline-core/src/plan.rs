@@ -90,6 +90,8 @@ pub enum Operation {
     GenerateImage { provider: crate::imagegen::ImageProvider, prompt: String },
     /// Send one question to Pollinations text. Shown only, never run. Always confirmed when it comes from here.
     AskOnline { text: String },
+    /// One online chat turn: `context` = earlier lines of THIS session (alternating you / assistant, oldest first), `text` = the new message.
+    ChatOnline { context: Vec<String>, text: String },
 }
 
 impl Operation {
@@ -126,6 +128,19 @@ impl Operation {
             Operation::AskOnline { text } => format!(
                 "Ask Pollinations (online) \"{text}\": this is the free \"Classic\" service: no account, best effort, about one request per 45 seconds per IP address. Pawline puts your question text in the web address it requests from text.pollinations.ai, plus the usual web details (your IP address, a \"Pawline\" user-agent). Pollinations says the same address returns the same cached answer to anyone who has it. Pawline does not send your files, chat history or location. What Pollinations keeps is its own policy. Do not put passwords, secrets or private information in this question. The answer is only shown, never run, and may be wrong."
             ),
+            Operation::ChatOnline { context, text } => {
+                let mut lines = vec![format!("  system: {}", crate::textfallback::CHAT_SYSTEM)];
+                for (i, c) in context.iter().enumerate() {
+                    lines.push(format!("  {}: {c}", if i % 2 == 0 { "you" } else { "assistant (earlier answer)" }));
+                }
+                lines.push(format!("  you: {text}"));
+                format!(
+                    "Online chat turn (Pollinations, free \"Classic\" service: no account, best effort, one request per 45 seconds per IP address). Pawline will POST EXACTLY these messages to text.pollinations.ai, plus the usual web details (your IP address, a \"Pawline\" user-agent). That is all of it: {} earlier line(s) of this chat session, kept in memory only and cut to {} characters each.\n{}\nNothing from your files, location or saved history is sent, and nothing else from this session. What Pollinations keeps is its own policy. Do not put passwords or private information in the chat. The answer is only shown, never run, and is AI-written text that may be wrong. Say \"chat off\" or \"forget our chat\" to end it.",
+                    context.len(),
+                    crate::textfallback::CHAT_LINE_CHARS,
+                    lines.join("\n")
+                )
+            }
             Operation::Search { engine, query } => match engine {
                 SearchEngine::Web => format!(
                     "Search the web for \"{query}\" (online, free, no account): Pawline sends your search words to api.duckduckgo.com (its Instant Answer service, not full web search), plus the usual web details: your IP address and a \"Pawline\" user-agent. Pawline does not send your files, chat history or location. What DuckDuckGo keeps is its own policy. The result is only shown, never run, and may be empty or out of date."
@@ -143,7 +158,7 @@ impl Operation {
         matches!(
             self,
             Operation::Delete { .. } | Operation::Move { .. } | Operation::Shrink { .. } | Operation::Deck { .. } | Operation::DeckDraft { .. } | Operation::DeckText { .. } | Operation::SetWallpaper { .. }
-                | Operation::Undo { .. } | Operation::OpenApp { .. } | Operation::GenerateImage { .. } | Operation::AskOnline { .. } | Operation::Search { .. } | Operation::Weather { .. }
+                | Operation::Undo { .. } | Operation::OpenApp { .. } | Operation::GenerateImage { .. } | Operation::AskOnline { .. } | Operation::ChatOnline { .. } | Operation::Search { .. } | Operation::Weather { .. }
         )
     }
 }

@@ -345,7 +345,7 @@ impl ChatState {
         if short && (n.contains("who are you") || n.contains("what are you") || n.contains("your name") || n.contains("what is pawline") || n.contains("what's pawline")) {
             return Outcome::Reply("I'm Pawline, a small assistant for this computer. I do files, apps, weather, search, math and slides here, and I ask before I change anything. I can chat a little offline, and open conversation online needs your OK first.".into());
         }
-        if short && (has_word(toks, "thanks") || has_word(toks, "thank") || n == "thx" || n == "ty" || n.contains("thank you") || n.contains("cheers")) && !toks.iter().any(|t| is_action_word(t)) {
+        if short && (toks.iter().any(|t| matches!(*t, "thanks" | "thank" | "thansk" | "thnks" | "thanx" | "thnx" | "thankyou" | "thanls" | "thamks" | "tanks")) || n == "thx" || n == "ty" || n.contains("thank you") || n.contains("cheers")) && !toks.iter().any(|t| is_action_word(t)) {
             return Outcome::Reply("You're welcome.".into());
         }
         if short && (matches!(n, "bye" | "goodbye" | "good bye" | "see you" | "see ya" | "later" | "good night" | "goodnight" | "night" | "cya") || has_word(toks, "goodbye")) {
@@ -390,6 +390,14 @@ mod tests {
     }
     fn is_text(o: &Outcome) -> bool {
         matches!(o, Outcome::Reply(_) | Outcome::Discussion(_))
+    }
+
+    #[test]
+    fn ordinary_sentences_are_not_small_talk() {
+        let mut c = ChatState::default();
+        for s in ["I think clouds look like sheep", "I think so", "thin clouds today", "the tank is full"] {
+            assert_eq!(c.respond(s, false), Outcome::Pass, "{s}");
+        }
     }
 
     #[test]

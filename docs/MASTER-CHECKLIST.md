@@ -20,7 +20,7 @@ Legend: DONE = done for the scope written, not hardware-verified. PARTIAL = some
 | 6 | Weather and Q&A | (old 6) | DONE in English |
 | 7 | Basic presentations | (old 9) | DONE as a checkpoint |
 | 8 | Typo tolerance | new | PARTIAL: command, weather, search and question words (docs/TYPOS.md) |
-| 9 | Conversation, hints and jokes | new | SCOPED DONE (offline English chat, hints, jokes; online replies only via the existing per-question consent path). Not full multilingual. History persistence belongs to 15/19, off by default, not built |
+| 9 | Conversation, hints and jokes | new | PARTIAL: offline English chat + opt-in online chat with exact-text cards built (see docs/CHAT.md); open: on-screen indicator, opt-in local history (15/19), Arabic (11), held-out chat tests |
 | 10 | Presentation extras | new | OPEN |
 | 11 | Arabic functionality | new | OPEN |
 | 12 | Voice/audio completion | new | OPEN (runtime gates) |

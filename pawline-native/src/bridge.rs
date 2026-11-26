@@ -50,6 +50,18 @@ fn run_cancellable<T: Send + 'static>(
     }
 }
 
+static LAST_CHAT_ANSWER: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn chat_online(context: &[String], text: &str) -> Result<String, PawError> {
+    let (c, q) = (context.to_vec(), text.to_string());
+    let a = run_cancellable(pawline_core::imagegen::ImageProvider::Pollinations, move |cancelled, commit| {
+        let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(60));
+        pawline_core::textfallback::chat(&http, &c, &q, cancelled, commit)
+    })?;
+    *LAST_CHAT_ANSWER.lock().unwrap() = Some(a.clone());
+    Ok(format!("Pollinations chat (online, not checked, may be wrong):\n{a}"))
+}
+
 fn ask_online(text: &str) -> Result<String, PawError> {
     let q = text.to_string();
     // Same Pollinations slot as pictures: one request at a time, 45 s apart.
@@ -103,6 +115,7 @@ fn online_md(ops: &[OpOutcome]) -> Option<String> {
         let (head, body) = match &o.op {
             O::Search { engine: SearchEngine::Wiki, .. } => ("Wikipedia (online)".to_string(), o.detail.clone()),
             O::Search { .. } => ("Web instant answer (online, may be out of date)".to_string(), o.detail.clone()),
+            O::ChatOnline { .. } => ("Pollinations chat reply (online, AI-written, not checked, may be wrong)".to_string(), o.detail.split_once('\n').map(|x| x.1.to_string()).unwrap_or_else(|| o.detail.clone())),
             O::AskOnline { .. } => ("Pollinations answer (online, not checked, may be wrong)".to_string(), o.detail.split_once('\n').map(|x| x.1.to_string()).unwrap_or_else(|| o.detail.clone())),
             _ => return None,
         };
@@ -166,6 +179,9 @@ impl ExecutionBackend for UiBackend {
                 )
             })?;
             return Ok(OpOutcome { op: op.clone(), detail: format!("Saved {}", path.display()) });
+        }
+        if let Operation::ChatOnline { context, text } = op {
+            return Ok(OpOutcome { op: op.clone(), detail: chat_online(context, text)? });
         }
         if let Operation::AskOnline { text } = op {
             return Ok(OpOutcome { op: op.clone(), detail: ask_online(text)? });
@@ -234,6 +250,10 @@ pub struct UiState {
     pub undo_batch: Option<usize>,
     /// Offline conversation: a few recent lines, memory only, never written to disk.
     pub chat: pawline_core::chat::ChatState,
+    /// Online chat for this session only (off at start, never saved): on/off, earlier lines that were really sent/answered, and the user line of the card now pending.
+    pub online_chat: bool,
+    pub online_ctx: Vec<String>,
+    pub online_pending: Option<String>,
 }
 
 pub fn startup_notes_from(root: &std::path::Path) -> Vec<String> {
@@ -330,7 +350,7 @@ pub fn task_memory_command(input: &str, path: Option<&std::path::Path>) -> Optio
 /// Answers, searches, online asks, pictures, undo and list are never remembered. Returns whether it saved.
 pub fn remember_steps(path: &std::path::Path, request: &str, ops: &[Operation], now: u64) -> bool {
     use pawline_core::plan::Operation as O;
-    if ops.is_empty() || ops.iter().any(|o| matches!(o, O::Answer { .. } | O::Search { .. } | O::Weather { .. } | O::AskOnline { .. } | O::DeckDraft { .. } | O::DeckText { .. } | O::GenerateImage { .. } | O::Undo { .. } | O::List { .. })) {
+    if ops.is_empty() || ops.iter().any(|o| matches!(o, O::Answer { .. } | O::Search { .. } | O::Weather { .. } | O::AskOnline { .. } | O::ChatOnline { .. } | O::DeckDraft { .. } | O::DeckText { .. } | O::GenerateImage { .. } | O::Undo { .. } | O::List { .. })) {
         return false;
     }
     let steps: Vec<String> = ops.iter().map(|o| o.describe()).collect();
@@ -363,9 +383,48 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     if let Some(r) = weather_pick(input) {
         return r;
     }
+    {
+        let low = input.trim().to_lowercase();
+        let low = low.trim_end_matches(['.', '!']).trim();
+        if matches!(low, "forget our chat" | "clear our chat" | "forget this chat" | "forget our conversation" | "new chat" | "new conversation") {
+            state.online_ctx.clear();
+            state.online_pending = None;
+            if matches!(low, "new chat" | "new conversation") {
+                state.chat = Default::default();
+            }
+        }
+        if matches!(low, "chat online" | "start online chat" | "turn on online chat" | "online chat" | "chat online on") {
+            state.online_chat = true;
+            return reply("message", format!("Online chat is ON for this session only. Nothing was sent. Commands and offline help still run first and locally. When something is not a command, I will show you a card with the exact messages (up to {} earlier lines of this session, kept in memory only) before anything goes to text.pollinations.ai (free, no account, your IP address is visible, one request per 45 seconds). Your files, location and saved history are never sent; texts with paths, addresses, numbers, quotes or passwords are not offered. Replies are AI-written and may be wrong. Say \"chat off\" to stop or \"forget our chat\" to clear the lines.", pawline_core::textfallback::CHAT_CONTEXT_LINES));
+        }
+        if matches!(low, "chat off" | "stop online chat" | "turn off online chat" | "chat offline" | "online chat off") {
+            state.online_chat = false;
+            state.online_ctx.clear();
+            state.online_pending = None;
+            return reply("message", "Online chat is OFF and its lines are cleared. Nothing was sent.".into());
+        }
+    }
     // A trailing "please" is politeness, not part of a name (never for quoted names or right after called/folder/file).
     if let Some(stripped) = pawline_core::chat::strip_trailing_polite(input) {
         if pawline_core::typo::recognised_cmd(&stripped) {
+            // An existing item whose real name ends in " please" makes the reading ambiguous: ask, never silently retarget.
+            let low = input.to_lowercase();
+            let clash: Vec<String> = std::fs::read_dir(&state.root)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| n.to_lowercase().ends_with(" please") && low.contains(&n.to_lowercase()))
+                .collect();
+            if !clash.is_empty() {
+                let name = &clash[0];
+                let plain = stripped.clone();
+                let quoted = input.trim().to_lowercase().replacen(&name.to_lowercase(), &format!("\"{name}\""), 1);
+                let mut out = reply("message", format!("There is an item really named \"{name}\" here, so \"please\" could be politeness or part of the name. Nothing was done. Pick one reading, then you will see the full path and confirm.\n1. without \"please\": {plain}\n2. the exact name: {quoted}"));
+                state.picks = vec![plain.clone(), quoted.clone()];
+                out.plan = Some(format!("{plain}\t{plain}\n{quoted}\t{quoted}"));
+                return out;
+            }
             let mut r = handle_text_inner(state, &stripped);
             r.text = format!("(I read the trailing \"please\" as politeness, not part of the name. Put the name in quotes to keep it.)\n{}", r.text);
             return r;
@@ -502,6 +561,29 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     }
     // Online answer for a plain question the parser and the assist could not handle.
     // Automatic only for clearly general questions; anything else asks first.
+    if matches!(&r, Err(PawError::Parse(_))) && state.online_chat {
+        match pawline_core::textfallback::chat_block_reason(input) {
+            None => {
+                let ctx: Vec<String> = state.online_ctx.iter().rev().take(pawline_core::textfallback::CHAT_CONTEXT_LINES).rev().map(|c| pawline_core::textfallback::chat_clip(c)).collect();
+                let ctx = if ctx.len() % 2 == 1 { ctx[1..].to_vec() } else { ctx };
+                let op = Operation::ChatOnline { context: ctx, text: input.trim().to_string() };
+                let summary = format!("1. {}", op.describe());
+                state.online_pending = Some(input.trim().to_string());
+                state.pending = Some(Plan {
+                    ops: vec![op],
+                    needs_confirmation: true,
+                    confirmation_reasons: vec!["This would send your text to an online service.".into()],
+                    assist_derived: false,
+                    notes: vec![],
+                });
+                state.pending_request = None;
+                return UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) };
+            }
+            Some(why) => {
+                return reply("message", format!("Online chat is on, but I did not offer to send that: it {why}. Nothing was sent. (Say \"chat off\" to stop online chat.)"));
+            }
+        }
+    }
     if matches!(&r, Err(PawError::Parse(_))) {
         use pawline_core::textfallback::{classify, Class};
         match classify(input) {
@@ -555,6 +637,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                         pawline_core::plan::Operation::Weather { .. } => o.detail.clone(),
                         pawline_core::plan::Operation::Search { .. }
                         | pawline_core::plan::Operation::AskOnline { .. }
+                        | pawline_core::plan::Operation::ChatOnline { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)
                         }
@@ -653,6 +736,7 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
                         pawline_core::plan::Operation::Weather { .. } => o.detail.clone(),
                         pawline_core::plan::Operation::Search { .. }
                         | pawline_core::plan::Operation::AskOnline { .. }
+                        | pawline_core::plan::Operation::ChatOnline { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)
                         }
@@ -682,6 +766,9 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
     UiState {
         picks: vec![],
         chat: Default::default(),
+        online_chat: false,
+        online_ctx: vec![],
+        online_pending: None,
         organize_pending: None,
         undo_batch: None,
         carried: std::time::Duration::ZERO,
@@ -921,6 +1008,7 @@ pub fn cancel(state: &mut UiState) -> UiReply {
     state.carried = std::time::Duration::ZERO;
     state.pending = None;
     state.pending_request = None;
+    state.online_pending = None;
     state.organize_pending = None;
     reply("message", "Cancelled. Nothing was done.".into())
 }
@@ -1056,7 +1144,21 @@ pub fn folder_candidates(home: &std::path::Path, query: &str, cancel: &dyn Fn() 
 /// Confirmation received -> result ready: carried planning time plus execution.
 pub fn confirm_inner(state: &mut UiState) -> UiReply {
     let t = std::time::Instant::now();
+    let pending_user = state.online_pending.take();
     let r = confirm_exec(state);
+    if let Some(u) = pending_user {
+        let ans = LAST_CHAT_ANSWER.lock().unwrap().take();
+        if matches!(r.kind.as_str(), "md" | "executed") {
+            if let Some(a) = ans {
+                state.online_ctx.push(u);
+                state.online_ctx.push(a);
+                let n = state.online_ctx.len();
+                if n > 2 * pawline_core::textfallback::CHAT_CONTEXT_LINES {
+                    state.online_ctx.drain(..n - 2 * pawline_core::textfallback::CHAT_CONTEXT_LINES);
+                }
+            }
+        }
+    }
     finish(state, r, t.elapsed())
 }
 
@@ -1270,6 +1372,60 @@ mod memory_tests {
         // jokes and hints are plain text
         assert!(handle_text(&mut st, "tell me a joke").text.len() > 10);
         assert!(handle_text(&mut st, "hint").text.starts_with("Hint:"));
+    }
+
+    #[test]
+    fn literal_name_ending_in_please_is_asked_not_retargeted() {
+        let root = org_root("chat3");
+        std::fs::create_dir_all(root.join("tidy please")).unwrap();
+        std::fs::create_dir_all(root.join("tidy")).unwrap();
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "delete the folder tidy please");
+        assert_eq!(r.kind, "message", "{}", r.text);
+        assert!(r.text.contains("really named") && r.text.contains("2. the exact name"), "{}", r.text);
+        assert!(st.pending.is_none() && root.join("tidy").exists() && root.join("tidy please").exists());
+        assert_eq!(st.picks.len(), 2);
+        // picking the exact-name reading still goes to a confirm card naming the literal folder
+        let pick = st.picks[1].clone();
+        let r = handle_text(&mut st, &pick);
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(r.text.contains("tidy please"), "{}", r.text);
+        cancel(&mut st);
+        assert!(root.join("tidy please").exists());
+    }
+
+    #[test]
+    fn online_chat_is_off_by_default_and_only_shows_a_card() {
+        let root = org_root("chat4");
+        let mut st = new_state(root.clone());
+        // off: an unrecognised sentence is not offered online as chat
+        let r = handle_text(&mut st, "I think clouds look like sheep");
+        assert!(!r.text.contains("Online chat turn"), "{}", r.text);
+        let r = handle_text(&mut st, "chat online");
+        assert!(r.text.contains("ON for this session") && r.text.contains("Nothing was sent") && st.online_chat);
+        // on: the exact messages are on a confirm card; nothing is sent until confirmed
+        let r = handle_text(&mut st, "I think clouds look like sheep");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(r.text.contains("POST EXACTLY") && r.text.contains("you: I think clouds look like sheep") && r.text.contains("system:"), "{}", r.text);
+        assert!(st.online_ctx.is_empty(), "nothing recorded before it was sent");
+        cancel(&mut st);
+        assert!(st.online_pending.is_none() && st.online_ctx.is_empty());
+        // private or action-like text is never offered
+        for s in ["my password is hunter2 ok", "tell Bob@example.com hi", "look at ~/notes.txt for me", "I earned 123456 dollars"] {
+            let r = handle_text(&mut st, s);
+            assert!(r.kind != "confirm" && !r.text.contains("POST EXACTLY"), "{s}: {}", r.text);
+            assert!(st.pending.is_none(), "{s}");
+        }
+        // a real command still runs locally and is not turned into chat
+        let r = handle_text(&mut st, "delete the folder nothere");
+        assert!(!r.text.contains("POST EXACTLY"), "{}", r.text);
+        st.online_ctx = vec!["a".into(), "b".into()];
+        handle_text(&mut st, "forget our chat");
+        assert!(st.online_ctx.is_empty());
+        handle_text(&mut st, "chat off");
+        assert!(!st.online_chat);
+        let r = handle_text(&mut st, "I think clouds look like sheep");
+        assert!(!r.text.contains("POST EXACTLY"));
     }
 
     #[test]

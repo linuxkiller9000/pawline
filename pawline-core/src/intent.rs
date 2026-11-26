@@ -619,7 +619,14 @@ fn parse_location(s: &str) -> Option<LocationRef> {
 
 fn name_to_location(words: &str) -> LocationRef {
     parse_location(words).unwrap_or_else(|| {
-        let w = words.trim().trim_end_matches('.').to_string();
+        let mut w = words.trim().trim_end_matches('.').to_string();
+        // A name in matching quotes is the literal name (spaces and a trailing "please" included); the quotes are not part of it.
+        for q in ['"', '\''] {
+            if w.chars().count() >= 3 && w.starts_with(q) && w.ends_with(q) {
+                w = w[1..w.len() - 1].to_string();
+                break;
+            }
+        }
         if w.starts_with('/') || w.starts_with('~') {
             LocationRef::Explicit(w)
         } else {

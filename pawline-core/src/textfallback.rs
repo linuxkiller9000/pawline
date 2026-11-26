@@ -117,6 +117,12 @@ fn words(lower: &str) -> Vec<String> {
 }
 
 fn has_private_marker(input: &str) -> bool {
+    private_marker(input, false)
+}
+
+/// `chat` = a casual chat line: personal pronouns and names are allowed (the exact text is shown on a card first); paths, addresses,
+/// numbers, files and account words still block.
+fn private_marker(input: &str, chat: bool) -> bool {
     let lower = input.to_lowercase();
     if lower.contains('/') || lower.contains('\\') || lower.contains('~') || lower.contains('@') || lower.contains("://") || lower.contains("www.") {
         return true;
@@ -140,8 +146,12 @@ fn has_private_marker(input: &str) -> bool {
         }
     }
     let w = words(&lower);
-    if w.iter().any(|x| PRIVATE_WORDS.contains(&x.as_str())) {
+    const PRONOUNS: &[&str] = &["my", "mine", "me", "i", "i'm", "i've", "i'd", "our", "ours", "we", "home"];
+    if w.iter().any(|x| PRIVATE_WORDS.contains(&x.as_str()) && !(chat && PRONOUNS.contains(&x.as_str()))) {
         return true;
+    }
+    if chat {
+        return input.contains('"') || input.contains('`');
     }
     // quoted text and mid-sentence capitalised words (names, places) may be private
     if input.contains('"') || input.contains('`') {
@@ -226,6 +236,69 @@ pub fn ask(http: &dyn Http, question: &str, cancelled: &dyn Fn() -> bool, commit
             r.status,
             r.retry_after.map(|s| format!(" Try again in about {s} seconds.")).unwrap_or_default()
         ))),
+        s => Err(PawError::Exec(format!("Pollinations answered HTTP {s}; no answer."))),
+    }
+}
+
+pub const CHAT_SYSTEM: &str = "You are Pawline, a friendly desktop helper. Reply briefly in plain text. You cannot run commands or access files.";
+pub const CHAT_LINE_CHARS: usize = 300;
+/// Earlier lines of the session that are sent along (3 exchanges at most).
+pub const CHAT_CONTEXT_LINES: usize = 6;
+
+/// Why a chat message must not be sent (None = may be offered for sending after the user confirms).
+pub fn chat_block_reason(text: &str) -> Option<&'static str> {
+    let t = text.trim();
+    if t.is_empty() { return Some("empty"); }
+    if t.chars().count() > CHAT_LINE_CHARS { return Some("longer than 300 characters"); }
+    if t.chars().any(|c| c.is_control()) { return Some("contains control characters"); }
+    if looks_like_secret(t) { return Some("looks like a password or secret"); }
+    if private_marker(t, true) { return Some("looks like it names a path, address, number or private detail"); }
+    if words(&t.to_lowercase()).iter().any(|w| LOCAL_WORDS.contains(&w.as_str())) { return Some("sounds like a local file command"); }
+    None
+}
+
+/// Cut a stored context line to the sent size (never mid-way past the limit).
+pub fn chat_clip(s: &str) -> String { s.chars().take(CHAT_LINE_CHARS).collect() }
+
+/// One chat turn: POST the exact messages shown on the card. Nothing else is sent.
+pub fn chat(http: &dyn Http, context: &[String], text: &str, cancelled: &dyn Fn() -> bool, commit: &dyn Fn() -> bool) -> Result<String, PawError> {
+    if let Some(why) = chat_block_reason(text) {
+        return Err(PawError::Validation(format!("I did not send that: it {why}. Nothing was sent.")));
+    }
+    let mut msgs = vec![serde_json::json!({"role": "system", "content": CHAT_SYSTEM})];
+    for (i, c) in context.iter().take(CHAT_CONTEXT_LINES).enumerate() {
+        msgs.push(serde_json::json!({"role": if i % 2 == 0 { "user" } else { "assistant" }, "content": chat_clip(c)}));
+    }
+    msgs.push(serde_json::json!({"role": "user", "content": text.trim()}));
+    let body = serde_json::json!({"model": "openai", "messages": msgs}).to_string();
+    let r = http.post("https://text.pollinations.ai/openai", &[], &body).map_err(|_| {
+        PawError::Exec("Pollinations could not be reached (offline, or the service is down). There is no answer, and Pawline did not retry. Offline help and commands still work; try again later or say \"chat off\".".into())
+    })?;
+    if cancelled() || !commit() {
+        return Err(PawError::Exec("Cancelled. Nothing was kept, and a late answer will be discarded.".into()));
+    }
+    match r.status {
+        200 => {
+            let raw = String::from_utf8_lossy(&r.body).to_string();
+            let content = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| v["choices"][0]["message"]["content"].as_str().map(|s| s.to_string()))
+                .ok_or_else(|| PawError::Exec("Pollinations sent a reply Pawline could not read; no answer.".into()))?;
+            let clean: String = content.chars().filter(|c| !c.is_control() || *c == '\n').collect();
+            let clean = clean.trim();
+            if clean.is_empty() {
+                return Err(PawError::Exec("Pollinations sent an empty answer.".into()));
+            }
+            let n = clean.chars().count();
+            let shown: String = clean.chars().take(MAX_ANSWER_CHARS).collect();
+            Ok(if n > MAX_ANSWER_CHARS { format!("{shown}\n(shortened: {n} characters received)") } else { shown })
+        }
+        402 | 429 => Err(PawError::Exec(format!(
+            "Pollinations said its free limit is reached right now (HTTP {}).{} I never pay or upgrade, so there is no answer.",
+            r.status,
+            r.retry_after.map(|s| format!(" Try again in about {s} seconds.")).unwrap_or_default()
+        ))),
+        413 => Err(PawError::Exec("Pollinations said the chat was too long (HTTP 413). Say \"forget our chat\" and try again.".into())),
         s => Err(PawError::Exec(format!("Pollinations answered HTTP {s}; no answer."))),
     }
 }
@@ -353,5 +426,34 @@ mod tests {
         assert!(ask(&F(200, b"x"), "what is a cat", &|| true, &|| true).unwrap_err().to_string().contains("Cancelled"));
         assert!(ask(&F(200, b"x"), "what is a cat", &|| false, &|| false).unwrap_err().to_string().contains("Cancelled"));
         assert!(ask(&F(200, b"x"), &"q".repeat(301), &|| false, &|| true).unwrap_err().to_string().contains("won't cut"));
+    }
+
+    #[test]
+    fn chat_posts_exactly_the_shown_messages_and_blocks_private_text() {
+        let seen = std::cell::RefCell::new(vec![]);
+        struct P<'a>(&'a std::cell::RefCell<Vec<String>>, u16);
+        impl Http for P<'_> {
+            fn get(&self, u: &str, _: &[(&str, &str)]) -> Result<HttpReply, PawError> { self.0.borrow_mut().push(format!("GET {u}")); Err(PawError::Exec("no".into())) }
+            fn post(&self, u: &str, _: &[(&str, &str)], b: &str) -> Result<HttpReply, PawError> {
+                self.0.borrow_mut().push(format!("POST {u} {b}"));
+                Ok(HttpReply { status: self.1, retry_after: None, content_type: String::new(), body: br#"{"choices":[{"message":{"content":"Hi there"}}]}"#.to_vec() })
+            }
+        }
+        let ctx = vec!["hello".to_string(), "hi".to_string()];
+        let r = chat(&P(&seen, 200), &ctx, "how are you today", &|| false, &|| true).unwrap();
+        assert_eq!(r, "Hi there");
+        let s = seen.borrow();
+        assert_eq!(s.len(), 1);
+        assert!(s[0].starts_with("POST https://text.pollinations.ai/openai ") && s[0].contains("how are you today") && s[0].contains("hello"), "{}", s[0]);
+        drop(s);
+        for bad in ["my password is hunter2", "read ~/notes.txt to me", "delete the folder kp", "email bob@example.com", &"x".repeat(301)] {
+            let before = seen.borrow().len();
+            assert!(chat(&P(&seen, 200), &[], bad, &|| false, &|| true).is_err(), "{bad}");
+            assert_eq!(seen.borrow().len(), before, "nothing sent for {bad}");
+        }
+        assert!(chat(&P(&seen, 402), &[], "tell me more", &|| false, &|| true).is_err());
+        let n = seen.borrow().len();
+        assert!(chat(&P(&seen, 200), &[], "tell me more", &|| true, &|| true).is_err());
+        assert_eq!(seen.borrow().len(), n + 1);
     }
 }
