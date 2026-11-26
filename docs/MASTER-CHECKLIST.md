@@ -139,7 +139,7 @@ Status: PARTIAL. XFCE and KDE X11 (headless) checked. niri and KDE Wayland, the 
 - Preserve user settings and data during updates.
 - Rollback if an update breaks the app.
 - Clear changelog and version information.
-Status: OPEN (design in docs/UPDATE-DESIGN.md, nothing built). No update server exists; any version check is a network request and must follow the permission rules in 14. No signing or release commitment.
+Status: OPEN (design in docs/UPDATE-DESIGN.md, nothing built). No update server exists; any version check is a network request and must follow the permission rules in 14. No signing or release commitment. 24a (2026-11-26): docs/CHANGELOG.md drafted (hand-maintained DRAFT, clearly marked): an Unreleased section for the successor line since v0.2.1-beta grouped by theme, one section per released beta (v0.1.0/v0.1.1/v0.2.0/v0.2.1, dates from the git tags, content from the commit subjects in each range), and a note that the rc tags are candidates and v0.2.2-test.1 is a CI test tag, not a release. Grounded in git log only; no updater or version check consumes the file. Still open: version checking, safe update mechanism, rollback, and keeping the changelog current at each release.
 
 ## 25. Documentation (user section 27)
 - Installation guide.
