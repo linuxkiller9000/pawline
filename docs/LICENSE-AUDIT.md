@@ -29,5 +29,6 @@ Method: claims in NOTICE / NOTICE-fonts.txt verified against the actual files, u
 
 - pawline-native/testdata/t.jpg (660 B, 16x8 JPEG): test fixture added by the author in d51c549; assumed
   project-authored, pixel origin not provable from the repo. Not shipped in the binary.
-- GPL-3.0 (Pawline) + Apache-2.0 + OFL 1.1 + Liberation (GPLv2+exceptions) are compatible for this use:
-  fonts are embedded as data, not linked code; Apache-2.0 is GPLv3-compatible.
+- Compatibility note: GPL-3.0 (Pawline) + Apache-2.0 + OFL 1.1 + Liberation (GPLv2+exceptions) look compatible
+  for this use (fonts embedded as data, not linked code; Apache-2.0 is GPLv3-compatible). This is the developer's
+  reading, not legal advice, and an independent (non-author) review of this audit is still owed before release.

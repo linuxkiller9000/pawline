@@ -73,16 +73,27 @@ fn is_verb(word: &str) -> bool {
     VERBS.contains(&word)
 }
 
+/// Case-insensitive prefix check over only the separator's bytes - never lowercase the
+/// whole remaining string (that made clause scanning O(n^2): audit item 21 fuzz finding).
+fn starts_with_ci(s: &str, sep: &str) -> bool {
+    let b = s.as_bytes();
+    let p = sep.as_bytes();
+    b.len() >= p.len() && b[..p.len()].eq_ignore_ascii_case(p)
+}
+
 fn parse_sentence(s: &str, out: &mut Vec<Directive>) -> Result<(), PawError> {
     let mut rest = s.trim().trim_end_matches('.');
     // "inside <ref>, <command>" / "in <ref> <command>" prefixes re-target the clause.
     let mut base: Option<LocationRef> = None;
     loop {
-        let lower = rest.to_ascii_lowercase();
-        let stripped = lower.strip_prefix("inside ").or_else(|| lower.strip_prefix("in "));
-        let Some(after) = stripped else { break };
-        // find where the location words end: a comma, or the next command verb.
-        let prefix_len = rest.len() - after.len();
+        // Only the prefix bytes are compared (see starts_with_ci).
+        let prefix_len = if starts_with_ci(rest, "inside ") {
+            7
+        } else if starts_with_ci(rest, "in ") {
+            3
+        } else {
+            break;
+        };
         let body = &rest[prefix_len..];
         let (loc_words, remainder) = split_location_prefix(body);
         if loc_words.is_empty() {
@@ -154,7 +165,7 @@ fn split_clauses(s: &str) -> Vec<&str> {
             continue;
         }
         for sep in [" then ", " and then ", " and "] {
-            if s[i..].to_ascii_lowercase().starts_with(sep) {
+            if starts_with_ci(&s[i..], sep) {
                 let after = &s[i + sep.len()..];
                 let next_word = after.split_whitespace().next().unwrap_or("").to_lowercase();
                 if is_verb(&next_word) {
@@ -939,5 +950,107 @@ mod skills_tests {
                 o => panic!("{o:?}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod fuzz_tests {
+    //! Audit item 21: throw mutated and random input at the parser; it must always return
+    //! (Ok or Err), never panic, never wedge. Deterministic seeds, so a failure reproduces.
+    use super::parse;
+
+    fn xorshift(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    const SEEDS: &[&str] = &[
+        "make a folder called kitten paws",
+        "delete the file notes.txt",
+        "rename a.txt to b.txt",
+        "move Pics to Documents",
+        "copy /tmp/a.txt to /tmp",
+        "weather in Cairo",
+        "wiki tux",
+        "undo",
+        "open mpv",
+        "مساعدة",
+        "make a folder called \"quoted name\"",
+        "rename \"old name\" to \"new name\"",
+    ];
+
+    #[test]
+    fn fuzz_parse_never_panics_or_wedges() {
+        let mut state = 0x243F6A8885A308D3u64;
+        let pieces: Vec<String> = (0..64)
+            .map(|_| {
+                let n = (xorshift(&mut state) % 12 + 1) as usize;
+                (0..n)
+                    .map(|_| {
+                        let c = (xorshift(&mut state) % 40) as u8;
+                        match c {
+                            0..=25 => (b'a' + c) as char,
+                            26 => ' ',
+                            27 => '"',
+                            28 => '\\',
+                            29 => '/',
+                            30 => '.',
+                            31 => '~',
+                            32 => '-',
+                            33 => '\u{0644}', // Arabic lam
+                            34 => '\u{0645}', // Arabic meem
+                            35 => '\u{0}',
+                            36 => '\n',
+                            37 => '\'',
+                            38 => '%',
+                            _ => '9',
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let started = std::time::Instant::now();
+        let mut checked = 0u32;
+        for round in 0..2500 {
+            let seed = SEEDS[(round % SEEDS.len()) as usize];
+            // Mutations: splice random pieces into the seed, or a pure random string.
+            let mut input = String::new();
+            let parts = (xorshift(&mut state) % 5 + 1) as usize;
+            for i in 0..parts {
+                if i == 0 && round % 3 != 0 {
+                    input.push_str(seed);
+                }
+                input.push_str(&pieces[(xorshift(&mut state) % 64) as usize]);
+            }
+            if round % 100 == 0 {
+                eprintln!("fuzz round {round}");
+            }
+            let seen = input.clone();
+            let r = std::panic::catch_unwind(|| {
+                let _ = parse(&seen);
+            });
+            assert!(r.is_ok(), "parser panicked on input #{round}: {input:?}");
+            checked += 1;
+        }
+        // A few very long inputs must also return promptly.
+        for n in [10_000usize, 100_000, 500_000] {
+            eprintln!("fuzz big input {n}");
+            let big = "delete ".repeat(n / 7 + 1);
+            let seen = big.clone();
+            let t = std::time::Instant::now();
+            let r = std::panic::catch_unwind(|| {
+                let _ = parse(&seen);
+            });
+            assert!(r.is_ok(), "parser panicked on a {n}-byte input");
+            assert!(t.elapsed() < std::time::Duration::from_secs(5), "parser took {:?} on a {n}-byte input", t.elapsed());
+            checked += 1;
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(60), "fuzz run too slow: {:?}", started.elapsed());
+        eprintln!("fuzz: {checked} inputs, no panic, in {:?}", started.elapsed());
     }
 }

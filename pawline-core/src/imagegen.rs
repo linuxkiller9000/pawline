@@ -59,6 +59,9 @@ impl UreqHttp {
     pub fn new(timeout: Duration) -> Self {
         let cfg = ureq::Agent::config_builder()
             .http_status_as_error(false)
+            // A redirect chain can bounce the request to a host Pawline did not choose;
+            // cap it short so a compromised or confused API cannot relay far (audit item 21).
+            .max_redirects(3)
             .timeout_global(Some(timeout))
             .build();
         UreqHttp { agent: ureq::Agent::new_with_config(cfg) }

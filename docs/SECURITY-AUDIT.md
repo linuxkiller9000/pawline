@@ -49,3 +49,40 @@ Hosts present in source: text.pollinations.ai, image.pollinations.ai, aihorde.ne
 
 ## Integration of the sctk 0.21 migration (successor line, 8:17)
 Accepted by main on sway-only regression evidence. Successor line = baseline 97ba9a7 + migration. Rollback reference: branch successor/work-20261126-item23e-repeat (97ba9a7, sctk 0.19.2). Remote main untouched, no release. Unverified: KDE, niri, XFCE, orb drag, paste, fractional scale, GPU, multi-monitor. Two unmaintained warnings (rustybuzz, ttf-parser) remain; rustybuzz 0.20.1 RUSTSEC-2026-0206 and ttf-parser 0.25.1 RUSTSEC-2026-0192, 0 vulnerabilities, 162 crates scanned.
+
+
+## 2026-11-26 item 21 follow-up: HTTP limits, voice commands, parser fuzz (author: successor agent)
+
+### HTTP redirect / size-limit review
+- search.rs get_json_within had NO explicit body limit (ureq 3.5.2 default 10 MB) and followed ureq's default of
+  10 redirects. Fixed: explicit 2 MB limit (MAX_SEARCH_BYTES; real JSON replies are kilobytes) and max_redirects(3).
+- imagegen.rs UreqHttp (weather, pictures, decks, questions) already limited bodies to MAX_IMAGE_BYTES (8 MB);
+  added the same max_redirects(3). Redirect targets are not host-revalidated; the residual risk (a compromised
+  API redirecting to an unexpected host) is documented here, accepted for now because requests carry no
+  credentials or cookies and every online route is consent-carded first.
+- Behavioural tests (real localhost sockets, author-written): an_oversized_reply_is_refused_instead_of_filling_memory,
+  a_long_redirect_chain_is_refused, one_redirect_is_followed, a_server_that_never_answers_times_out_instead_of_hanging.
+
+### voice.rs custom-command audit (PAWLINE_REC_CMD / PAWLINE_STT_CMD / PAWLINE_TTS_CMD)
+- Custom commands are split on whitespace and exec'd directly (Command::new + args); NO shell anywhere: no injection.
+- The recorder WAV is created private (0600) with create_new before the recorder opens it; predictable temp names
+  are safe under a sticky /tmp and exclusive create.
+- Speech text reaches the TTS command on stdin, never through argument interpolation.
+- STT capture is bounded (64 KB) and cancelled jobs kill the whole process group.
+- Custom routes never claim local handling in labels (enforced by tests status_labels_claim_local_only_for_the_built_in_route
+  and the mic-notice tests). Residual, by design: custom commands run with the user's own privileges - they are the
+  user's own commands, and the UI says "custom, unchecked".
+
+### Parser fuzzing -> real DoS found and FIXED
+- New deterministic fuzz test (intent::fuzz_tests::fuzz_parse_never_panics_or_wedges, 2500 mutated/random inputs
+  plus 10KB/100KB/500KB monsters, behavioural) immediately found a wedge: "delete "x14286 (100 KB) did not return
+  within 90 s. Profiling (pawline-core/examples/probe.rs) showed clean O(n^2): 2k tokens 2.35s, 4k tokens 9.42s,
+  80KB of unknown words 77s.
+- Root cause: split_clauses called to_ascii_lowercase() on the WHOLE remaining suffix at every byte position, and
+  parse_sentence lowercased the whole remainder per location-prefix iteration. Fix: starts_with_ci compares only
+  the separator's bytes. Result: 4k tokens 9.42s -> 8.3ms; 80KB 77s -> 24ms; linear scaling verified by probe.
+- The fuzz test now passes in 0.22s and guards the regression. Probe kept at pawline-core/examples/probe.rs.
+
+### Caveats carried
+- This review is by the author side, not an independent reviewer; an independent security review is still owed.
+- License compatibility wording in docs/LICENSE-AUDIT.md is a developer reading, not legal advice.
