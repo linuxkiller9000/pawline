@@ -1,2 +1,6 @@
-arabic.ttf: Noto Sans Arabic, Copyright 2015-2020 Google LLC, SIL Open Font License 1.1 (http://scripts.sil.org/OFL).
-font.ttf: Liberation Sans (Liberation Fonts license).
+arabic.ttf: Noto Sans Arabic, Copyright 2015-2020 Google LLC, SIL Open Font License 1.1.
+  Full license text: OFL-NotoSansArabic.txt (also http://scripts.sil.org/OFL).
+font.ttf: Liberation Sans, Copyright (c) 2007 Red Hat, Inc., Liberation Fonts license
+  (GNU GPL v2 with font-embedding and name exceptions).
+  Full license text: LICENSE-LiberationFonts.txt
+  (also https://fedoraproject.org/wiki/Licensing/LiberationFontLicense).
