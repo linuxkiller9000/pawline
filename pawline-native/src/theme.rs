@@ -211,3 +211,85 @@ mod text_size_tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 }
+
+/// Item 20 "settings survive updates": the file outlives the binary, so every version
+/// must read what older and newer versions wrote without losing the user's choices.
+#[cfg(test)]
+mod update_survival_tests {
+    use super::*;
+
+    fn tmp(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let d = std::env::temp_dir().join(format!("pawline-upd-{tag}-{}", std::process::id()));
+        (d.clone(), d.join("ui-settings.txt"))
+    }
+
+    #[test]
+    fn old_version_partial_file_keeps_its_values_and_defaults_the_rest() {
+        let (d, f) = tmp("old");
+        std::fs::create_dir_all(&d).unwrap();
+        // A file from the first version, which knew only theme and drift.
+        std::fs::write(&f, "theme=Ocean\ndrift=off\n").unwrap();
+        let s = load(&f);
+        assert_eq!(s.theme, 1, "Ocean kept");
+        assert!(!s.drift, "drift kept");
+        assert_eq!(s.text_pct, 100);
+        assert!(!s.offline && !s.speak && !s.mic_blocked && !s.keep_history, "later keys default");
+        // The upgrade path: loading the old file and saving it again preserves the old choices.
+        save(&f, &s).unwrap();
+        let s2 = load(&f);
+        assert_eq!(s2.theme, 1);
+        assert!(!s2.drift);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn future_version_unknown_keys_are_ignored_and_known_keys_still_load() {
+        let (d, f) = tmp("future");
+        std::fs::create_dir_all(&d).unwrap();
+        // A file from a newer version with settings this build does not know.
+        std::fs::write(&f, "language=ar\ntheme=Forest\nvoice=fast\ndrift=off\nfuture_toggle=on\n").unwrap();
+        let s = load(&f);
+        assert_eq!(s.theme, 2, "Forest kept");
+        assert!(!s.drift);
+        // Note: a re-save writes only the keys this build knows, dropping unknown future keys.
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn one_corrupt_value_falls_back_without_losing_the_other_keys() {
+        let (d, f) = tmp("corrupt");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(&f, "theme=Rose\ntext=banana\nmic=garbage\ndrift=off\nhistory=on\n").unwrap();
+        let s = load(&f);
+        assert_eq!(s.theme, 3, "Rose kept");
+        assert!(!s.drift, "drift kept");
+        assert!(s.keep_history, "history kept");
+        assert_eq!(s.text_pct, 100, "bad text size falls back");
+        assert!(!s.mic_blocked, "bad mic value falls back");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn duplicate_keys_last_line_wins() {
+        let (d, f) = tmp("dup");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(&f, "theme=Ocean\ntheme=Rose\ndrift=off\ndrift=on\n").unwrap();
+        let s = load(&f);
+        assert_eq!(s.theme, 3, "the later theme line wins");
+        assert!(s.drift, "the later drift line wins");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn windows_line_endings_and_binary_garbage_do_not_break_loading() {
+        let (d, f) = tmp("crlf");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(&f, "theme=Forest\r\ndrift=off\r\n").unwrap();
+        let s = load(&f);
+        assert_eq!(s.theme, 2);
+        assert!(!s.drift);
+        std::fs::write(&f, [0xff, 0xfe, 0x00, 0x9c, b'=']).unwrap();
+        assert_eq!(load(&f), Settings::default(), "non-UTF-8 falls back to defaults, no panic");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

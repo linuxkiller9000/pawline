@@ -245,7 +245,11 @@ Reading: the debug-build typing latency gap is real and large; release on this V
 
 ### Item 20 slice 1 (PARTIAL)
 - "reset settings" (also "restore defaults"): text size, theme, drift, spoken replies go back to defaults. Offline mode, mic block and saved-conversation switch are NOT changed and nothing is deleted (stated in the reply). Unit test (structural, author-written) plus GUI proof, release build at 8513133, Xvfb sandbox: Forest theme at 150% text with offline=on, mic=blocked became Dusk at 100%, file kept offline=on, mic=blocked (/tmp/rs0c.png before, /tmp/rs1c.png after).
-- Still open: adjustable voice/language, animation control beyond drift, AI behaviour switches, model download/remove/update/integrity (model is compiled in), settings surviving an update (no updater exists; file format is forward-tolerant: unknown lines ignored, bad values fall back).
+
+### Item 20 slice 2 (PARTIAL): settings survive updates
+- Format-level proof, theme::update_survival_tests (5 behavioural tests, real temp files through the actual load/save code): old-version partial file keeps its values and defaults later keys, and an old file re-saved by the current build keeps its choices; future-version unknown keys are ignored while known keys still load; one corrupt value falls back without losing the other keys; duplicate keys resolve last-line-wins (documents current behaviour); CRLF endings parse, non-UTF-8 falls back to defaults without a panic.
+- Caveat: a re-save writes only the keys this build knows, so unknown future keys are dropped on the next save (documented in the test). No updater exists, so survival is proven at the file-format level, not against a real upgrade.
+- Still open: adjustable voice/language, animation control beyond drift, AI behaviour switches, model download/remove/update/integrity (model is compiled in), settings screen scroll/responsive layout before any new disclosure row, upgrade-survival proof against a real updater once one exists.
 
 2026-11-26 item 16 additions: corrupted model data handled gracefully, proven two ways. (1) Build-time:
 pawline-needle/build.rs now verifies the embedded needle3.cact sha256 against the audited upstream hash
