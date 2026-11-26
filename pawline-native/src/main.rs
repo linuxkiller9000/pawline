@@ -460,6 +460,9 @@ struct App {
     /// Pixels scrolled down from the top of the plan panel.
     plan_scroll: f32,
     busy: bool,
+    /// A Laya "thinking" line is on screen (experimental opt-in): the worker still
+    /// holds the request, but typing and Esc stay live and the next reply replaces it.
+    thinking: bool,
     menu_sel: usize,
     /// Folders from the last "zi" reply (inside the home area only); a click or Tab fills the input with "list <path>".
     zi_rows: Vec<String>,
@@ -2557,7 +2560,31 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
     }
 
     fn on_reply(&mut self, r: UiReply, preview: Vec<Vec<u8>>) {
+        // The experimental Laya wait posts an interim line so the wait is visible;
+        // the real reply replaces that line instead of adding a second one.
+        if r.kind == "thinking" {
+            if let Some(m) = self.msgs.iter_mut().rev().find(|m| !m.user && m.kind == "thinking") {
+                m.text = r.text.clone();
+            } else {
+                self.push(false, "thinking", r.text.clone(), None);
+            }
+            self.thinking = true;
+            self.draw();
+            return;
+        }
         self.busy = false;
+        let replaced_thinking = if self.thinking {
+            self.thinking = false;
+            if let Some(pos) = self.msgs.iter().rposition(|m| !m.user && m.kind == "thinking") {
+                self.msgs[pos].kind = r.kind.clone();
+                self.msgs[pos].text = r.text.clone();
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         if r.kind == "clearchat" {
             self.clear_conversation_view();
         }
@@ -2596,7 +2623,11 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
             self.ask_delete_conversation(r.plan.as_deref().unwrap_or(""));
             return;
         }
-        self.push(false, &r.kind, r.text.clone(), None);
+        if !replaced_thinking {
+            self.push(false, &r.kind, r.text.clone(), None);
+        } else {
+            self.persist_history();
+        }
         if r.kind == "md" {
             if let Some(m) = self.msgs.last_mut() {
                 m.md = true;
@@ -2828,7 +2859,7 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
                 }
             }
             Keysym::v | Keysym::V | Keysym::Insert if self.ctrl || (self.shift && e.keysym == Keysym::Insert) => {
-                if !self.busy {
+                if !self.busy || self.thinking {
                     if let Some(t) = self.clip_paste() {
                         // inserted as sanitised text only; never submits anything
                         self.input.insert(&t);
@@ -2858,7 +2889,7 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
                 self.draw();
             }
             _ => {
-                if !self.busy && !self.ctrl {
+                if (!self.busy || self.thinking) && !self.ctrl {
                     if let Some(t) = e.utf8 {
                         if !t.is_empty() && !t.chars().any(|c| c.is_control()) {
                             self.input.insert(&t);
@@ -3571,6 +3602,20 @@ fn run_terminal() {
 fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<(UiReply, Vec<Vec<u8>>)>) {
     let root = work_root();
     let mut st = bridge::new_state(root);
+    // Experimental Laya: the wait for the local model gets a visible line; the reply replaces it.
+    #[cfg(all(feature = "laya", not(windows)))]
+    {
+        let thinking_tx = back.clone();
+        bridge::set_laya_thinking_notifier(Some(Box::new(move || {
+            let _ = thinking_tx.send((
+                bridge::reply(
+                    "thinking",
+                    "Laya (experimental) is thinking... The model is local; the first suggestion of a session loads it, which can take a while on an old computer. You can keep typing; Esc stops the wait.".into(),
+                ),
+                Vec::new(),
+            ));
+        })));
+    }
     // Recovery notes from the previous run are shown first.
     if !st.notes.is_empty() {
         let n = st.notes.drain(..).collect::<Vec<_>>().join("\n");
@@ -3819,6 +3864,7 @@ fn main() {
         scroll: 0.0,
         plan_scroll: 0.0,
         busy: false,
+        thinking: false,
         menu_sel: 0,
         zi_rows: vec![],
         zi_sel: 0,

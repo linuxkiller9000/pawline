@@ -15,6 +15,34 @@ static CANCEL_UPTO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 pub fn request_cancel() {
     use std::sync::atomic::Ordering::SeqCst;
     CANCEL_UPTO.store(GEN.load(SeqCst), SeqCst);
+    #[cfg(all(feature = "laya", not(windows)))]
+    LAYA_CANCEL.store(true, SeqCst);
+}
+
+/// Esc during a Laya wait: the worker checks this after the model load and after routing
+/// and stops instead of suggesting. The model call itself is not interrupted.
+#[cfg(all(feature = "laya", not(windows)))]
+pub static LAYA_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+// The GUI worker installs a hook here so a visible "thinking" line appears while the
+// model loads or routes. Terminal mode installs nothing and behaves exactly as before.
+#[cfg(all(feature = "laya", not(windows)))]
+std::thread_local! {
+    static LAYA_THINKING: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(feature = "laya", not(windows)))]
+pub fn set_laya_thinking_notifier(f: Option<Box<dyn Fn()>>) {
+    LAYA_THINKING.with(|c| *c.borrow_mut() = f);
+}
+
+#[cfg(all(feature = "laya", not(windows)))]
+fn notify_laya_thinking() {
+    LAYA_THINKING.with(|c| {
+        if let Some(f) = c.borrow().as_ref() {
+            f();
+        }
+    });
 }
 
 /// Run one provider request on its own thread so Esc can end the wait now.
@@ -441,16 +469,28 @@ fn typo_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
 /// Runs on the worker thread like the other assists, so the window stays responsive.
 #[cfg(all(feature = "laya", not(windows)))]
 fn laya_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
+    use std::sync::atomic::Ordering::SeqCst;
+    LAYA_CANCEL.store(false, SeqCst);
     if !state.laya_tried {
         state.laya_tried = true;
         if let Some(dir) = crate::laya::model_dir() {
             if crate::laya::model_present(&dir) {
+                // The first load reads ~660 MB from disk; on an old computer this is
+                // the slow part, so the thinking line appears before it starts.
+                notify_laya_thinking();
                 state.laya = crate::laya::Laya::load(&dir).ok();
             }
         }
     }
+    if LAYA_CANCEL.swap(false, SeqCst) {
+        return Some(reply("message", "Stopped thinking. Nothing was suggested.".into()));
+    }
     let laya = state.laya.as_mut()?;
+    notify_laya_thinking();
     let route = laya.route(input)?;
+    if LAYA_CANCEL.swap(false, SeqCst) {
+        return Some(reply("message", "Stopped thinking. Nothing was suggested.".into()));
+    }
     let sug = crate::laya::suggest(route.intent, input)?;
     let mut out = reply(
         "message",
