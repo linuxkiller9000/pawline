@@ -308,6 +308,27 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
     }
     if first == "list" || first == "show" {
         let body = lower.splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim();
+        // optional tails: "... containing X" and "... page N" (names beyond the first 300).
+        let mut body = body.to_string();
+        let mut page = 1usize;
+        let mut contains = None;
+        if let Some(i) = body.rfind(" containing ").or_else(|| body.rfind(" matching ")) {
+            let skip = if body[i..].starts_with(" containing ") { 12 } else { 10 };
+            let word = body[i + skip..].trim().to_string();
+            if !word.is_empty() {
+                contains = Some(word);
+                body.truncate(i);
+            }
+        }
+        if let Some(i) = body.rfind(" page ") {
+            if let Ok(n) = body[i + 6..].trim().parse::<usize>() {
+                if n >= 1 {
+                    page = n;
+                    body.truncate(i);
+                }
+            }
+        }
+        let body = body.trim();
         let target = if body.is_empty() {
             LocationRef::CurrentDir
         } else {
@@ -315,7 +336,7 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
             let b = original_case(cmd, &lower, b);
             parse_location(b).unwrap_or_else(|| place_ref(b))
         };
-        return Ok(Directive::List { target });
+        return Ok(Directive::List { target, page, contains });
     }
     if matches!(first, "generate" | "draw" | "paint" | "imagine" | "render")
         || ((lower.contains("image of") || lower.contains("picture of")) && !lower.contains("wallpaper"))
@@ -745,7 +766,7 @@ mod case_tests {
             d => panic!("{d:?}"),
         }
         match one("list /Tmp/Foo") {
-            Directive::List { target } => assert_eq!(target, LocationRef::Explicit("/Tmp/Foo".into())),
+            Directive::List { target, .. } => assert_eq!(target, LocationRef::Explicit("/Tmp/Foo".into())),
             d => panic!("{d:?}"),
         }
     }

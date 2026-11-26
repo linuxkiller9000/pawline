@@ -516,23 +516,36 @@ impl ExecutionBackend for DirectFsBackend {
                 })?;
                 Ok(done(op, "copied (undo moves the copy to the trash)"))
             }
-            Operation::List { path } => {
+            Operation::List { path, page, contains } => {
                 let mut names = Vec::new();
                 for e in self.root.read_dir(self.rel(path)?)? {
                     names.push(e?.file_name().to_string_lossy().to_string());
                 }
                 names.sort();
+                if let Some(word) = contains {
+                    let w = word.to_lowercase();
+                    names.retain(|n| n.to_lowercase().contains(&w));
+                }
+                let total = names.len();
+                let start = (page.max(&1) - 1).saturating_mul(MAX_LIST_SHOWN);
                 Ok(OpOutcome {
                     op: op.clone(),
-                    detail: if names.is_empty() {
-                        "(empty)".into()
-                    } else if names.len() > MAX_LIST_SHOWN {
+                    detail: if total == 0 {
+                        if contains.is_some() { "(no names match)".into() } else { "(empty)".into() }
+                    } else if start >= total {
+                        format!("(no page {}: only {} names, {} per page)", page, total, MAX_LIST_SHOWN)
+                    } else if total > MAX_LIST_SHOWN {
+                        let end = (start + MAX_LIST_SHOWN).min(total);
+                        let pages = (total + MAX_LIST_SHOWN - 1) / MAX_LIST_SHOWN;
+                        let more = if end < total {
+                            format!(" Say \"list ... page {}\" for the next, or \"list ... containing WORD\" to filter.", page + 1)
+                        } else {
+                            String::new()
+                        };
                         format!(
-                            "{} ... and {} more (showing the first {} of {} names)",
-                            names[..MAX_LIST_SHOWN].join(", "),
-                            names.len() - MAX_LIST_SHOWN,
-                            MAX_LIST_SHOWN,
-                            names.len()
+                            "{}\n(names {}-{} of {}, page {} of {}.{})",
+                            names[start..end].join(", "),
+                            start + 1, end, total, page, pages, more
                         )
                     } else {
                         names.join(", ")

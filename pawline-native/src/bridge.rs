@@ -326,7 +326,7 @@ pub fn folders_of(ops: &[Operation]) -> Vec<std::path::PathBuf> {
     let mut v = vec![];
     for o in ops {
         match o {
-            O::CreateDir { path } | O::List { path } => v.push(path.clone()),
+            O::CreateDir { path } | O::List { path, .. } => v.push(path.clone()),
             O::CreateFile { path } => v.extend(path.parent().map(|p| p.to_path_buf())),
             O::Move { to, .. } | O::Copy { to, .. } | O::Rename { to, .. } => v.extend(to.parent().map(|p| p.to_path_buf())),
             _ => {}
@@ -1117,7 +1117,7 @@ pub fn chip_conflict(input: &str, dir: &std::path::Path) -> Option<String> {
     let bare = |l: &L| matches!(l, L::Named(_));
     let hit = ds.iter().any(|d| match d {
         D::Create { parent, .. } => bare(parent),
-        D::Delete { target } | D::List { target } => bare(target),
+        D::Delete { target } | D::List { target, .. } => bare(target),
         D::Rename { target, .. } => bare(target),
         D::Move { target, dest } | D::Copy { target, dest } => bare(target) || bare(dest),
         D::SetWallpaper { image, .. } => bare(image),
@@ -1305,7 +1305,7 @@ mod memory_tests {
             O::AskOnline { text: "q".into() },
             O::Weather { place: "Cairo".into() },
             O::Undo { entry: 1, summary: "u".into() },
-            O::List { path: "/tmp".into() },
+            O::List { path: "/tmp".into(), page: 1, contains: None },
         ] {
             assert!(!remember_steps(&p, "other", &[bad.clone()], 1));
             assert!(!remember_steps(&p, "mixed", &[dir.clone(), bad], 1));

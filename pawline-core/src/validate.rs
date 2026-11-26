@@ -481,9 +481,9 @@ impl Validator {
                         ops.push(Operation::Copy { from, to });
                     }
                 }
-                Directive::List { target } => {
+                Directive::List { target, page, contains } => {
                     let path = self.resolve_location(target, &sim)?;
-                    ops.push(Operation::List { path });
+                    ops.push(Operation::List { path, page: *page, contains: contains.clone() });
                 }
                 Directive::Undo => {
                     let text = std::fs::read_to_string(self.root.join(crate::journal::JOURNAL))

@@ -26,7 +26,7 @@ pub enum Directive {
     Rename { target: LocationRef, new_name: String },
     Move { target: LocationRef, dest: LocationRef },
     Copy { target: LocationRef, dest: LocationRef },
-    List { target: LocationRef },
+    List { target: LocationRef, page: usize, contains: Option<String> },
     OpenApp { name: String },
     /// Undo the most recent journaled change.
     Undo,
@@ -70,7 +70,7 @@ pub enum Operation {
     Rename { from: PathBuf, to: PathBuf },
     Move { from: PathBuf, to: PathBuf },
     Copy { from: PathBuf, to: PathBuf },
-    List { path: PathBuf },
+    List { path: PathBuf, page: usize, contains: Option<String> },
     /// Make a smaller copy of one video with ffmpeg at `to`. The original is never touched.
     Shrink { from: PathBuf, to: PathBuf },
     /// Build a .pptx presentation at `to` from the outline file `from`. Local only; the outline is not changed.
@@ -105,7 +105,7 @@ impl Operation {
             }
             Operation::Move { from, to } => format!("Move {} to {}", from.display(), to.display()),
             Operation::Copy { from, to } => format!("Copy {} to {}", from.display(), to.display()),
-            Operation::List { path } => format!("List {}", path.display()),
+            Operation::List { path, .. } => format!("List {}", path.display()),
             Operation::DeckDraft { topic } => format!(
                 "Write a presentation outline about \"{topic}\" with the free online model (Pollinations \"Classic\": no account, best effort, about one request per 45 seconds per IP address). Pawline sends exactly this request text in the web address it asks text.pollinations.ai for, plus the usual web details (your IP address, a \"Pawline\" user-agent): \"{}\" Nothing from your files, chat history or location is sent. Pollinations says the same address returns the same cached answer to anyone who has it, and what it keeps is its own policy. Do not put passwords, secrets or private information in the topic. The reply is only shown to you as a draft, nothing is saved, and it is AI-written text that may contain mistakes: check every fact before you use it.",
                 crate::deck::author_prompt(topic)

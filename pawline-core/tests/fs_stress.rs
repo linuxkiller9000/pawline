@@ -203,7 +203,7 @@ fn big_listing_is_cut_and_says_so() {
     match r {
         Response::Executed(o) => {
             let t = &o[0].detail;
-            assert!(t.contains("and 700 more") && t.contains("of 1000 names"), "{}", &t[t.len().saturating_sub(90)..]);
+            assert!(t.contains("names 1-300 of 1000") && t.contains("page 1 of 4"), "{}", &t[t.len().saturating_sub(90)..]);
             assert!(!t.contains("f0999"));
         }
         Response::Message(m) => panic!("message instead of a listing: {m}"),
@@ -226,4 +226,38 @@ fn fifo_in_home_does_not_hang_list_or_delete() {
     });
     let (a, b) = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("engine blocked on a FIFO");
     eprintln!("fifo list={a:.60} delete={b:.60}");
+}
+
+#[test]
+fn big_listing_can_be_paged_and_filtered_on_a_real_folder() {
+    // Behavioural test on a real temp folder with 700 files (author-written).
+    let (d, mut e, be) = home("paging");
+    std::fs::create_dir(d.join("docs")).unwrap();
+    for i in 0..700 {
+        std::fs::File::create(d.join("docs").join(format!("f{i:04}.txt"))).unwrap();
+    }
+    let mut run = |cmd: &str| -> String {
+        let r = match e.handle(cmd, &be, false).unwrap() {
+            Response::Confirm(p) => e.execute_plan(p, &be).unwrap(),
+            o => o,
+        };
+        match r {
+            Response::Executed(o) => o[0].detail.clone(),
+            Response::Message(m) => m,
+            Response::Failed { error, .. } => format!("FAILED {error}"),
+            _ => "OTHER".into(),
+        }
+    };
+    let p1 = run("list docs");
+    assert!(p1.contains("f0000.txt") && p1.contains("f0299.txt") && !p1.contains("f0300.txt"));
+    assert!(p1.contains("page 1 of 3"));
+    let p2 = run("list docs page 2");
+    assert!(p2.contains("f0300.txt") && p2.contains("f0599.txt") && !p2.contains("f0299.txt"), "{p2:.80}");
+    let p3 = run("list docs page 3");
+    assert!(p3.contains("f0699.txt") && p3.contains("names 601-700 of 700"));
+    assert!(run("list docs page 4").contains("no page 4"));
+    assert_eq!(run("list docs containing f0650"), "f0650.txt");
+    assert!(run("list docs containing zzz").contains("no names match"));
+    // nothing was changed
+    assert_eq!(std::fs::read_dir(d.join("docs")).unwrap().count(), 700);
 }

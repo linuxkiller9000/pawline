@@ -163,6 +163,8 @@ fn one_call(v: &Value) -> Result<Directive, PawError> {
         }),
         "list_items" => Ok(Directive::List {
             target: to_location(arg(&args, "path")?),
+            page: 1,
+            contains: None,
         }),
         "open_app" => Ok(Directive::OpenApp {
             name: arg(&args, "name")?.to_string(),
