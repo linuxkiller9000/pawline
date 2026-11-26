@@ -998,14 +998,14 @@ impl App {
         let by = h - 46.0;
         self.r_yes = (PAD, by, 120.0, 34.0);
         self.r_no = (PAD + 136.0, by, 120.0, 34.0);
-        let (yes_bg, yes_fg) = if can_yes { ((46, 125, 80, 255), (255, 255, 255)) } else { ((60, 60, 66, 255), (130, 130, 140)) };
+        let (yes_bg, yes_fg) = if can_yes { ((46, 125, 80, 255), (255, 255, 255)) } else { ((60, 60, 66, 255), theme::DISABLED_FG) };
         fill(pm, &rrect(self.r_yes.0, by, 120.0, 34.0, 10.0), yes_bg);
         fill(pm, &rrect(self.r_no.0, by, 120.0, 34.0, 10.0), (110, 60, 70, 255));
         self.text(pm, "Do it", self.r_yes.0 + 36.0, by + 23.0, PX, yes_fg, (0.0, h));
         self.text(pm, "Cancel", self.r_no.0 + 30.0, by + 23.0, PX, (255, 255, 255), (0.0, h));
         let fr = if self.focus == Btn::Yes { self.r_yes } else { self.r_no };
         stroke(pm, &rrect(fr.0 - 2.0, fr.1 - 2.0, fr.2 + 4.0, fr.3 + 4.0, 12.0), (34, 211, 238, 255), 2.5);
-        self.text(pm, "Left/Right, Enter", PAD + 280.0, by + 21.0, 12.0, (150, 145, 175), (0.0, h));
+        self.text(pm, "Left/Right, Enter", PAD + 280.0, by + 21.0, 12.0, theme::HINT, (0.0, h));
     }
 
     /// "Do it" is enabled only when the entire plan has been seen.
@@ -1072,7 +1072,7 @@ impl App {
         self.orb(pm, 20.0, h / 2.0, 11.0, self.busy);
         let chars: Vec<char> = self.input.text().chars().collect();
         if chars.is_empty() {
-            self.text(pm, "Ask Pawline...", 40.0, h / 2.0 + 5.0, PX, (150, 145, 175), (0.0, w));
+            self.text(pm, "Ask Pawline...", 40.0, h / 2.0 + 5.0, PX, theme::HINT, (0.0, w));
             return;
         }
         let full = self.shaper.layout(&self.input.text(), PX, shape::Mode::Auto);

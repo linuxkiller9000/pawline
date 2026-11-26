@@ -21,6 +21,27 @@ pub const THEMES: [Theme; 4] = [
     Theme { name: "Rose", bg: [(44, 26, 36), (58, 30, 46), (40, 28, 52)], user: (120, 52, 82), input: (74, 42, 58), accent: (170, 80, 120) },
 ];
 
+/// Quiet text (hints, placeholder) and the label of a disabled button. Chosen so each is at least 4.5:1 on every panel colour
+/// and input surface below (checked by `quiet_text_meets_4_5_to_1_on_every_surface`).
+pub const HINT: Rgb = (172, 167, 197);
+pub const DISABLED_FG: Rgb = (175, 175, 185);
+pub const DISABLED_BG: Rgb = (60, 60, 66);
+pub const NOTE: Rgb = (190, 185, 215);
+pub const CARD_BG: Rgb = (29, 20, 64);
+
+/// WCAG 2.x contrast ratio between two sRGB colours.
+pub fn contrast(a: Rgb, b: Rgb) -> f32 {
+    fn lum(c: Rgb) -> f32 {
+        let f = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * f(c.0) + 0.7152 * f(c.1) + 0.0722 * f(c.2)
+    }
+    let (x, y) = (lum(a), lum(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Settings {
     pub theme: usize,
@@ -85,5 +106,38 @@ mod tests {
         assert!(!t.contains("request"));
         assert_eq!(drift_offset(5.0, 300.0, false), 0.0);
         assert!(drift_offset(5.0, 300.0, true).abs() <= 300.0 * 0.45 + 0.01);
+    }
+}
+
+#[cfg(test)]
+mod contrast_tests {
+    use super::*;
+
+    #[test]
+    fn quiet_text_meets_4_5_to_1_on_every_surface() {
+        let mut surfaces: Vec<(String, Rgb)> = vec![("card".into(), CARD_BG)];
+        for t in THEMES.iter() {
+            for (i, c) in t.bg.iter().enumerate() {
+                surfaces.push((format!("{} bg{i}", t.name), *c));
+            }
+            surfaces.push((format!("{} input", t.name), t.input));
+        }
+        for (name, bg) in &surfaces {
+            for (what, fg) in [("hint", HINT), ("note", NOTE), ("body", (235, 230, 255))] {
+                let r = contrast(fg, *bg);
+                assert!(r >= 4.5, "{what} on {name}: {r:.2}");
+            }
+        }
+        for t in THEMES.iter() {
+            let r = contrast((235, 230, 255), t.user);
+            assert!(r >= 4.5, "text on {} user bubble: {r:.2}", t.name);
+        }
+        assert!(contrast(DISABLED_FG, DISABLED_BG) >= 4.5);
+    }
+
+    #[test]
+    fn contrast_function_matches_known_values() {
+        assert!((contrast((0, 0, 0), (255, 255, 255)) - 21.0).abs() < 0.01);
+        assert!((contrast((119, 119, 119), (255, 255, 255)) - 4.48).abs() < 0.02);
     }
 }

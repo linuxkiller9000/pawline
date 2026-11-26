@@ -55,7 +55,7 @@ Earlier extras: multiple monitors, reacting to panel changes, theme performance,
 - Contrast options.
 - Reduced-motion option.
 - Focus indicators.
-Status: OPEN. Existing: keyboard flow for cards (Cancel focused by default), focus ring on the card buttons.
+Status: OPEN. Existing: keyboard flow for cards (Cancel focused by default), focus ring on the card buttons. 13a (2026-11-26): computed WCAG contrast audit of the fixed text colours; hint/placeholder text was 2.6 to 4.3:1 on some theme surfaces and the disabled Do it label was 2.9:1, both raised to at least 4.5:1 and locked by a unit test (theme.rs contrast_tests: hint, note, body text on every theme gradient stop, input surface and card; body text on every user bubble). Computed from colour values, NOT a pixel measurement, NOT a user test; text over the animated gradient between stops and anti-aliasing not measured. NOT done: text scaling, high-contrast option, reduced-motion following a system setting (only the in-app Colours drift toggle, default on), screen-reader support (none, custom CPU-drawn window, no accessibility tree), multi-monitor, panel-change reaction, full keyboard-only pass.
 
 ## 14. Privacy and permissions (user section 17)
 - Clear permission controls for microphone, files, internet, and AI.
