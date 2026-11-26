@@ -236,6 +236,14 @@ Reading: the debug-build typing latency gap is real and large; release on this V
   Repro: write /tmp/ad2/history.txt (lines "U|A<TAB>text") and ui-settings.txt with history=on; PAWLINE_PERF=1 PAWLINE_DATA=/tmp/ad2 pawline --open; xdotool type and PageUp/PageDown.
   Not measured: the 10k-line session-only chat beyond the 100-message cap, model load time/RSS (Needle model is compiled in; no separate load step measured), Wayland, battery, the user's CPU. A ~31 ms redraw on this VM may be several times slower on an old CPU; unmeasured there.
 
+### Item 18 slice 4 (2026-11-26; sandbox VM 1 vCPU, Xvfb 1366x768, release opt2 no LTO at c5f4817, NOT the user's CPU): bubble-growth curve to the 200-view cap + embedded-model load/RSS.
+- Workload: slice-3 history file (100 messages x ~3980 chars, 50 EN / 50 AR, 561900 bytes, history=on, assist=on), then 60 typed "hi" exchanges -> 101 restored bubbles + 120 new = 221 -> 200-view cap engaged (drop marker at view top; marker pixel proven in an earlier slice).
+- Restore phase (101 large mixed-script bubbles): first redraws 41.8-44.6 ms, RSS 23.1 MB.
+- Capped phase (200 bubbles): 6 sampled redraws 34.5-38.8 ms. Redraw cost stays bounded at the cap; no growth with bubble count (capped window holds short "hi" bubbles, which is why it samples slightly below the large-bubble restore phase). RSS after 60 exchanges 23.9 MB (+0.8 MB across 221 pushes).
+- Embedded model (first gibberish suggestion with assist=on, cactus arena): RSS 20.7 MB -> 118.8 MB (~98 MB delta at cactus_load: weights arena + inference buffers; the arena is the process-global mapping root-caused in the item 21 SIGSEGV fix). Generation did NOT finish within 40.7 s on this 1-vCPU VM, so no first-suggestion latency is claimed; load itself (RSS jump) is what this slice measures.
+- Pixels: /tmp/bg0c.png (restored large-bubble view), /tmp/bg1c.png (capped view tail after 60 exchanges), /tmp/bgm2c.png (scrolled mid-view showing older/newer chrome). Method: PAWLINE_PERF=1 draw_ms samples from the app log, VmRSS from /proc.
+- Still not measured: Wayland, battery, real low-memory pressure, the user's actual CPU. All numbers above are this sandbox VM only.
+
 ### Item 19 status review (nothing new built; evidence per bullet, PARTIAL)
 - New/clear conversation: "new chat"/"forget our chat" (session lines). Covered by bridge tests.
 - Persistence: opt-in only, OFF by default, one Settings row, 100 messages x 4000 chars cap, unencrypted file disclosed (15b/15c, pixel proof hs150c, hist_restoredc).
