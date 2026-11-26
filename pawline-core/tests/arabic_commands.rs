@@ -199,3 +199,13 @@ fn small_arabic_chat_replies_and_never_runs_anything() {
 fn has(s: &str) -> bool {
     pawline_core::arabic::has_arabic(s)
 }
+
+#[test]
+fn arabic_howto_questions_get_an_example_and_run_nothing() {
+    for a in ["كيف احذف مجلد؟", "لا تحذف المجلد x", "هل ممكن امسح ملف a.txt؟", "كيف اعمل مجلد جديد"] {
+        match translate(a) {
+            Outcome::Reply(t) => assert!(t.contains("مثل:") && t.contains("Nothing was run"), "{a}: {t}"),
+            o => panic!("{a}: {o:?}"),
+        }
+    }
+}

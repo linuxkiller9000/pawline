@@ -33,3 +33,6 @@ After an Arabic command, a fixed Arabic line is added: "تم." after a finished 
 
 ## 11d: small Arabic chat (partial)
 A fixed set of whole-message Arabic chat inputs gets a fixed Arabic reply: how are you, who are you, what can you do (the help text), and a tell-me-a-joke set of 4 jokes. Deterministic, nothing runs, nothing is read or sent. It is NOT open Arabic conversation: no follow-up memory, no Arabic discussion of actions (a how-to or question still gets the generic "nothing was run" line), no dialect coverage measured, confirm cards and errors stay English.
+
+## 11e: Arabic how-to / negation replies (partial)
+A question or negation that contains a known Arabic action word (delete, create, rename, move, copy) gets an Arabic reply saying nothing was run, with a fixed example command. The example is generic, never built from the user's words. Other questions get the generic line.

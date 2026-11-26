@@ -357,6 +357,24 @@ pub fn translate(input: &str) -> Outcome {
         }
     }
     if blocked {
+        // Discussing an action is not requesting it: say how to ask, with a fixed example. Nothing runs.
+        let has = |set: &[&str]| t.iter().any(|x| set.contains(&x.1.as_str()));
+        let ex = if has(DELETE) {
+            Some("احذف المجلد مشاريع")
+        } else if has(CREATE) {
+            Some("اعمل مجلد اسمه مشاريع")
+        } else if has(RENAME) {
+            Some("غير اسم a.txt الى b.txt")
+        } else if has(MOVE) {
+            Some("انقل a.txt الى المستندات")
+        } else if has(COPY) {
+            Some("انسخ a.txt الى المستندات")
+        } else {
+            None
+        };
+        if let Some(ex) = ex {
+            return Outcome::Reply(format!("لم أنفّذ شيئاً، لأن كلامك سؤال أو نفي. إن أردت التنفيذ اكتب الأمر مباشرة، مثل: {ex}. سيظهر لك المسار الكامل وتؤكد قبل أي تغيير. (Nothing was run: this reads as a question or a negation.)"));
+        }
         return Outcome::Reply("هذا يبدو سؤالاً أو نفياً، فلم أنفّذ شيئاً. إن أردت أمراً اكتبه مباشرة، مثل: اعمل مجلد اسمه مشاريع. (Nothing was run: this reads as a question or a negation.)".into());
     }
     // Command-word typo: only the first word, only distance 1, only when the fixed head word is unique and the rest then parses.
