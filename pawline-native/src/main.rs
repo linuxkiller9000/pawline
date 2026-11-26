@@ -1671,7 +1671,22 @@ impl App {
                 return;
             }
         }
-        self.push(true, "user", t.clone(), quote);
+        self.push(true, "user", t.clone(), quote.clone());
+        if matches!(t.to_lowercase().trim_end_matches(['.', '!']), "reset settings" | "restore default settings" | "restore defaults" | "reset to defaults") {
+            theme::reset_look(&mut self.settings);
+            theme::set_text_pct(self.settings.text_pct);
+            if !self.settings.speak {
+                self.stop_speaking();
+            }
+            self.scroll = 0.0;
+            self.plan_scroll = 0.0;
+            if let Some(p) = settings_path() {
+                let _ = theme::save(&p, &self.settings);
+            }
+            self.push(false, "message", "Text size, theme, drifting colours and spoken replies are back to their defaults. Offline mode, the microphone block and the saved-conversation switch were not changed, and no file or conversation was deleted.".into(), None);
+            self.draw();
+            return;
+        }
         self.busy = true;
         let _ = self.tx.send(Req::Text(t, self.pill.clone()));
     }

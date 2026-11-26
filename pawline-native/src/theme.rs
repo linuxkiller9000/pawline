@@ -74,6 +74,16 @@ impl Default for Settings {
     }
 }
 
+/// "reset settings": text size, theme, drift and spoken replies go back to their defaults.
+/// The privacy switches (offline, mic block, saved conversation) are deliberately left as they are.
+pub fn reset_look(s: &mut Settings) {
+    let d = Settings::default();
+    s.text_pct = d.text_pct;
+    s.theme = d.theme;
+    s.drift = d.drift;
+    s.speak = d.speak;
+}
+
 pub fn load(path: &Path) -> Settings {
     let mut s = Settings::default();
     if let Ok(t) = std::fs::read_to_string(path) {
@@ -115,6 +125,13 @@ pub fn drift_offset(secs: f32, w: f32, drift: bool) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reset_look_restores_look_and_keeps_every_privacy_switch() {
+        let mut s = Settings { text_pct: 150, offline: true, theme: 2, drift: false, speak: true, mic_blocked: true, keep_history: true };
+        reset_look(&mut s);
+        assert_eq!(s, Settings { offline: true, mic_blocked: true, keep_history: true, ..Settings::default() });
+    }
+
     #[test]
     fn settings_round_trip_and_bad_files_fall_back() {
         let d = std::env::temp_dir().join(format!("pawline-theme-{}", std::process::id()));
