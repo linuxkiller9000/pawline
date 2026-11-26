@@ -6,6 +6,7 @@
 //! this parser cannot handle; those proposals re-enter at validation and never
 //! bypass it.
 
+pub mod actions;
 pub mod apps;
 pub mod arabic;
 pub mod weather;

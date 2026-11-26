@@ -350,6 +350,10 @@ pub struct UiState {
     pub picks: Vec<String>,
     /// Steps of an organize plan waiting for a yes, and of the last organize that ran (for "undo organize"). Memory only.
     pub organize_pending: Option<usize>,
+    /// The last confirmed command that fully ran, so "save that as NAME" has something exact to save. Memory only.
+    pub action_candidate: Option<pawline_core::actions::Candidate>,
+    /// A saved action whose delete card is on screen; only the card's Approve removes it.
+    pub action_delete_pending: Option<String>,
     pub undo_batch: Option<usize>,
     /// Offline conversation: a few recent lines, memory only, never written to disk.
     pub chat: pawline_core::chat::ChatState,
@@ -900,6 +904,9 @@ Nothing is sent from your machine, and after setup Laya works fully offline. You
         }
         return r;
     }
+    if let Some(r) = action_command(state, input) {
+        return r;
+    }
     if let Some(r) = deck_write_command(state, input).or_else(|| deck_save_command(state, input)).or_else(|| deck_edit_command(state, input)).or_else(|| deck_check_command(state, input)) {
         return r;
     }
@@ -1085,6 +1092,8 @@ Nothing is sent from your machine, and after setup Laya works fully offline. You
         Ok(Response::Executed(ops)) => {
             state.undo_batch = None; // anything else that ran since an organize means "undo organize" is no longer the last thing
             let done: Vec<String> = ops.iter().map(|o| o.op.describe()).collect();
+            let creates_only = pawline_core::actions::ops_are_creates_only(&ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>());
+            state.action_candidate = Some(pawline_core::actions::Candidate { command: input.to_string(), steps: done.clone(), creates_only });
             if let Some(p) = pawline_core::dirs::own_path() {
                 pawline_core::dirs::record_own(&p, &folders_of(&ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>()), pawline_core::searchmem::now_secs());
             }
@@ -1215,6 +1224,9 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
         state.laya_setup_pending = false;
         return laya_setup_exec(state);
     }
+    if let Some(name) = state.action_delete_pending.take() {
+        return action_delete_exec(state, &name);
+    }
     let plan = match state.pending.take() {
         Some(p) => p,
         None => return reply("error", "Nothing waiting for confirmation.".into()),
@@ -1244,6 +1256,10 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
                 remember_steps(&p, req, &ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>(), pawline_core::searchmem::now_secs());
             }
             let done: Vec<String> = ops.iter().map(|o| o.op.describe()).collect();
+            if let Some(req) = request.as_deref() {
+                let creates_only = pawline_core::actions::ops_are_creates_only(&ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>());
+                state.action_candidate = Some(pawline_core::actions::Candidate { command: req.to_string(), steps: done.clone(), creates_only });
+            }
             let body = if ops.len() == 1
                 && matches!(ops[0].op, pawline_core::plan::Operation::Answer { .. })
             {
@@ -1301,6 +1317,8 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
         online_ctx: vec![],
         online_pending: None,
         organize_pending: None,
+        action_candidate: None,
+        action_delete_pending: None,
         undo_batch: None,
         carried: std::time::Duration::ZERO,
         engine: Engine::new(root.clone()),
@@ -1358,6 +1376,135 @@ fn deck_write_command(state: &mut UiState, input: &str) -> Option<UiReply> {
             pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
     state.organize_pending = None;
     Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) })
+}
+
+/// Saved actions: "save that as NAME", "run saved action NAME", "list saved actions",
+/// "show saved action NAME", "delete saved action NAME". The store is re-read on every
+/// command so two windows never disagree for long; every run re-parses the stored command
+/// with the deterministic parser only and needs the usual card.
+fn action_command(state: &mut UiState, input: &str) -> Option<UiReply> {
+    use pawline_core::actions as act;
+    let meta = act::parse_meta(input)?;
+    match meta {
+        act::Meta::Save(name) => {
+            let Some(cand) = state.action_candidate.clone() else {
+                return Some(reply("message", "There is nothing to save yet. Run a command first, then say \"save that as NAME\". Nothing was changed.".into()));
+            };
+            if !cand.creates_only {
+                return Some(reply("message", "That can't be saved: only create-folder, create-file and copy actions can be saved for now. Nothing was changed.".into()));
+            }
+            let directives = match pawline_core::intent::parse(&cand.command) {
+                Ok(d) => d,
+                Err(e) => return Some(reply("message", format!("That command cannot be saved: {e}. Nothing was changed."))),
+            };
+            if let Err(why) = act::directives_not_session_bound(&directives) {
+                return Some(reply("message", format!("That can't be saved: {why}. Nothing was changed.")));
+            }
+            let mut all = match act::load(&state.root) {
+                Ok(a) => a,
+                Err(e) => return Some(reply("error", format!("The saved-actions store could not be read: {e}. Nothing was changed."))),
+            };
+            match act::add(&mut all, &name, &cand) {
+                Err(e) => Some(reply("message", format!("{e} Nothing was changed."))),
+                Ok(()) => match act::store(&state.root, &all) {
+                    Ok(()) => Some(reply("message", format!("Saved as \"{name}\": {}. Run it with \"run saved action {name}\". It is re-checked against the disk and needs your confirmation every single time; it never runs by itself, on a schedule, or from history.", cand.command))),
+                    Err(e) => Some(reply("error", format!("The action could not be written: {e}. Nothing was saved."))),
+                },
+            }
+        }
+        act::Meta::List => {
+            let all = match act::load(&state.root) {
+                Ok(a) => a,
+                Err(e) => return Some(reply("error", format!("The saved-actions store could not be read: {e}."))),
+            };
+            if all.is_empty() {
+                return Some(reply("message", "No saved actions yet. After a command runs, \"save that as NAME\" keeps it for re-use. Nothing was changed.".into()));
+            }
+            let mut t = format!("{} saved action(s). Each one is re-checked and confirmed every time it runs; nothing runs by itself.\n", all.len());
+            for a in &all {
+                t.push_str(&format!("- {}: {}\n", a.name, a.command));
+            }
+            Some(reply("message", t))
+        }
+        act::Meta::Show(name) => {
+            let all = match act::load(&state.root) {
+                Ok(a) => a,
+                Err(e) => return Some(reply("error", format!("The saved-actions store could not be read: {e}."))),
+            };
+            match act::find(&all, &name) {
+                Some(a) => Some(reply("message", format!("Saved action, re-checked and confirmed every time it runs:\n{}", act::describe_saved(a)))),
+                None => Some(reply("message", format!("There is no saved action called \"{name}\". Nothing was changed."))),
+            }
+        }
+        act::Meta::Delete(name) => {
+            let all = match act::load(&state.root) {
+                Ok(a) => a,
+                Err(e) => return Some(reply("error", format!("The saved-actions store could not be read: {e}."))),
+            };
+            let Some(a) = act::find(&all, &name) else {
+                return Some(reply("message", format!("There is no saved action called \"{name}\". Nothing was changed.")));
+            };
+            let real = a.name.clone();
+            let desc = act::describe_saved(a);
+            // Deleting a saved action loses the stored command and steps, so it gets the same card as other destructive steps.
+            state.pending = None;
+            state.pending_request = None;
+            pawline_core::pending::clear(&state.root);
+            state.organize_pending = None;
+            state.action_delete_pending = Some(real.clone());
+            Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n1. Delete saved action \"{real}\". The stored command and its saved steps are removed from the actions file; no file or folder on disk is touched:\n{desc}"), plan: None })
+        }
+        act::Meta::Run(name) => {
+            let all = match act::load(&state.root) {
+                Ok(a) => a,
+                Err(e) => return Some(reply("error", format!("The saved-actions store could not be read: {e}. Nothing was run."))),
+            };
+            let Some(a) = act::find(&all, &name) else {
+                return Some(reply("message", format!("There is no saved action called \"{name}\". Nothing was run.")));
+            };
+            // Deterministic re-parse only: the assist and Laya are never consulted for a saved action.
+            let mut plan = match state.engine.plan_with(&a.command, None) {
+                Ok(p) => p,
+                Err(e) => return Some(reply("failed", format!("Saved action \"{}\" did NOT run: the command fails its checks against the disk as it is now ({e}). If that is expected, delete the action and save it again when it fits. Nothing was run.", a.name))),
+            };
+            let now: Vec<String> = plan.ops.iter().map(|o| o.describe()).collect();
+            if now != a.steps {
+                let mut t = format!("Saved action \"{}\" was NOT run: what it would do now differs from what was saved. The command or the disk changed.\n\nSaved:\n", a.name);
+                for (i, st) in a.steps.iter().enumerate() {
+                    t.push_str(&format!("  {}. {}\n", i + 1, st));
+                }
+                t.push_str("Now:\n");
+                for (i, st) in now.iter().enumerate() {
+                    t.push_str(&format!("  {}. {}\n", i + 1, st));
+                }
+                t.push_str("If the new version is what you want, run the command yourself once, then save it again.");
+                return Some(reply("failed", t));
+            }
+            plan.needs_confirmation = true; // a saved action always asks, every time
+            let summary = format!("Saved action \"{}\" (re-checked against the disk just now; it matches what was saved):\n{}", a.name, now.iter().enumerate().map(|(i, st)| format!("{}. {}", i + 1, st)).collect::<Vec<_>>().join("\n"));
+            pawline_core::pending::save(&state.root, &plan, &a.command);
+            state.pending = Some(plan);
+            state.pending_request = Some(a.command.clone());
+            state.organize_pending = None;
+            Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) })
+        }
+    }
+}
+
+/// The delete card's Approve: remove the action and rewrite the store atomically.
+fn action_delete_exec(state: &mut UiState, name: &str) -> UiReply {
+    use pawline_core::actions as act;
+    let mut all = match act::load(&state.root) {
+        Ok(a) => a,
+        Err(e) => return reply("error", format!("The saved-actions store could not be read: {e}. Nothing was deleted.")),
+    };
+    match act::remove(&mut all, name) {
+        Err(e) => reply("message", format!("{e}. Nothing was deleted.")),
+        Ok(()) => match act::store(&state.root, &all) {
+            Ok(()) => reply("message", format!("Deleted saved action \"{name}\". No file or folder on disk was touched.")),
+            Err(e) => reply("error", format!("The store could not be rewritten: {e}. The action may still be there; check with \"list saved actions\".")),
+        },
+    }
 }
 
 /// "edit slide 2 title to ...", "change slide 2 line 1 to ...", "delete slide 3" on the reviewed draft. Only acts while a draft
@@ -1613,6 +1760,7 @@ pub fn cancel(state: &mut UiState) -> UiReply {
             pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
     state.online_pending = None;
     state.organize_pending = None;
+    state.action_delete_pending = None;
     reply("message", "Cancelled. Nothing was done.".into())
 }
 
@@ -2001,6 +2149,78 @@ mod memory_tests {
         assert_eq!(r.kind, "confirm", "{}", r.text);
         let _ = cancel(&mut st);
         netgate::set_offline_for_this_thread(None);
+    }
+
+    #[test]
+    fn saved_actions_full_lifecycle_with_drift_refusal_and_delete_card() {
+        let root = org_root("actions1");
+        let mut st = new_state(root.clone());
+        // nothing ran yet
+        let r = handle_text(&mut st, "save that as demo");
+        assert!(r.text.contains("nothing to save yet"), "{}", r.text);
+        // run a saveable command (explicit path); creates run without a card
+        let cmd = format!("make a folder called kk in {}", root.display());
+        let r = handle_text(&mut st, &cmd);
+        assert!(r.text.contains("kk"), "{}", r.text);
+        assert!(root.join("kk").is_dir());
+        // save it
+        let r = handle_text(&mut st, "save that as demo");
+        assert!(r.text.contains("Saved as \"demo\"") && r.text.contains("never runs by itself"), "{}", r.text);
+        // list + show
+        let r = handle_text(&mut st, "list saved actions");
+        assert!(r.text.contains("demo") && r.text.contains(&cmd), "{}", r.text);
+        let r = handle_text(&mut st, "show saved action demo");
+        assert!(r.text.contains("Create folder"), "{}", r.text);
+        // delete the folder on disk, then re-run the saved action through its card
+        std::fs::remove_dir(root.join("kk")).unwrap();
+        let r = handle_text(&mut st, "run saved action demo");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(r.text.contains("re-checked against the disk"), "{}", r.text);
+        let r = confirm_inner(&mut st);
+        assert!(root.join("kk").is_dir(), "the saved action ran after its card: {}", r.text);
+        // drift: tamper with the stored steps; the run must refuse and show both plans
+        let p = root.join(pawline_core::actions::ACTIONS);
+        let t = std::fs::read_to_string(&p).unwrap().replace("Create folder", "Create file");
+        std::fs::write(&p, t).unwrap();
+        std::fs::remove_dir(root.join("kk")).unwrap(); // disk as the action expects: the step comparison, not validation, must catch the tampering
+        let r = handle_text(&mut st, "run saved action demo");
+        assert_eq!(r.kind, "failed", "{}", r.text);
+        assert!(r.text.contains("NOT run") && r.text.contains("Saved:") && r.text.contains("Now:"), "{}", r.text);
+        assert!(!root.join("kk").exists(), "a refused run creates nothing");
+        // restore the store, then delete via its card (cancel keeps it, approve removes it)
+        let t = std::fs::read_to_string(&p).unwrap().replace("Create file", "Create folder");
+        std::fs::write(&p, t).unwrap();
+        let r = handle_text(&mut st, "delete saved action demo");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        let r = cancel(&mut st);
+        assert!(r.text.contains("Nothing was done"));
+        let r = handle_text(&mut st, "list saved actions");
+        assert!(r.text.contains("demo"), "cancel kept it: {}", r.text);
+        let r = handle_text(&mut st, "delete saved action demo");
+        assert_eq!(r.kind, "confirm");
+        let r = confirm_inner(&mut st);
+        assert!(r.text.contains("Deleted saved action \"demo\""), "{}", r.text);
+        let r = handle_text(&mut st, "list saved actions");
+        assert!(r.text.contains("No saved actions yet"), "{}", r.text);
+    }
+
+    #[test]
+    fn unsaveable_commands_are_refused_at_save_time() {
+        let root = org_root("actions2");
+        let mut st = new_state(root.clone());
+        // a bare folder name depends on the session
+        let r = handle_text(&mut st, "make a folder called bb");
+        assert!(r.text.contains("bb"), "{}", r.text);
+        let r = handle_text(&mut st, "save that as b1");
+        assert!(r.text.contains("depends on this session") || r.text.contains("full path"), "{}", r.text);
+        // a delete is not a saveable kind
+        std::fs::create_dir_all(root.join("dd")).unwrap();
+        let r = handle_text(&mut st, "delete the folder dd");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        let rr = confirm_inner(&mut st);
+        assert!(rr.text.contains("dd") || rr.kind == "executed", "{}", rr.text);
+        let r = handle_text(&mut st, "save that as d1");
+        assert!(r.text.contains("only create-folder, create-file and copy"), "{}", r.text);
     }
 
     #[test]

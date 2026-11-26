@@ -179,6 +179,13 @@ signing or release commitment without approval. Publishing needs the user's expl
 - Tests: 4 core + 1 bridge end-to-end (refusals, review content, save-card repeat, stale check dropped after edit, /etc refusal), all behavioural. Xvfb pixel proof: live Pollinations draft then the check review then the save card.
 - NOT in this slice: fetching a URL as the source (needs the network disclosure flow; queued), checking tables/charts, any notion of truth beyond word presence.
 
+### Saved actions re-added (2026-11-27; removed in v0.2.1-beta, now on the current parser + card flow)
+- "save that as NAME" saves the last fully-confirmed run's command + step texts; "run saved action NAME" re-parses the stored command deterministically (assist and Laya never consulted), re-validates against the disk as it is now, compares the fresh steps with the saved ones, refuses with both plans shown on any difference, and otherwise shows the usual confirm card (typing never approves; the 15b pending-confirm record covers it too). "list saved actions", "show saved action NAME" (read-only), "delete saved action NAME" behind its own confirm card (the store is user data).
+- Store: .local/share/pawline/actions.tsv, dir 0700, file 0600, atomic temp+rename, 200 actions, 40-char names, control characters refused, oversize/corrupt store errors out (never read as empty).
+- Saveability: only create-folder / create-file / copy plans (kind check captured where the plan still exists); session-bound commands ("it", "that", bare names, current-dir) refused at save time from a fresh deterministic parse. A run whose command no longer validates against the disk (e.g. target already exists) refuses with the validation reason.
+- Tests: 6 core (phrases, names, roundtrip+no-overwrite, control chars, on-disk private permissions, oversize refused) + 2 bridge end-to-end (full lifecycle with tamper-refusal showing both plans and delete card cancel/approve; bare-name and delete refusals). Behavioural, real files in temp homes.
+- NOT in this slice: scheduling, chaining, variables, running from history, saveable delete/rename/move.
+
 ### 14c microphone control (PARTIAL)
 - Settings row "Microphone" (mic= key, default allowed). Blocked: the mic button records nothing and says so. One-time session notice before the first recording: private temp file, local transcription, deletion, text only goes into the box, custom STT/REC commands not controlled.
 - File access: Pawline's own file actions are confined to the home folder and need a confirm card.
