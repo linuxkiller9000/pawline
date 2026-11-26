@@ -171,12 +171,12 @@ signing or release commitment without approval. Publishing needs the user's expl
 ## Tracked cross-item notes (from main, 3:35)
 - 14 privacy: claims for the earlier GET routes (Q&A, deck draft, search) and the new POST chat route must be stated per route, not generalized from one. The privacy facts on the chat card come from pollinations.ai/privacy (2026-11-17) only.
 - 18 performance: debug-build GUI typing latency is slow (long input redraw); measure and fix, no performance claim yet.
-- 21/25: provider terms and privacy pages must be read in full before release; the 2026-11-26 read was a skim (no full legal review claimed).
+- 21/25: provider terms and privacy pages were read in full on 2026-11-26 for every online route (Open-Meteo, Wikimedia, DuckDuckGo, Pollinations, AI Horde); findings and two card corrections are in docs/PROVIDER-TERMS.md. Reading is the developer's, not legal advice; re-read before any release.
 
 ### 14c microphone control (PARTIAL)
 - Settings row "Microphone" (mic= key, default allowed). Blocked: the mic button records nothing and says so. One-time session notice before the first recording: private temp file, local transcription, deletion, text only goes into the box, custom STT/REC commands not controlled.
 - File access: Pawline's own file actions are confined to the home folder and need a confirm card.
-- Still open: per-permission screen for files/internet/AI, Tauri UI has no switches, full privacy audit, provider terms full read, real mic hardware.
+- Still open: per-permission screen for files/internet/AI, Tauri UI has no switches, full privacy audit, real mic hardware. (Provider terms full read: done 2026-11-26, docs/PROVIDER-TERMS.md.)
 - 14c follow-up: blocking the mic now also cancels an in-flight transcription (not only a recording). `voice::accept_transcript` drops stale, cancelled or mic-blocked transcripts (unit-tested; process-level cancel/kill tests already existed). Xvfb check with fake recorder/STT commands (labelled fixtures, not a real mic): blocked mid-transcription, draft stayed empty after the engine would have answered, no temp WAV left. The chat list now reserves room above the voice bar so the first-recording notice is not clipped.
 - 14c label fix: listening/transcribing status labels claim "on this computer, not uploaded" only on the built-in route; a custom PAWLINE_REC_CMD / PAWLINE_STT_CMD shows "custom ..., unchecked" (voice::listening_label / working_label, unit-tested; Xvfb pixels checked, not clipped).
 
