@@ -28,6 +28,14 @@ fn norm(s: &str) -> String {
     s.to_lowercase().split(|c: char| c.is_whitespace() || c == '-' || c == '_').filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
+/// Windows has no .desktop entries: only an exact executable name on PATH is found (Start Menu shortcuts are not read
+/// yet, so apps that are not on PATH cannot be opened by name there).
+#[cfg(windows)]
+pub fn default_dirs() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+#[cfg(not(windows))]
 pub fn default_dirs() -> Vec<PathBuf> {
     let mut v = Vec::new();
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -104,13 +112,52 @@ pub fn parse_exec(line: &str) -> Vec<String> {
         .collect()
 }
 
+/// Extensions Windows may launch directly. Scripts (.bat, .cmd) are not here on purpose: they go through the command
+/// interpreter, which would break "no shell, exact argument vector".
+#[cfg(windows)]
+const EXE_EXTS: &[&str] = &["exe", "com"];
+#[cfg(not(windows))]
+const EXE_EXTS: &[&str] = &[];
+
+#[cfg(windows)]
+const PATH_SEP: char = ';';
+#[cfg(not(windows))]
+const PATH_SEP: char = ':';
+
 fn which(exe: &str, path_env: &str) -> Option<PathBuf> {
+    which_with(exe, path_env, PATH_SEP, EXE_EXTS, cfg!(windows))
+}
+
+/// PATH lookup with an explicit separator and extension list (the extension list is empty on Unix). On Windows a
+/// bare name only matches `name.exe` / `name.com`, a name that already ends in one of those is taken as written, and
+/// names with a path separator or drive colon are never searched for.
+fn which_with(exe: &str, path_env: &str, sep: char, exts: &[&str], windows: bool) -> Option<PathBuf> {
+    if windows {
+        if exe.contains('/') || exe.contains('\\') || exe.contains(':') || exe.is_empty() {
+            return None;
+        }
+        let lower = exe.to_lowercase();
+        let names: Vec<String> = if exts.iter().any(|e| lower.ends_with(&format!(".{e}"))) {
+            vec![exe.to_string()]
+        } else {
+            exts.iter().map(|e| format!("{exe}.{e}")).collect()
+        };
+        for d in path_env.split(sep).filter(|d| !d.is_empty()) {
+            for n in &names {
+                let p = Path::new(d).join(n);
+                if std::fs::metadata(&p).map(|m| m.is_file()).unwrap_or(false) {
+                    return Some(p);
+                }
+            }
+        }
+        return None;
+    }
     if exe.contains('/') {
         let p = PathBuf::from(exe);
         let md = std::fs::metadata(&p).ok()?;
         return (crate::platform::is_executable(&md)).then_some(p);
     }
-    for d in path_env.split(':').filter(|d| !d.is_empty()) {
+    for d in path_env.split(sep).filter(|d| !d.is_empty()) {
         let p = Path::new(d).join(exe);
         if let Ok(md) = std::fs::metadata(&p) {
             if crate::platform::is_executable(&md) {
@@ -267,6 +314,30 @@ pub fn launch(argv: &[String]) -> Result<String, PawError> {
         let _ = child.wait();
     });
     Ok(format!("Started {exe} (process {pid}). It runs on its own; Pawline does not watch it."))
+}
+
+#[cfg(test)]
+mod windows_tests {
+    use super::*;
+    #[test]
+    fn windows_lookup_is_exe_only_and_exact() {
+        let d = std::env::temp_dir().join(format!("pawline-win-which-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        for f in ["notepad.exe", "tool.cmd", "run.bat", "x.com"] {
+            std::fs::write(d.join(f), b"x").unwrap();
+        }
+        let path = format!("/nonexistent;{}", d.display());
+        let ex = ["exe", "com"];
+        assert_eq!(which_with("notepad", &path, ';', &ex, true), Some(d.join("notepad.exe")));
+        assert_eq!(which_with("NOTEPAD.EXE", &path, ';', &ex, true).is_some(), false, "case of the file on disk is the filesystem's job; Linux FS is case-sensitive");
+        assert_eq!(which_with("x", &path, ';', &ex, true), Some(d.join("x.com")));
+        assert!(which_with("tool", &path, ';', &ex, true).is_none(), "scripts are refused");
+        assert!(which_with("run.bat", &path, ';', &ex, true).is_none(), "scripts are refused");
+        assert!(which_with("..\\notepad", &path, ';', &ex, true).is_none(), "path separators are refused");
+        assert!(which_with("C:notepad", &path, ';', &ex, true).is_none(), "drive prefixes are refused");
+        assert!(which_with("", &path, ';', &ex, true).is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
 
 #[cfg(test)]

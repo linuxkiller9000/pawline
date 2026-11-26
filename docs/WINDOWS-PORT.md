@@ -24,6 +24,11 @@ Check commands: `cargo check -p pawline-core --target x86_64-pc-windows-gnu`; `c
 - Visibly unavailable on Windows: panel control socket (--ctl, widgets), embedded Needle assist (Cactus runtime is Linux-only; stubs report unavailable), moving files, saving new files, file identity (undo), swaybg handling. Voice recording code compiles but no Windows recorder/STT command is configured.
 - Not verified at all: that the window appears, takes focus, renders correctly, handles IME/DPI/multi-monitor, or that confirm cards behave. Readiness gate: a real Windows run.
 
+## Item 8 adapters (cross-compiled, unrun)
+- App launching: Windows finds only an exact `name.exe` / `name.com` on PATH (`;` separated). `.bat`/`.cmd` are refused on purpose (they go through the command interpreter), as are names with path separators or drive prefixes. No Start Menu (.lnk) reading yet, so apps not on PATH cannot be opened by name. Tested on Linux through the pure `which_with` helper only.
+- Wallpaper: `SystemParametersInfoW(SPI_SETDESKWALLPAPER)` after `windows_check` (absolute, existing ordinary file, bmp/jpg/png); naming a Linux tool is refused; `SPI_GETDESKWALLPAPER` supplies the previous picture for undo. `windows_check` is tested on Linux; the system calls never ran.
+- Unavailable on Windows by design (refuse): move, new-file save, symlink copy, undo fingerprints (file identity), panel socket, embedded assist, swaybg. These refusals are plain cfg stubs; they have no Windows-run tests.
+
 ## What the Unix-only code was (all now behind platform.rs, refusing on Windows)
 | File | What | Windows plan |
 |---|---|---|

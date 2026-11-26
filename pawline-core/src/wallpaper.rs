@@ -177,16 +177,79 @@ pub struct SystemWallpaper;
 
 impl WallpaperSetter for SystemWallpaper {
     fn current(&self) -> Option<PathBuf> {
+        #[cfg(windows)]
+        return windows_current();
+        #[cfg(not(windows))]
         current_swaybg_image()
     }
 
     fn set(&self, image: &Path, via: Option<Adapter>) -> Result<String, PawError> {
-        let adapter = choose_active(&in_path, &process_running, via).map_err(PawError::Exec)?;
-        run(adapter, image)?;
-        Ok(format!("wallpaper set with {}", adapter.program()))
+        #[cfg(windows)]
+        {
+            if via.is_some() {
+                return Err(PawError::Exec("on Windows the wallpaper is set with the system call only; naming a Linux wallpaper tool does not apply".into()));
+            }
+            windows_check(image).map_err(PawError::Exec)?;
+            windows_set(image)?;
+            return Ok("wallpaper set with the Windows system call (SystemParametersInfoW)".into());
+        }
+        #[cfg(not(windows))]
+        {
+            let adapter = choose_active(&in_path, &process_running, via).map_err(PawError::Exec)?;
+            run(adapter, image)?;
+            Ok(format!("wallpaper set with {}", adapter.program()))
+        }
     }
 }
 
+/// What the Windows wallpaper call is allowed to receive: an absolute, existing, ordinary file with an image extension
+/// the system call can read. Pure checks, so they run on any OS; the call itself is Windows-only and unverified.
+pub fn windows_check(image: &Path) -> Result<(), String> {
+    if !image.is_absolute() {
+        return Err("the wallpaper path must be absolute".into());
+    }
+    if image.to_string_lossy().contains('\0') {
+        return Err("bad wallpaper path".into());
+    }
+    let ext = image.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).unwrap_or_default();
+    if !matches!(ext.as_str(), "bmp" | "jpg" | "jpeg" | "png") {
+        return Err("Windows can set bmp, jpg or png pictures here; this file type is not supported".into());
+    }
+    match std::fs::symlink_metadata(image) {
+        Ok(m) if m.is_file() => Ok(()),
+        _ => Err("the wallpaper file does not exist or is not an ordinary file".into()),
+    }
+}
+
+#[cfg(windows)]
+fn windows_set(image: &Path) -> Result<(), PawError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+    let mut w: Vec<u16> = image.as_os_str().encode_wide().collect();
+    w.push(0);
+    // SAFETY: w is NUL-terminated and lives for the call. Nothing is written back.
+    let ok = unsafe { SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, w.as_mut_ptr() as *mut _, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE) };
+    if ok == 0 { Err(PawError::Exec("Windows refused to set the wallpaper".into())) } else { Ok(()) }
+}
+
+#[cfg(windows)]
+fn windows_current() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+    let mut buf = vec![0u16; 520];
+    // SAFETY: buf holds 520 UTF-16 units, the size passed in.
+    let ok = unsafe { SystemParametersInfoW(SPI_GETDESKWALLPAPER, buf.len() as u32, buf.as_mut_ptr() as *mut _, 0) };
+    if ok == 0 {
+        return None;
+    }
+    let n = buf.iter().position(|&c| c == 0)?;
+    if n == 0 {
+        return None;
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_wide(&buf[..n])))
+}
+
+#[cfg(not(windows))]
 fn run(adapter: Adapter, image: &Path) -> Result<(), PawError> {
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(adapter.program());
@@ -288,6 +351,24 @@ fn terminate(pid: u32) {
 
 fn pid_file() -> Option<PathBuf> {
     std::env::var_os("XDG_RUNTIME_DIR").map(|d| PathBuf::from(d).join("pawline-swaybg.pid"))
+}
+
+#[cfg(test)]
+mod windows_tests {
+    use super::*;
+    #[test]
+    fn windows_check_refuses_unsafe_inputs() {
+        let d = std::env::temp_dir().join(format!("pawline-wp-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let png = d.join("a.png");
+        std::fs::write(&png, b"x").unwrap();
+        assert!(windows_check(&png).is_ok());
+        assert!(windows_check(Path::new("a.png")).is_err(), "relative");
+        assert!(windows_check(&d.join("a.svg")).is_err(), "type");
+        assert!(windows_check(&d.join("missing.png")).is_err(), "missing");
+        assert!(windows_check(&d).is_err(), "folder");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
 
 #[cfg(test)]
