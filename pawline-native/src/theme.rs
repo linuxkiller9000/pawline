@@ -70,11 +70,17 @@ pub struct Settings {
     /// may suggest what was meant. On by default (the behaviour before this switch existed); it never
     /// uses the network. Off means the model is never woken and the plain parse error is the whole reply.
     pub assist: bool,
+    /// Speech rate for spoken replies: index into SPEECH_RATES (item 20). Normal by default.
+    /// A custom PAWLINE_TTS_CMD is not affected (its own flags are the user's).
+    pub speech_rate: usize,
 }
+
+/// (label, words per minute) choices for spoken replies. 175 is espeak's own default.
+pub const SPEECH_RATES: [(&str, u32); 3] = [("slow", 120), ("normal", 175), ("fast", 260)];
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { text_pct: 100, offline: false, theme: 0, drift: true, speak: false, mic_blocked: false, keep_history: false, assist: true }
+        Settings { text_pct: 100, offline: false, theme: 0, drift: true, speak: false, mic_blocked: false, keep_history: false, assist: true, speech_rate: 1 }
     }
 }
 
@@ -86,6 +92,7 @@ pub fn reset_look(s: &mut Settings) {
     s.theme = d.theme;
     s.drift = d.drift;
     s.speak = d.speak;
+    s.speech_rate = d.speech_rate;
 }
 
 pub fn load(path: &Path) -> Settings {
@@ -104,6 +111,7 @@ pub fn load(path: &Path) -> Settings {
                 Some(("mic", v)) => s.mic_blocked = v.trim() == "blocked",
                 Some(("history", v)) => s.keep_history = v.trim() == "on",
                 Some(("assist", v)) => s.assist = v.trim() != "off",
+                Some(("speech_rate", v)) => s.speech_rate = SPEECH_RATES.iter().position(|(n, _)| n == &v.trim()).unwrap_or(1),
                 Some(("text", v)) => s.text_pct = v.trim().parse().ok().filter(|p| TEXT_SIZES.contains(p)).unwrap_or(100),
                 _ => {}
             }
@@ -116,7 +124,7 @@ pub fn save(path: &Path, s: &Settings) -> std::io::Result<()> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
-    std::fs::write(path, format!("theme={}\ndrift={}\nspeak={}\ntext={}\noffline={}\nmic={}\nhistory={}\nassist={}\n", THEMES[s.theme.min(THEMES.len() - 1)].name, if s.drift { "on" } else { "off" }, if s.speak { "on" } else { "off" }, s.text_pct, if s.offline { "on" } else { "off" }, if s.mic_blocked { "blocked" } else { "allowed" }, if s.keep_history { "on" } else { "off" }, if s.assist { "on" } else { "off" }))
+    std::fs::write(path, format!("theme={}\ndrift={}\nspeak={}\ntext={}\noffline={}\nmic={}\nhistory={}\nassist={}\nspeech_rate={}\n", THEMES[s.theme.min(THEMES.len() - 1)].name, if s.drift { "on" } else { "off" }, if s.speak { "on" } else { "off" }, s.text_pct, if s.offline { "on" } else { "off" }, if s.mic_blocked { "blocked" } else { "allowed" }, if s.keep_history { "on" } else { "off" }, if s.assist { "on" } else { "off" }, SPEECH_RATES[s.speech_rate.min(SPEECH_RATES.len() - 1)].0))
 }
 
 /// Gradient offset along the diagonal for a moment in time: a slow back-and-forth, 0 when drift is off.
@@ -131,10 +139,36 @@ pub fn drift_offset(secs: f32, w: f32, drift: bool) -> f32 {
 mod tests {
     use super::*;
     #[test]
+    fn speech_rate_survives_roundtrip_and_bad_values_fall_back() {
+        let d = std::env::temp_dir().join(format!("pawline-sr-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("ui-settings.txt");
+        // Old file without the key: normal.
+        std::fs::write(&p, "theme=Ocean\ndrift=on\n").unwrap();
+        assert_eq!(load(&p).speech_rate, 1);
+        // Round trip through the real save/load.
+        let mut s = Settings::default();
+        s.speech_rate = 0;
+        save(&p, &s).unwrap();
+        assert_eq!(load(&p).speech_rate, 0);
+        s.speech_rate = 2;
+        save(&p, &s).unwrap();
+        let l = load(&p);
+        assert_eq!(l.speech_rate, 2);
+        assert!(std::fs::read_to_string(&p).unwrap().contains("speech_rate=fast"));
+        // Unknown value falls back to normal without losing the other keys.
+        std::fs::write(&p, "speech_rate=ludicrous\nspeak=on\n").unwrap();
+        let l = load(&p);
+        assert_eq!(l.speech_rate, 1);
+        assert!(l.speak);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn reset_look_restores_look_and_keeps_every_privacy_switch() {
-        let mut s = Settings { text_pct: 150, offline: true, theme: 2, drift: false, speak: true, mic_blocked: true, keep_history: true, assist: false };
+        let mut s = Settings { text_pct: 150, offline: true, theme: 2, drift: false, speak: true, mic_blocked: true, keep_history: true, assist: false, speech_rate: 2 };
         reset_look(&mut s);
-        assert_eq!(s, Settings { offline: true, mic_blocked: true, keep_history: true, assist: false, ..Settings::default() });
+        assert_eq!(s, Settings { offline: true, mic_blocked: true, keep_history: true, assist: false, speech_rate: 1, ..Settings::default() });
     }
 
     #[test]
@@ -142,10 +176,10 @@ mod tests {
         let d = std::env::temp_dir().join(format!("pawline-theme-{}", std::process::id()));
         let f = d.join("ui-settings.txt");
         assert_eq!(load(&f), Settings::default());
-        save(&f, &Settings { text_pct: 100, offline: false, theme: 2, drift: false, speak: true, mic_blocked: false, keep_history: false, assist: false }).unwrap();
-        assert_eq!(load(&f), Settings { text_pct: 100, offline: false, theme: 2, drift: false, speak: true, mic_blocked: false, keep_history: false, assist: false });
+        save(&f, &Settings { text_pct: 100, offline: false, theme: 2, drift: false, speak: true, mic_blocked: false, keep_history: false, assist: false, speech_rate: 1 }).unwrap();
+        assert_eq!(load(&f), Settings { text_pct: 100, offline: false, theme: 2, drift: false, speak: true, mic_blocked: false, keep_history: false, assist: false, speech_rate: 1 });
         std::fs::write(&f, "theme=Nope\ndrift=maybe\nspeak=maybe\nassist=maybe\njunk").unwrap();
-        assert_eq!(load(&f), Settings { text_pct: 100, offline: false, theme: 0, drift: true, speak: false, mic_blocked: false, keep_history: false, assist: true });
+        assert_eq!(load(&f), Settings { text_pct: 100, offline: false, theme: 0, drift: true, speak: false, mic_blocked: false, keep_history: false, assist: true, speech_rate: 1 });
         let t = std::fs::read_to_string(&f).unwrap();
         assert!(!t.contains("request"));
         assert_eq!(drift_offset(5.0, 300.0, false), 0.0);

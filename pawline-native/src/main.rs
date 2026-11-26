@@ -748,7 +748,7 @@ impl App {
     }
 
     fn settings_rows(&self) -> usize {
-        THEME_ROWS + 7
+        THEME_ROWS + 8
     }
 
     fn apply_setting(&mut self, row: usize) {
@@ -764,6 +764,8 @@ impl App {
         } else if row == THEME_ROWS + 6 {
             self.settings.assist = !self.settings.assist;
             bridge::set_assist_enabled(self.settings.assist);
+        } else if row == THEME_ROWS + 7 {
+            self.settings.speech_rate = (self.settings.speech_rate + 1) % theme::SPEECH_RATES.len();
         } else if row == THEME_ROWS + 5 {
             self.toggle_history();
         } else if row == THEME_ROWS + 4 {
@@ -872,6 +874,9 @@ impl App {
                 self.settings_fill(pm, PAD + 66.0, y + 4.0, 18.0, 18.0, 9.0, (t.accent.0, t.accent.1, t.accent.2, 255));
                 let label = format!("Theme: {} (Enter for next)", t.name);
                 self.text(pm, &label, PAD + 96.0, y + 18.0, 14.0, (255, 255, 255), clip);
+            } else if k == THEME_ROWS + 7 {
+                let label = format!("Speech rate: {} (Enter to change)", theme::SPEECH_RATES[self.settings.speech_rate.min(theme::SPEECH_RATES.len() - 1)].0);
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
             } else if k == THEME_ROWS + 6 {
                 let label = format!("AI suggestions (local model): {}", if self.settings.assist { "on" } else { "off" });
                 self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
@@ -1959,7 +1964,8 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
         if t.is_empty() {
             return;
         }
-        match voice::tts(std::env::var("PAWLINE_TTS_CMD").ok().as_deref(), &voice::has_in_path).and_then(|c| voice::speak(&c, &t)) {
+        let wpm = theme::SPEECH_RATES[self.settings.speech_rate.min(theme::SPEECH_RATES.len() - 1)].1;
+        match voice::tts(std::env::var("PAWLINE_TTS_CMD").ok().as_deref(), &voice::has_in_path, wpm).and_then(|c| voice::speak(&c, &t)) {
             Ok(ch) => self.speaking = Some(ch),
             Err(e) => self.push(false, "error", format!("Spoken replies are on but: {e}"), None),
         }

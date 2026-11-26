@@ -143,18 +143,22 @@ pub fn find_model(env: Option<&str>, home: &Path) -> Option<PathBuf> {
 }
 
 /// The text-to-speech command; the text is written to its stdin. `PAWLINE_TTS_CMD` overrides detection.
-pub fn tts(env_override: Option<&str>, has: &dyn Fn(&str) -> bool) -> Result<Cmd, String> {
+/// `rate_wpm` is the words-per-minute the settings row chose (item 20); a custom PAWLINE_TTS_CMD
+/// is passed through unchanged, because its own flags are the user's to set. flite has no wpm
+/// flag, so it gets duration_stretch relative to espeak's 175 default.
+pub fn tts(env_override: Option<&str>, has: &dyn Fn(&str) -> bool, rate_wpm: u32) -> Result<Cmd, String> {
     if let Some(c) = env_override.and_then(split_env) {
         return Ok(c);
     }
+    let wpm = rate_wpm.max(1);
     if has("espeak-ng") {
-        return Ok(Cmd { program: "espeak-ng".into(), args: vec!["--stdin".into()], env: vec![] });
+        return Ok(Cmd { program: "espeak-ng".into(), args: vec!["-s".into(), wpm.to_string(), "--stdin".into()], env: vec![] });
     }
     if has("espeak") {
-        return Ok(Cmd { program: "espeak".into(), args: vec!["--stdin".into()], env: vec![] });
+        return Ok(Cmd { program: "espeak".into(), args: vec!["-s".into(), wpm.to_string(), "--stdin".into()], env: vec![] });
     }
     if has("flite") {
-        return Ok(Cmd { program: "flite".into(), args: vec!["-f".into(), "/dev/stdin".into()], env: vec![] });
+        return Ok(Cmd { program: "flite".into(), args: vec!["-f".into(), "/dev/stdin".into(), "-setf".into(), format!("duration_stretch={:.2}", 175.0 / wpm as f64)], env: vec![] });
     }
     Err("No local text-to-speech engine found. Install espeak-ng (or flite), or set PAWLINE_TTS_CMD to a local command that reads text on stdin and speaks it.".into())
 }
@@ -608,10 +612,26 @@ mod tests {
 
     #[test]
     fn tts_detection_and_missing_message() {
-        assert_eq!(tts(None, &|b| b == "espeak-ng").unwrap().program, "espeak-ng");
-        assert_eq!(tts(None, &|b| b == "flite").unwrap().program, "flite");
-        assert!(tts(None, &|_| false).unwrap_err().contains("espeak-ng"));
-        assert_eq!(tts(Some("say-it"), &|_| false).unwrap().program, "say-it");
+        assert_eq!(tts(None, &|b| b == "espeak-ng", 175).unwrap().program, "espeak-ng");
+        assert_eq!(tts(None, &|b| b == "flite", 175).unwrap().program, "flite");
+        assert!(tts(None, &|_| false, 175).unwrap_err().contains("espeak-ng"));
+        assert_eq!(tts(Some("say-it"), &|_| false, 175).unwrap().program, "say-it");
+    }
+
+    #[test]
+    fn tts_rate_flags_per_engine_and_custom_untouched() {
+        let c = tts(None, &|b| b == "espeak-ng", 120).unwrap();
+        assert_eq!(c.args, vec!["-s", "120", "--stdin"], "espeak-ng takes -s wpm");
+        let c = tts(None, &|b| b == "espeak", 260).unwrap();
+        assert_eq!(c.args, vec!["-s", "260", "--stdin"]);
+        let c = tts(None, &|b| b == "flite", 120).unwrap();
+        assert_eq!(c.args, vec!["-f", "/dev/stdin", "-setf", "duration_stretch=1.46"], "flite slows by stretch");
+        let c = tts(None, &|b| b == "flite", 260).unwrap();
+        assert_eq!(c.args, vec!["-f", "/dev/stdin", "-setf", "duration_stretch=0.67"]);
+        let c = tts(Some("say-it --flag"), &|_| false, 120).unwrap();
+        assert_eq!(c.args, vec!["--flag"], "a custom command keeps exactly its own flags");
+        let c = tts(None, &|b| b == "espeak-ng", 0).unwrap();
+        assert_eq!(c.args[1], "1", "a zero rate can never reach the engine");
     }
 
     #[test]
@@ -696,7 +716,7 @@ mod tests {
         let out = std::env::temp_dir().join(format!("pawline-spoken-{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&out);
         let s = script("spk", &format!("cat > {}", out.display()));
-        let c = tts(Some(&s.to_string_lossy()), &|_| false).unwrap();
+        let c = tts(Some(&s.to_string_lossy()), &|_| false, 175).unwrap();
         let mut ch = speak(&c, "hello there").unwrap();
         ch.wait().unwrap();
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "hello there");
