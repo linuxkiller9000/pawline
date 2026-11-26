@@ -48,6 +48,9 @@ pub struct DirectFsBackend {
     recovery_notes: Vec<String>,
 }
 
+/// A listing longer than this is cut, so one reply cannot make every redraw slow
+/// (measured: a 20k-name reply cost ~232 ms per redraw, release build).
+const MAX_LIST_SHOWN: usize = 300;
 const MAX_PICTURE: u64 = 64 * 1024 * 1024;
 
 impl DirectFsBackend {
@@ -523,6 +526,14 @@ impl ExecutionBackend for DirectFsBackend {
                     op: op.clone(),
                     detail: if names.is_empty() {
                         "(empty)".into()
+                    } else if names.len() > MAX_LIST_SHOWN {
+                        format!(
+                            "{} ... and {} more (showing the first {} of {} names)",
+                            names[..MAX_LIST_SHOWN].join(", "),
+                            names.len() - MAX_LIST_SHOWN,
+                            MAX_LIST_SHOWN,
+                            names.len()
+                        )
                     } else {
                         names.join(", ")
                     },

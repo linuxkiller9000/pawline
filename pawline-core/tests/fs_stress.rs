@@ -187,3 +187,43 @@ fn hard_links_and_non_utf8_names_do_not_break_listing_or_delete() {
     assert!(!r.starts_with("ERR"), "listing a folder with a non-UTF-8 name must not fail: {r}");
     std::fs::remove_dir_all(&outside).unwrap();
 }
+
+#[test]
+fn big_listing_is_cut_and_says_so() {
+    // Sandbox structural test (author-written): 1000 empty files.
+    let (d, mut e, be) = home("biglist");
+    std::fs::create_dir(d.join("docs")).unwrap();
+    for i in 0..1000 {
+        std::fs::File::create(d.join("docs").join(format!("f{i:04}.txt"))).unwrap();
+    }
+    let r = match e.handle("list docs", &be, false).unwrap() {
+        Response::Confirm(p) => e.execute_plan(p, &be).unwrap(),
+        other => other,
+    };
+    match r {
+        Response::Executed(o) => {
+            let t = &o[0].detail;
+            assert!(t.contains("and 700 more") && t.contains("of 1000 names"), "{}", &t[t.len().saturating_sub(90)..]);
+            assert!(!t.contains("f0999"));
+        }
+        Response::Message(m) => panic!("message instead of a listing: {m}"),
+        Response::Failed { error, .. } => panic!("failed: {error}"),
+        _ => panic!("unexpected response (needs another confirmation)"),
+    }
+}
+
+#[test]
+fn fifo_in_home_does_not_hang_list_or_delete() {
+    // Sandbox structural test (author-written): a FIFO with no writer would block an open().
+    let (d, mut e, be) = home("fifo");
+    let ok = std::process::Command::new("mkfifo").arg(d.join("pipe")).status().map(|s| s.success()).unwrap_or(false);
+    if !ok { eprintln!("mkfifo unavailable, skipped"); return; }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let a = go(&mut e, &be, "list");
+        let b = go(&mut e, &be, "delete pipe");
+        let _ = tx.send((a, b));
+    });
+    let (a, b) = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("engine blocked on a FIFO");
+    eprintln!("fifo list={a:.60} delete={b:.60}");
+}

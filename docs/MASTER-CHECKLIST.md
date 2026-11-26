@@ -218,3 +218,14 @@ Workload 1, idle with the card open, Dusk theme, 20 s: drift OFF = 0 ticks in bo
 Workload 2, typing 58 characters with xdotool at 30 ms per key into the empty input (no model, no history): debug 13 redraws for 58 characters, per-redraw 141 to 149 ms (median 142), so typing visibly lags and events coalesce; release 60 redraws, per-redraw 5.0 to 6.9 ms (median 5.2).
 Memory (RSS, idle, before any model load): debug ~31 MB, release ~20 MB.
 Reading: the debug-build typing latency gap is real and large; release on this VM is fine. The user's old CPU is unmeasured, so no claim about it. Not measured: startup time to first window, model load time and RSS after the Needle model loads, large-folder listing, long chat (10k lines) render/scroll time, Arabic shaping cost, Wayland, battery.
+
+### Item 17 gap list amendment (slice 3)
+- Rejection assertions for "a/b", "..", "." only assert nothing appeared outside the home; they do not assert the exact refusal. Stronger assertions still owed.
+- FIFO/device blocking: a FIFO test now exists (list/delete must return within 10 s, sandbox, author-written). Copy/rename/read of a FIFO, and char/block devices, are NOT tested. Blocking risk remains open.
+- Windows names/paths, full disk, huge folders, root, threaded TOCTOU: still open.
+
+### Item 18 slice 2 (sandbox VM 1 vCPU, Xvfb 1366x768, release opt2 no LTO, NOT the user's CPU)
+- Launch to first redraw: ~56 ms (poll granularity 50 ms, empty data dir with settings file).
+- 20,000 empty files in one folder, "list docs": engine took 0.1 s ("Took 0.1s" in the reply), but the 20k-name reply made EVERY later redraw ~232 ms (10 samples 230-236) versus ~5 ms normally. Fix: listings are cut at 300 names with an "and N more" note (MAX_LIST_SHOWN). Re-measure pending.
+- Repro: create /tmp/big/docs with 20000 files; PAWLINE_PERF=1 PAWLINE_ROOT=/tmp/big pawline --open; type "list docs", then type letters and read PERF draw_ms lines.
+- Still unmeasured: model load/RSS, 10k-line chat scroll, Arabic shaping, Wayland, battery.
