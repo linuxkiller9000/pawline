@@ -27,6 +27,7 @@ pub mod math;
 pub mod netgate;
 pub mod organize;
 pub mod plan;
+pub mod pending;
 pub mod platform;
 pub mod planmem;
 pub mod search;

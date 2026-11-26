@@ -71,7 +71,7 @@ sends nothing before Do it; secret-looking text is blocked with no approval path
 - Don't leave partially created folders/files without explaining.
 - Undo should survive application restarts where possible.
 - Recover from crashes without losing conversation or pending tasks.
-Status: OPEN. Existing: an on-disk undo journal with recovery notes at start-up; no-replace atomic publish; cancel cleanup of our own temp files.
+Status: PARTIAL (slices 1-3 below). Existing: an on-disk undo journal with recovery notes at start-up; no-replace atomic publish; cancel cleanup of our own temp files; pending-confirm restore after a crash (slice 3).
 Scope conflict to settle with the user: "recover conversation and pending tasks after a crash" needs conversation text on disk, while the current
 designs promise memory only (chat lines, presentation drafts). Plan: off by default, an explicit setting to keep the conversation locally, accurate
 disclosure of what is stored where, a delete control, and the draft/private text is never saved silently.
@@ -195,6 +195,12 @@ signing or release commitment without approval. Publishing needs the user's expl
 - Not done: this is chat text only, so "recover pending tasks after a crash" is still unbuilt. The data-dir file is not encrypted. The user has not chosen this feature on or off for themselves.
 - Custom-route mic notice now says Pawline submits nothing to its chat until Enter but the command may already have sent audio/text elsewhere.
 - 15 slice 2 polish: Settings text separates the settings file (switches only) from the optional conversation file. Disclosed: submitted messages (typed or from voice) and plain replies are kept, NOT encrypted, readable by anyone who can read the account's files, permissions restricted on Linux only and unverified on Windows, off deletes, never added to online chat context. Online chat context is built from bridge.rs per-session state; a structural test (not a behavioural proof) keeps history out of bridge.rs. Worst case (150% text, custom commands set) is unclipped in Xvfb pixels but only a few px from the panel edge: any new note needs a layout change.
+
+### 15 slice 3: rename/move/copy undo across restart + pending confirm across crash (PARTIAL)
+- 15a: a new journal_safety test proves undo of rename, move and copy each survive a simulated application restart (new Engine + backend over the same home). The behaviour already worked; only the coverage was missing. journal_safety now 11 tests.
+- 15b: a confirm card that was showing when Pawline closed or crashed is offered again at next start. Record: <home>/.local/share/pawline/pending-confirm.json (dir 0700, file 0600, atomic temp+rename), written only for all-local file plans (create dir/file, delete, rename, move, copy) at the moment the card is shown. On start the record is fingerprint-checked against the live filesystem (mtime, size, inode per path); a changed or missing path drops the record with a visible note and nothing is done. A match rebuilds the plan from the saved request text through the engine again and shows a real confirm card ("Before Pawline closed, this was waiting for your confirmation (nothing was done yet):") - typing never approves it, only the card buttons. Any other input first, a cancel, an approve, or any of the other card sites clears the record. Terminal mode gets the same restore (typed yes flow on a terminal only; piped input is not approved and nothing is done).
+- Tests: 2 core tests (round trip incl. fingerprint mismatch) and 3 bridge tests (restore+confirm executes, changed file drops, cancel/replacement clears). GUI pixel proof in Xvfb: killed app with a card up, relaunched, the restored card renders with Do it / Cancel (Cancel focused). Simulated kill -9, not a real power cut; the card text comes from a fresh engine run of the saved request, not the original card bitmap.
+- Still NOT done: conversation persistence needs the user's decision on the scope conflict in section 15 (text on disk vs memory-only promise); saved-action cards that were mid-setup are not restored.
 
 ### 16 AI reliability, slice 1 (PARTIAL)
 - Found by a new test: an EMPTY assist proposal produced an empty confirm card. Fixed: an empty proposal is a failed proposal and the user gets the parser's plain explanation.

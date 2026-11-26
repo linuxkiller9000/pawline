@@ -3559,6 +3559,24 @@ fn run_terminal() {
         let n = st.notes.drain(..).collect::<Vec<_>>().join("\n");
         println!("After an interrupted run I checked the undo journal:\n{n}");
     }
+    // A confirm card that was showing when Pawline closed is offered again (fingerprint-checked).
+    if let Some(r) = bridge::restore_pending_confirm(&mut st) {
+        println!("{}", r.text);
+        if r.kind == "confirm" {
+            let tty = std::io::stdin().is_terminal();
+            let mut lines0 = std::io::stdin().lock().lines();
+            if !tty {
+                let _ = bridge::cancel(&mut st);
+                println!("Not approved: confirmation needs a person typing at a terminal. Nothing was done.");
+            } else {
+                print!("Type yes to do this, anything else cancels: ");
+                let _ = std::io::stdout().flush();
+                let ans = lines0.next().and_then(|l| l.ok()).unwrap_or_default();
+                let r2 = if ans.trim() == "yes" { let r = bridge::confirm_inner(&mut st); bridge::with_notes(&mut st, r) } else { bridge::cancel(&mut st) };
+                println!("{}", r2.text);
+            }
+        }
+    }
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
     loop {
@@ -3576,6 +3594,8 @@ fn run_terminal() {
             break;
         }
         st.pending = None;
+        st.pending_request = None;
+        pawline_core::pending::clear(&st.root);
         #[cfg(all(feature = "laya", not(windows)))]
         {
             st.laya_setup_pending = false;
@@ -3622,10 +3642,16 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<(UiReply, Vec<Vec<u8>>)
         let n = st.notes.drain(..).collect::<Vec<_>>().join("\n");
         let _ = back.send((bridge::reply("error", format!("After an interrupted run I checked the undo journal:\n{n}")), Vec::new()));
     }
+    // A confirm card that was showing when Pawline closed is offered again (fingerprint-checked).
+    if let Some(r) = bridge::restore_pending_confirm(&mut st) {
+        let _ = back.send((r, Vec::new()));
+    }
     while let Ok(req) = rx.recv() {
         let r = match req {
             Req::Text(t, dir) => {
                 st.pending = None;
+                st.pending_request = None;
+                pawline_core::pending::clear(&st.root);
         #[cfg(all(feature = "laya", not(windows)))]
         {
             st.laya_setup_pending = false;

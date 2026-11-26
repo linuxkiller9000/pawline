@@ -1044,6 +1044,7 @@ Nothing is sent from your machine, and after setup Laya works fully offline. You
                     notes: vec![],
                 });
                 state.pending_request = None;
+            pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
                 return UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) };
             }
             Some(why) => {
@@ -1070,6 +1071,7 @@ Nothing is sent from your machine, and after setup Laya works fully offline. You
                 };
                 state.pending = Some(plan);
                 state.pending_request = None;
+            pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
                 return UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) };
             }
             Class::Block => {
@@ -1132,6 +1134,7 @@ Nothing is sent from your machine, and after setup Laya works fully offline. You
                 text: format!("{why}\n{summary}"),
                 plan: Some(summary),
             };
+            pawline_core::pending::save(&state.root, &plan, input.trim());
             state.pending = Some(plan);
             state.pending_request = Some(input.trim().to_string());
             r
@@ -1215,6 +1218,7 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
         Some(p) => p,
         None => return reply("error", "Nothing waiting for confirmation.".into()),
     };
+    pawline_core::pending::clear(&state.root);
     let request = state.pending_request.take();
     let organize_n = state.organize_pending.take();
     let backend = match DirectFsBackend::new(&state.root).map(|inner| UiBackend { inner }) {
@@ -1349,6 +1353,7 @@ fn deck_write_command(state: &mut UiState, input: &str) -> Option<UiReply> {
     let summary = format!("1. {}", op.describe());
     state.pending = Some(Plan { ops: vec![op], needs_confirmation: true, confirmation_reasons: vec!["This would send your topic text to an online service.".into()], assist_derived: false, notes: vec![] });
     state.pending_request = None;
+            pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
     state.organize_pending = None;
     Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) })
 }
@@ -1393,6 +1398,7 @@ fn deck_save_command(state: &mut UiState, input: &str) -> Option<UiReply> {
     let summary = format!("1. {}\n{}", op.describe(), pawline_core::deck::review_text(&slides, &rep));
     state.pending = Some(Plan { ops: vec![op], needs_confirmation: true, confirmation_reasons: vec!["This saves one new .pptx file.".into()], assist_derived: false, notes: vec![] });
     state.pending_request = None;
+            pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
     state.organize_pending = None;
     Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) })
 }
@@ -1427,6 +1433,7 @@ fn deck_command(state: &mut UiState, input: &str) -> Option<UiReply> {
                 notes: vec![],
             });
             state.pending_request = None;
+            pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
             state.organize_pending = None;
             state.confirm_preview = slides.iter().filter_map(|s| s.image.as_ref().map(|im| im.data.clone())).take(3).collect();
             Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) })
@@ -1465,6 +1472,7 @@ fn shrink_command(state: &mut UiState, input: &str) -> Option<UiReply> {
             };
             state.pending = Some(plan);
             state.pending_request = None; // never remembered as a reusable plan
+            pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
             state.organize_pending = None;
             Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}\nIt runs ffmpeg on a {} video and saves a new smaller file next to it. It can take several minutes (Cancel stops it). The new file is only kept if it decodes without errors, has the same length, keeps the video and audio streams listed above and is really smaller; otherwise nothing is saved.", pawline_core::shrink::mb(size)), plan: Some(summary) })
         }
@@ -1557,6 +1565,7 @@ fn organize_command(state: &mut UiState, input: &str) -> Option<UiReply> {
 }
 
 pub fn cancel(state: &mut UiState) -> UiReply {
+    pawline_core::pending::clear(&state.root);
     state.carried = std::time::Duration::ZERO;
     #[cfg(all(feature = "laya", not(windows)))]
     {
@@ -1564,6 +1573,7 @@ pub fn cancel(state: &mut UiState) -> UiReply {
     }
     state.pending = None;
     state.pending_request = None;
+            pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
     state.online_pending = None;
     state.organize_pending = None;
     reply("message", "Cancelled. Nothing was done.".into())
@@ -1698,6 +1708,46 @@ pub fn folder_candidates(home: &std::path::Path, query: &str, cancel: &dyn Fn() 
 }
 
 /// Confirmation received -> result ready: carried planning time plus execution.
+/// 15b: at startup, offer again a confirm card that was showing when Pawline last closed or
+/// crashed. Every file the plan touches must match its fingerprint exactly; a changed or missing
+/// target drops the card with a note instead of offering a stale plan. Only local file plans are
+/// remembered at all (see pawline_core::pending). The returned confirm reply is a real card: in
+/// the GUI it draws the buttons, in the terminal it gets the typed-yes prompt - typing the
+/// request again or a plain "yes" never approves it.
+pub fn restore_pending_confirm(state: &mut UiState) -> Option<UiReply> {
+    let rec = pawline_core::pending::load(&state.root)?;
+    pawline_core::pending::clear(&state.root);
+    if !pawline_core::pending::matches_disk(&rec.fingerprints) {
+        return Some(reply(
+            "message",
+            "Before Pawline closed, a change was waiting for your confirmation. The files it touches changed since then, so it was dropped. Nothing was done.".into(),
+        ));
+    }
+    let backend = match DirectFsBackend::new(&state.root).map(|inner| UiBackend { inner }) {
+        Ok(b) => b,
+        Err(e) => {
+            return Some(reply("error", format!("Before Pawline closed, a change was waiting for your confirmation, but it could not be checked now: {e}. It was dropped; nothing was done.")));
+        }
+    };
+    match state.engine.handle_with(&rec.request, &backend, false, None) {
+        Ok(pawline_core::Response::Confirm(plan)) => {
+            let summary = plan.summary();
+            pawline_core::pending::save(&state.root, &plan, &rec.request); // a crash while the card is up again still recovers
+            state.pending = Some(plan);
+            state.pending_request = Some(rec.request);
+            Some(UiReply {
+                kind: "confirm".into(),
+                text: format!("Before Pawline closed, this was waiting for your confirmation (nothing was done yet):\n{summary}"),
+                plan: Some(summary),
+            })
+        }
+        _ => Some(reply(
+            "message",
+            "Before Pawline closed, a change was waiting for your confirmation. It no longer applies as it was, so it was dropped. Nothing was done.".into(),
+        )),
+    }
+}
+
 pub fn confirm_inner(state: &mut UiState) -> UiReply {
     let t = std::time::Instant::now();
     let pending_user = state.online_pending.take();
@@ -1726,6 +1776,7 @@ fn finish(state: &mut UiState, r: UiReply, spent: std::time::Duration) -> UiRepl
         if online {
             state.pending = None;
             state.pending_request = None;
+            pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
             state.online_pending = None;
             state.confirm_preview.clear();
             return reply("message", "Offline mode is on, so I did not prepare this online request and nothing was sent. Turn offline mode off in Settings to use it.".into());
@@ -2323,6 +2374,68 @@ mod memory_tests {
         st.laya_on = true;
         let r = handle_text(&mut st, "laya off");
         assert!(r.text.contains("OFF") && !st.laya_on && st.laya.is_none(), "{}", r.text);
+    }
+
+    #[test]
+    fn pending_card_is_restored_after_a_crash_and_still_needs_the_real_confirm() {
+        let root = org_root("pend1");
+        std::fs::create_dir(root.join("kp")).unwrap();
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "delete the folder kp");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(pawline_core::pending::load(&root).is_some(), "showing card is remembered");
+        drop(st); // crashed or closed with the card up: no cancel, no confirm
+
+        let mut st2 = new_state(root.clone());
+        let r = restore_pending_confirm(&mut st2).expect("card offered again");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(r.text.contains("Before Pawline closed"), "{}", r.text);
+        assert!(root.join("kp").exists(), "nothing was done by the restore itself");
+        let r = confirm_inner(&mut st2);
+        assert!(r.kind == "executed" || r.kind == "md", "{}", r.text);
+        assert!(!root.join("kp").exists(), "approving the restored card runs it");
+        assert!(pawline_core::pending::load(&root).is_none(), "record consumed");
+    }
+
+    #[test]
+    fn pending_card_is_dropped_when_a_touched_file_changed() {
+        let root = org_root("pend2");
+        std::fs::write(root.join("v.txt"), b"before").unwrap();
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "delete the file v.txt");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        drop(st);
+        std::fs::write(root.join("v.txt"), b"someone changed it").unwrap();
+
+        let mut st2 = new_state(root.clone());
+        let r = restore_pending_confirm(&mut st2).expect("an answer");
+        assert_eq!(r.kind, "message", "{}", r.text);
+        assert!(r.text.contains("changed since"), "{}", r.text);
+        assert!(st2.pending.is_none(), "stale card is not offered");
+        assert_eq!(std::fs::read(root.join("v.txt")).unwrap(), b"someone changed it", "file untouched");
+        assert!(pawline_core::pending::load(&root).is_none(), "record dropped");
+    }
+
+    #[test]
+    fn pending_card_record_is_cleared_on_cancel_and_on_replacement() {
+        let root = org_root("pend3");
+        std::fs::create_dir(root.join("kp")).unwrap();
+        std::fs::create_dir(root.join("zz")).unwrap();
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "delete the folder kp");
+        assert_eq!(r.kind, "confirm");
+        assert!(pawline_core::pending::load(&root).is_some());
+        let _ = cancel(&mut st);
+        assert!(pawline_core::pending::load(&root).is_none(), "cancel forgets the card");
+
+        // a new card replaces the remembered one atomically: the newest card is what survives
+        let r = handle_text(&mut st, "delete the folder kp");
+        assert_eq!(r.kind, "confirm");
+        let r2 = handle_text(&mut st, "delete the folder zz");
+        assert_eq!(r2.kind, "confirm");
+        let _ = cancel(&mut st);
+        let r3 = restore_pending_confirm(&mut st);
+        assert!(r3.is_none(), "cancelled replacement leaves nothing to restore");
     }
 
     #[test]
