@@ -238,6 +238,9 @@ pub struct UiState {
     pub pending: Option<Plan>,
     /// Request wording of the pending plan, kept in memory only to build the lookup key if the plan completes. Never written to disk.
     pub pending_request: Option<String>,
+    /// Picture bytes for the deck card that is about to be shown (read through the confined reader). Per state, never global.
+    /// Cleared by every new request, confirm and cancel. The window receives it only together with a "confirm" reply.
+    pub confirm_preview: Vec<Vec<u8>>,
     pub assist: Option<NeedleAssist>,
     pub assist_tried: bool,
     /// Journal recovery findings not yet shown to the user.
@@ -380,19 +383,11 @@ fn typo_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
     Some(out)
 }
 
-/// Picture bytes (already read through the confined reader) for the card that is about to be shown. The window takes them
-/// when it shows a confirm card and decodes them itself. Cleared on every new request so an old picture never lands on a new card.
-pub static CONFIRM_PREVIEW: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
-
-pub fn take_confirm_preview() -> Vec<Vec<u8>> {
-    CONFIRM_PREVIEW.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default()
-}
-
 pub static ONLINE_CHAT_UI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     state.online_pending = None;
-    let _ = take_confirm_preview();
+    state.confirm_preview.clear();
     // Arabic requests (item 11a): a fixed set of command shapes becomes the English command the normal path already
     // understands, shown to the user. Names stay byte for byte. The normal path then applies its own rules (confirm card where it asks for one).
     match pawline_core::arabic::translate(input) {
@@ -808,6 +803,7 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
         root,
         pending: None,
         pending_request: None,
+        confirm_preview: Vec::new(),
         assist: None,
         assist_tried: false,
         notes,
@@ -931,9 +927,7 @@ fn deck_command(state: &mut UiState, input: &str) -> Option<UiReply> {
             });
             state.pending_request = None;
             state.organize_pending = None;
-            if let Ok(mut g) = CONFIRM_PREVIEW.lock() {
-                *g = slides.iter().filter_map(|s| s.image.as_ref().map(|im| im.data.clone())).take(3).collect();
-            }
+            state.confirm_preview = slides.iter().filter_map(|s| s.image.as_ref().map(|im| im.data.clone())).take(3).collect();
             Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) })
         }
         _ => {
@@ -1923,6 +1917,23 @@ mod memory_tests {
         assert_eq!(r.kind, "confirm", "{}", r.text);
         assert!(r.text.contains("[picture from dot.png: PNG 1x1 px") && r.text.contains("original file is untouched"), "{}", r.text);
         assert!(!dl.join("pic.pptx").exists());
+        // the card's picture bytes belong to this state and this card only (per-state, not global)
+        assert_eq!(st.confirm_preview, vec![png.clone()]);
+        let other_root = org_root("deckpic-other");
+        let other = new_state(other_root);
+        assert!(other.confirm_preview.is_empty(), "another window/state never sees this card's picture");
+        // a new request replaces the card: the old picture is gone, and a cancelled card leaves none
+        let _ = handle_text(&mut st, "help");
+        assert!(st.confirm_preview.is_empty(), "a new request clears the picture slot");
+        let r = handle_text(&mut st, "make a presentation from pic");
+        assert_eq!(r.kind, "confirm");
+        assert_eq!(st.confirm_preview.len(), 1);
+        st.confirm_preview.clear();
+        let r = handle_text(&mut st, "make a presentation from pic");
+        assert_eq!(r.kind, "confirm");
+        let _ = cancel(&mut st);
+        let r = handle_text(&mut st, "make a presentation from pic");
+        assert_eq!(r.kind, "confirm");
         let d = confirm_exec(&mut st);
         assert_eq!(d.kind, "executed", "{}", d.text);
         let b = std::fs::read(dl.join("pic.pptx")).unwrap();

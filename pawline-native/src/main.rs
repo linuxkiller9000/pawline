@@ -1594,7 +1594,7 @@ impl App {
         let _ = self.tx.send(if yes { Req::Confirm } else { Req::Cancel });
     }
 
-    fn on_reply(&mut self, r: UiReply) {
+    fn on_reply(&mut self, r: UiReply, preview: Vec<Vec<u8>>) {
         self.busy = false;
         self.push(false, &r.kind, r.text.clone(), None);
         if r.kind == "md" {
@@ -1609,7 +1609,7 @@ impl App {
         self.zi_rows = if r.kind == "message" { r.plan.as_deref().map(|p| p.lines().map(String::from).collect()).unwrap_or_default() } else { vec![] };
         self.zi_sel = 0;
         if r.kind == "confirm" {
-            self.confirm_thumbs = bridge::take_confirm_preview().iter().filter_map(|b| thumb::from_bytes(b, THUMB_W, THUMB_H)).collect();
+            self.confirm_thumbs = preview.iter().filter_map(|b| thumb::from_bytes(b, THUMB_W, THUMB_H)).collect();
             self.confirm = Some(r.text);
             self.focus = Btn::No; // Cancel is focused by default
             self.plan_scroll = 0.0;
@@ -2502,13 +2502,13 @@ fn run_terminal() {
     }
 }
 
-fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
+fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<(UiReply, Vec<Vec<u8>>)>) {
     let root = work_root();
     let mut st = bridge::new_state(root);
     // Recovery notes from the previous run are shown first.
     if !st.notes.is_empty() {
         let n = st.notes.drain(..).collect::<Vec<_>>().join("\n");
-        let _ = back.send(bridge::reply("error", format!("After an interrupted run I checked the undo journal:\n{n}")));
+        let _ = back.send((bridge::reply("error", format!("After an interrupted run I checked the undo journal:\n{n}")), Vec::new()));
     }
     while let Ok(req) = rx.recv() {
         let r = match req {
@@ -2518,13 +2518,19 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
                 bridge::with_notes(&mut st, r)
             }
             Req::Confirm => {
+                st.confirm_preview.clear();
                 let r = bridge::confirm_inner(&mut st);
                 bridge::with_notes(&mut st, r)
             }
-            Req::Cancel => bridge::cancel(&mut st),
+            Req::Cancel => {
+                st.confirm_preview.clear();
+                bridge::cancel(&mut st)
+            }
         };
         bridge::ONLINE_CHAT_UI.store(st.online_chat, std::sync::atomic::Ordering::Relaxed);
-        if back.send(r).is_err() {
+        // Pictures only travel with the confirm card they belong to.
+        let pv = if r.kind == "confirm" { std::mem::take(&mut st.confirm_preview) } else { st.confirm_preview.clear(); Vec::new() };
+        if back.send((r, pv)).is_err() {
             break;
         }
     }
@@ -2655,7 +2661,7 @@ fn main() {
     };
 
     let (req_tx, req_rx) = mpsc::channel::<Req>();
-    let (back_tx, back_rx) = channel::channel::<UiReply>();
+    let (back_tx, back_rx) = channel::channel::<(UiReply, Vec<Vec<u8>>)>();
     let (voice_tx, voice_rx) = channel::channel::<VEv>();
     let (search_tx, search_rx) = channel::channel::<(u64, String, Vec<std::path::PathBuf>)>();
     std::thread::spawn(move || worker(req_rx, back_tx));
@@ -2840,8 +2846,8 @@ fn main() {
         .unwrap();
     handle
         .insert_source(back_rx, |ev, _, app: &mut App| {
-            if let channel::Event::Msg(r) = ev {
-                app.on_reply(r);
+            if let channel::Event::Msg((r, pv)) = ev {
+                app.on_reply(r, pv);
             }
         })
         .unwrap();
