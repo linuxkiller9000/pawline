@@ -79,6 +79,11 @@ struct UiBackend {
 
 impl ExecutionBackend for UiBackend {
     fn execute(&self, op: &Operation) -> Result<OpOutcome, PawError> {
+        if let Operation::Weather { place } = op {
+            let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(20));
+            let text = pawline_core::weather::weather(&http, place)?;
+            return Ok(OpOutcome { op: op.clone(), detail: text });
+        }
         if let Operation::Search { engine, query } = op {
             let text = cached_search(*engine, query)?;
             return Ok(OpOutcome {
@@ -248,7 +253,7 @@ pub fn task_memory_command(input: &str, path: Option<&std::path::Path>) -> Optio
 /// Answers, searches, online asks, pictures, undo and list are never remembered. Returns whether it saved.
 pub fn remember_steps(path: &std::path::Path, request: &str, ops: &[Operation], now: u64) -> bool {
     use pawline_core::plan::Operation as O;
-    if ops.is_empty() || ops.iter().any(|o| matches!(o, O::Answer { .. } | O::Search { .. } | O::AskOnline { .. } | O::GenerateImage { .. } | O::Undo { .. } | O::List { .. })) {
+    if ops.is_empty() || ops.iter().any(|o| matches!(o, O::Answer { .. } | O::Search { .. } | O::Weather { .. } | O::AskOnline { .. } | O::GenerateImage { .. } | O::Undo { .. } | O::List { .. })) {
         return false;
     }
     let steps: Vec<String> = ops.iter().map(|o| o.describe()).collect();
@@ -372,18 +377,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     if matches!(&r, Err(PawError::Parse(_))) {
         use pawline_core::textfallback::{classify, Class};
         match classify(input) {
-            Class::Auto => {
-                let q = input.trim().to_string();
-                return match ask_online(&q) {
-                    Ok(a) => reply("message", a),
-                    Err(e) => {
-                        let t = e.to_string();
-                        let t = t.strip_prefix("Execution failed: ").unwrap_or(&t).to_string();
-                        reply(if t.contains("Cancelled.") { "message" } else { "failed" }, t)
-                    }
-                };
-            }
-            Class::Ask => {
+            Class::Ask | Class::Auto => {
                 let op = Operation::AskOnline { text: input.trim().to_string() };
                 let summary = format!("1. {}", op.describe());
                 let plan = Plan {
@@ -425,6 +419,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                         }
                         pawline_core::plan::Operation::Shrink { .. } | pawline_core::plan::Operation::Deck { .. } => o.detail.clone(),
                         pawline_core::plan::Operation::Search { .. }
+                        | pawline_core::plan::Operation::Weather { .. }
                         | pawline_core::plan::Operation::AskOnline { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)
@@ -516,6 +511,7 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
                         }
                         pawline_core::plan::Operation::Shrink { .. } => o.detail.clone(),
                         pawline_core::plan::Operation::Search { .. }
+                        | pawline_core::plan::Operation::Weather { .. }
                         | pawline_core::plan::Operation::AskOnline { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)
@@ -915,6 +911,7 @@ mod memory_tests {
             O::Answer { text: "42".into() },
             O::Search { engine: SearchEngine::Web, query: "q".into() },
             O::AskOnline { text: "q".into() },
+            O::Weather { place: "Cairo".into() },
             O::Undo { entry: 1, summary: "u".into() },
             O::List { path: "/tmp".into() },
         ] {
@@ -924,6 +921,27 @@ mod memory_tests {
         assert!(!remember_steps(&p, "empty", &[], 1));
         assert_eq!(pawline_core::planmem::load(&p).len(), 1);
         assert!(!remember_steps(&p, "my password is abc make x", &[dir], 1));
+    }
+
+    #[test]
+    fn every_online_ask_shows_a_disclosure_card_first_and_cancel_sends_nothing() {
+        let mut st = new_state(org_root("online"));
+        for (q, host) in [
+            ("what's the weather in Cairo?", "geocoding-api.open-meteo.com"),
+            ("search the web for niri compositor", "api.duckduckgo.com"),
+            ("wiki tux the penguin", "en.wikipedia.org"),
+            ("what is a strong password", "text.pollinations.ai"),
+        ] {
+            let r = handle_text(&mut st, q);
+            assert_eq!(r.kind, "confirm", "{q}: {}", r.text);
+            assert!(r.text.contains(host) && r.text.contains("IP address") && r.text.contains("Nothing else is sent"), "{q}: {}", r.text);
+            assert!(st.pending.is_some());
+            let c = cancel(&mut st);
+            assert!(c.text.contains("Nothing was done") && st.pending.is_none(), "{q}");
+        }
+        // no place: asks, no card, nothing sent
+        let r = handle_text(&mut st, "what is the weather");
+        assert!(r.text.contains("Which place") && st.pending.is_none());
     }
 
     fn org_root(tag: &str) -> std::path::PathBuf {

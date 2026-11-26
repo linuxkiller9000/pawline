@@ -38,6 +38,8 @@ pub enum Directive {
     /// An explicit online search the user asked for by name. Sends the
     /// query to the named source and shows the result; no local effects.
     Search { engine: SearchEngine, query: String },
+    /// Weather for a named place from Open-Meteo. Sends the place name; asks first.
+    Weather { place: String },
     /// A free online picture from a provider the user named. Sends only the prompt.
     GenerateImage { provider: crate::imagegen::ImageProvider, prompt: String },
 }
@@ -80,6 +82,7 @@ pub enum Operation {
     Undo { entry: u64, summary: String },
     Answer { text: String },
     Search { engine: SearchEngine, query: String },
+    Weather { place: String },
     GenerateImage { provider: crate::imagegen::ImageProvider, prompt: String },
     /// Send one question to Pollinations text. Shown only, never run. Always confirmed when it comes from here.
     AskOnline { text: String },
@@ -115,9 +118,14 @@ impl Operation {
                 "Ask Pollinations (online) \"{text}\": this sends your question text and your IP address to text.pollinations.ai (free, no account). Nothing else is sent: no files, no history. The answer is only shown, never run, and may be wrong."
             ),
             Operation::Search { engine, query } => match engine {
-                SearchEngine::Web => format!("Search the web for \"{query}\""),
-                SearchEngine::Wiki => format!("Search Wikipedia for \"{query}\""),
+                SearchEngine::Web => format!(
+                    "Search the web for \"{query}\" (online): this sends your search words and your IP address to api.duckduckgo.com (free, no account). Nothing else is sent: no files, no history. The result is only shown, never run, and may be out of date."
+                ),
+                SearchEngine::Wiki => format!(
+                    "Search Wikipedia for \"{query}\" (online): this sends your search words and your IP address to en.wikipedia.org (free, no account). Nothing else is sent: no files, no history. The result is only shown, never run."
+                ),
             },
+            Operation::Weather { place } => crate::weather::disclosure(place),
         }
     }
 
@@ -126,7 +134,7 @@ impl Operation {
         matches!(
             self,
             Operation::Delete { .. } | Operation::Move { .. } | Operation::Shrink { .. } | Operation::Deck { .. } | Operation::SetWallpaper { .. }
-                | Operation::Undo { .. } | Operation::OpenApp { .. } | Operation::GenerateImage { .. } | Operation::AskOnline { .. }
+                | Operation::Undo { .. } | Operation::OpenApp { .. } | Operation::GenerateImage { .. } | Operation::AskOnline { .. } | Operation::Search { .. } | Operation::Weather { .. }
         )
     }
 }

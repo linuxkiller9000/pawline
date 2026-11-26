@@ -415,7 +415,7 @@ mod tests {
             }]
         );
         assert!(parse("make a folder called kitten paws").is_ok());
-        assert!(parse("what is the weather").is_err());
+        assert!(matches!(parse("what is the weather").unwrap()[..], [crate::plan::Directive::Answer { .. }]), "asks which place instead of guessing");
     }
 
     #[test]

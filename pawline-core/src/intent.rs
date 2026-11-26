@@ -199,6 +199,20 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
     if let Some(text) = small_talk(&lower) {
         return Ok(Directive::Answer { text });
     }
+    if let Some(place) = crate::weather::parse_place(&lower) {
+        if place.is_empty() {
+            return Ok(Directive::Answer { text: "Which place? For example: weather in Cairo. Pawline never guesses your location.".into() });
+        }
+        // Keep the user's own capitalisation for the place name.
+        let place = match lower.rfind(&place) {
+            Some(i) if cmd.to_lowercase() == lower => {
+                let start = lower[..i].chars().count();
+                cmd.chars().skip(start).take(place.chars().count()).collect()
+            }
+            _ => place,
+        };
+        return Ok(Directive::Weather { place });
+    }
     for (pre, engine) in [
         ("search wikipedia for ", crate::plan::SearchEngine::Wiki),
         ("search wikipedia ", crate::plan::SearchEngine::Wiki),

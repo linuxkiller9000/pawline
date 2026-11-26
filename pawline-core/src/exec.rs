@@ -29,6 +29,10 @@ pub trait ExecutionBackend {
     /// layers override this. Default: refused, never silently skipped.
     fn execute(&self, op: &Operation) -> Result<OpOutcome, PawError>;
     fn name(&self) -> &'static str;
+    fn weather(&self, _place: &str) -> Result<String, PawError> {
+        Err(PawError::Exec("weather is not available in this backend".into()))
+    }
+
     fn search(&self, _engine: crate::plan::SearchEngine, _query: &str) -> Result<String, PawError> {
         Err(PawError::Exec(
             "online search is not available in this backend".into(),
@@ -611,6 +615,10 @@ impl ExecutionBackend for DirectFsBackend {
                 op: op.clone(),
                 detail: text.clone(),
             }),
+            Operation::Weather { place } => {
+                let text = self.weather(place)?;
+                Ok(OpOutcome { op: op.clone(), detail: text })
+            }
             Operation::Search { engine, query } => {
                 let text = self.search(*engine, query)?;
                 Ok(OpOutcome {

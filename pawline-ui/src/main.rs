@@ -15,6 +15,10 @@ struct UiBackend {
 
 impl ExecutionBackend for UiBackend {
     fn execute(&self, op: &Operation) -> Result<OpOutcome, PawError> {
+        if let Operation::Weather { place } = op {
+            let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(20));
+            return Ok(OpOutcome { op: op.clone(), detail: pawline_core::weather::weather(&http, place)? });
+        }
         if let Operation::Search { engine, query } = op {
             let text = pawline_core::search::run(*engine, query)?;
             return Ok(OpOutcome {
@@ -117,6 +121,7 @@ fn handle_text(state: &mut UiState, input: &str) -> UiReply {
                     .iter()
                     .map(|o| match &o.op {
                         pawline_core::plan::Operation::Search { .. }
+                        | pawline_core::plan::Operation::Weather { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)
                         }
@@ -210,6 +215,7 @@ fn confirm_inner(state: &mut UiState) -> UiReply {
                     .iter()
                     .map(|o| match &o.op {
                         pawline_core::plan::Operation::Search { .. }
+                        | pawline_core::plan::Operation::Weather { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)
                         }

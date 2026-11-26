@@ -7,6 +7,7 @@
 //! bypass it.
 
 pub mod apps;
+pub mod weather;
 pub mod assist;
 pub mod context;
 pub mod deck;

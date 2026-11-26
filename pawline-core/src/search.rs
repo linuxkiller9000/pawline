@@ -109,10 +109,16 @@ fn duckduckgo_instant(query: &str) -> Result<String, PawError> {
         .and_then(|t| t.get("Text"))
         .and_then(|t| t.as_str())
     {
-        return Ok(topic.to_string());
+        let link = v
+            .pointer("/RelatedTopics/0/FirstURL")
+            .and_then(|u| u.as_str())
+            .map(|u| format!("\nSource: {u}"))
+            .unwrap_or_default();
+        return Ok(format!("{topic}{link}"));
     }
     Ok(format!(
-        "DuckDuckGo had no instant answer for \"{query}\". Try rephrasing, or \"wiki {query}\"."
+        "DuckDuckGo had no instant answer for \"{query}\". Try rephrasing, or \"wiki {query}\". You can also open https://duckduckgo.com/?q={} yourself.",
+        enc_query(query)
     ))
 }
 

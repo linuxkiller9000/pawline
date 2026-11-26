@@ -544,6 +544,7 @@ impl Validator {
                     prompt: crate::imagegen::clean_prompt(prompt)?,
                 }),
                 Directive::Answer { text } => ops.push(Operation::Answer { text: text.clone() }),
+                Directive::Weather { place } => ops.push(Operation::Weather { place: place.clone() }),
                 Directive::Search { engine, query } => ops.push(Operation::Search {
                     engine: *engine,
                     query: query.clone(),
