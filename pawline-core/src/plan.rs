@@ -131,11 +131,11 @@ impl Operation {
             Operation::ChatOnline { context, text } => {
                 let mut lines = vec![format!("  system: {}", crate::textfallback::CHAT_SYSTEM)];
                 for (i, c) in context.iter().enumerate() {
-                    lines.push(format!("  {}: {c}", if i % 2 == 0 { "you" } else { "assistant (earlier answer)" }));
+                    lines.push(format!("  {}: {c}", if i % 2 == 0 { "user" } else { "assistant (an earlier answer)" }));
                 }
-                lines.push(format!("  you: {text}"));
+                lines.push(format!("  user: {text}"));
                 format!(
-                    "Online chat turn (Pollinations, free \"Classic\" service: no account, best effort, one request per 45 seconds per IP address). Pawline will POST EXACTLY these messages to text.pollinations.ai, plus the usual web details (your IP address, a \"Pawline\" user-agent). That is all of it: {} earlier line(s) of this chat session, kept in memory only and cut to {} characters each.\n{}\nNothing from your files, location or saved history is sent, and nothing else from this session. What Pollinations keeps is its own policy. Do not put passwords or private information in the chat. The answer is only shown, never run, and is AI-written text that may be wrong. Say \"chat off\" or \"forget our chat\" to end it.",
+                    "Online chat turn. Pawline will POST one JSON body to https://text.pollinations.ai/openai with two fields: model = \"openai\", and messages = the lines below (their text is sent word for word; JSON adds only quotes and escapes). Nothing else is in the body. The request also carries the usual web details (your IP address, a \"Pawline\" user-agent, no cookies, no account). Earlier lines of this session sent along: {} (memory only, cut to {} characters each).\n{}\nNever sent: your files, location or saved history. Free \"Classic\" tier: best effort, one request per 45 seconds per IP address. What Pollinations says in its privacy policy (updated 2026-11-17): prompts are processed transiently and not used to train models without opt-in; replies may be cached for up to about 30 days; free usage logs keep a keyed hash and network prefix of the IP address, the country and timestamps; the service is for people 16 or older; some data may reach its service providers. Do not put passwords or private information in the chat. The answer is only shown, never run, and is AI-written text that may be wrong. Say \"chat off\" or \"forget our chat\" to end it.",
                     context.len(),
                     crate::textfallback::CHAT_LINE_CHARS,
                     lines.join("\n")

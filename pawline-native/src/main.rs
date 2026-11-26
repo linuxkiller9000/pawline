@@ -692,7 +692,13 @@ impl App {
         let (w, h) = (self.w as f32, self.h as f32);
         self.fill_bg(pm, w, h);
         self.orb(pm, 34.0, 32.0, 17.0, self.busy);
-        let title = if self.busy { "Pawline  (working, Esc cancels)" } else { "Pawline" };
+        let title = if self.busy {
+            "Pawline  (working, Esc cancels)"
+        } else if bridge::ONLINE_CHAT_UI.load(std::sync::atomic::Ordering::Relaxed) {
+            "Pawline  [online chat ON]"
+        } else {
+            "Pawline"
+        };
         self.text(pm, title, 62.0, 38.0, 18.0, (235, 230, 250), (0.0, h));
         // settings button (three slider lines), left of the collapse button
         self.r_gear = (w - 80.0, 14.0, 30.0, 30.0);
@@ -2492,6 +2498,7 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
             }
             Req::Cancel => bridge::cancel(&mut st),
         };
+        bridge::ONLINE_CHAT_UI.store(st.online_chat, std::sync::atomic::Ordering::Relaxed);
         if back.send(r).is_err() {
             break;
         }

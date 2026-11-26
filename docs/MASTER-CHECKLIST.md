@@ -163,3 +163,7 @@ Status: OPEN. Sandbox and virtual-machine runs are labelled as such and do not c
 ## 27. Final integration, 28. Packaging, 29. Approval before release
 OPEN. Integration also reconciles the diverged main branch (not merged without checking the repo authority for that operation). Packaging makes no installer,
 signing or release commitment without approval. Publishing needs the user's explicit approval.
+
+
+## Tracked gaps (file safety, item 17)
+- Rename with a quoted name containing spaces (rename the folder "a b" to c) fails: the quotes become part of the name. Delete/remove with quoted names works since 2026-11-26.

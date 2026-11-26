@@ -122,6 +122,12 @@ fn has_private_marker(input: &str) -> bool {
 
 /// `chat` = a casual chat line: personal pronouns and names are allowed (the exact text is shown on a card first); paths, addresses,
 /// numbers, files and account words still block.
+/// True when the part after the last dot looks like a real file extension.
+fn known_ext(t: &str) -> bool {
+    const EXT: &[&str] = &["txt", "md", "pdf", "doc", "docx", "odt", "xls", "xlsx", "ods", "ppt", "pptx", "odp", "csv", "json", "xml", "html", "htm", "png", "jpg", "jpeg", "gif", "webp", "svg", "mp3", "wav", "ogg", "mp4", "mkv", "zip", "tar", "gz", "7z", "rs", "py", "js", "ts", "c", "cpp", "h", "sh", "toml", "yaml", "yml", "log", "conf", "ini", "deb", "iso", "exe", "bin", "key", "pem", "db", "sql"];
+    t.rsplit('.').next().is_some_and(|e| EXT.contains(&e.to_lowercase().as_str()))
+}
+
 fn private_marker(input: &str, chat: bool) -> bool {
     let lower = input.to_lowercase();
     if lower.contains('/') || lower.contains('\\') || lower.contains('~') || lower.contains('@') || lower.contains("://") || lower.contains("www.") {
@@ -131,6 +137,8 @@ fn private_marker(input: &str, chat: bool) -> bool {
     if input.split_whitespace().any(|t| {
         let t = t.trim_matches(|c: char| !c.is_alphanumeric() && c != '.');
         t.contains('.') && !t.starts_with('.') && !t.ends_with('.') && t.rsplit('.').next().is_some_and(|e| (1..=5).contains(&e.len()) && e.chars().all(|c| c.is_ascii_alphanumeric()))
+            // chat: decimals (3.5), abbreviations (e.g.) and run-together sentences are not file names
+            && !(chat && (t.rsplit('.').next().is_some_and(|e| e.chars().all(|c| c.is_ascii_digit())) || t.split('.').any(|p| p.len() <= 1) || !known_ext(t)))
     }) {
         return true;
     }
@@ -146,12 +154,17 @@ fn private_marker(input: &str, chat: bool) -> bool {
         }
     }
     let w = words(&lower);
-    const PRONOUNS: &[&str] = &["my", "mine", "me", "i", "i'm", "i've", "i'd", "our", "ours", "we", "home"];
-    if w.iter().any(|x| PRIVATE_WORDS.contains(&x.as_str()) && !(chat && PRONOUNS.contains(&x.as_str()))) {
+    // chat: only credential and account words block; pronouns, family, and plain nouns like "file" or "history" are the user's own talk
+    const CHAT_BLOCK: &[&str] = &["apikey", "credit", "card", "bank", "iban", "ssid", "ssn", "login", "pin", "otp", "salary", "clipboard", "password", "passwords", "passcode"];
+    if chat {
+        if w.iter().any(|x| CHAT_BLOCK.contains(&x.as_str())) {
+            return true;
+        }
+    } else if w.iter().any(|x| PRIVATE_WORDS.contains(&x.as_str())) {
         return true;
     }
     if chat {
-        return input.contains('"') || input.contains('`');
+        return input.contains('`');
     }
     // quoted text and mid-sentence capitalised words (names, places) may be private
     if input.contains('"') || input.contains('`') {
@@ -253,7 +266,12 @@ pub fn chat_block_reason(text: &str) -> Option<&'static str> {
     if t.chars().any(|c| c.is_control()) { return Some("contains control characters"); }
     if looks_like_secret(t) { return Some("looks like a password or secret"); }
     if private_marker(t, true) { return Some("looks like it names a path, address, number or private detail"); }
-    if words(&t.to_lowercase()).iter().any(|w| LOCAL_WORDS.contains(&w.as_str())) { return Some("sounds like a local file command"); }
+    // A local command that failed to parse is not chat: an action word at the start with a file-ish target.
+    let lw = words(&t.to_lowercase());
+    const TARGETS: &[&str] = &["file", "files", "folder", "folders", "directory", "directories", "app", "apps", "wallpaper", "document", "documents"];
+    if lw.iter().take(3).any(|w| LOCAL_WORDS.contains(&w.as_str())) && lw.iter().any(|w| TARGETS.contains(&w.as_str())) {
+        return Some("sounds like a local file command");
+    }
     None
 }
 
@@ -455,5 +473,24 @@ mod tests {
         let n = seen.borrow().len();
         assert!(chat(&P(&seen, 200), &[], "tell me more", &|| true, &|| true).is_err());
         assert_eq!(seen.borrow().len(), n + 1);
+    }
+
+    /// Written after the filter, not used to tune it: ordinary chat must be offered, private or command-like text must not.
+    #[test]
+    fn chat_filter_heldout_offers_ordinary_talk_and_blocks_private() {
+        let ok = [
+            "Really? That's cool, but why!", "well... maybe so", "it's 3.5 degrees out today", "e.g. cats are fun", "I think clouds look like sheep",
+            "what do you think about the moon?", "can you explain it more simply?", "ok, and then what happened next", "I run every day and feel great",
+            "tell me more", "why is that?", "I'm bored; what should we talk about?", "my favourite colour is blue", "He said \"hello\" and left",
+            "I deleted a file yesterday and I was sad", "do you like music? I do!", "what's the difference between a frog and a toad", "in 2026 things changed",
+            "show me what a haiku looks like", "so... are you real?", "thanks, that helps (a lot)", "Is it true that octopuses have three hearts?",
+        ];
+        for t in ok { assert_eq!(chat_block_reason(t), None, "should be offered: {t}"); }
+        let bad = [
+            "my password is hunter2", "read ~/notes.txt to me", "delete the folder kp", "make a folder called cats", "email bob@example.com", "open https://example.com",
+            "call 5551234567", "move report.pdf to documents", "rename the file a.txt", "my pin is 4821 ok", "list files in /etc", "set a wallpaper",
+            "the key is `abc123`", "api key sk-abcdefghijklmnop", "install the app firefox",
+        ];
+        for t in bad { assert!(chat_block_reason(t).is_some(), "should be blocked: {t}"); }
     }
 }

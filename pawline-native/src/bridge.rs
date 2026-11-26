@@ -379,7 +379,10 @@ fn typo_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
     Some(out)
 }
 
+pub static ONLINE_CHAT_UI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
+    state.online_pending = None;
     if let Some(r) = weather_pick(input) {
         return r;
     }
@@ -395,7 +398,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
         }
         if matches!(low, "chat online" | "start online chat" | "turn on online chat" | "online chat" | "chat online on") {
             state.online_chat = true;
-            return reply("message", format!("Online chat is ON for this session only. Nothing was sent. Commands and offline help still run first and locally. When something is not a command, I will show you a card with the exact messages (up to {} earlier lines of this session, kept in memory only) before anything goes to text.pollinations.ai (free, no account, your IP address is visible, one request per 45 seconds). Your files, location and saved history are never sent; texts with paths, addresses, numbers, quotes or passwords are not offered. Replies are AI-written and may be wrong. Say \"chat off\" to stop or \"forget our chat\" to clear the lines.", pawline_core::textfallback::CHAT_CONTEXT_LINES));
+            return reply("message", format!("Online chat is ON for this session only. Nothing was sent. Commands and offline help still run first and locally. When something is not a command, I will show you a card with the exact messages (up to {} earlier lines of this session, kept in memory only) before anything goes to text.pollinations.ai (free, no account, your IP address is visible, one request per 45 seconds). Your files, location and saved history are never sent; texts with paths, addresses, long numbers, file names, passwords or other credentials are not offered. Replies are AI-written and may be wrong. Say \"chat off\" to stop or \"forget our chat\" to clear the lines.", pawline_core::textfallback::CHAT_CONTEXT_LINES));
         }
         if matches!(low, "chat off" | "stop online chat" | "turn off online chat" | "chat offline" | "online chat off") {
             state.online_chat = false;
@@ -1406,26 +1409,26 @@ mod memory_tests {
         // on: the exact messages are on a confirm card; nothing is sent until confirmed
         let r = handle_text(&mut st, "I think clouds look like sheep");
         assert_eq!(r.kind, "confirm", "{}", r.text);
-        assert!(r.text.contains("POST EXACTLY") && r.text.contains("you: I think clouds look like sheep") && r.text.contains("system:"), "{}", r.text);
+        assert!(r.text.contains("POST one JSON body") && r.text.contains("user: I think clouds look like sheep") && r.text.contains("system:"), "{}", r.text);
         assert!(st.online_ctx.is_empty(), "nothing recorded before it was sent");
         cancel(&mut st);
         assert!(st.online_pending.is_none() && st.online_ctx.is_empty());
         // private or action-like text is never offered
         for s in ["my password is hunter2 ok", "tell Bob@example.com hi", "look at ~/notes.txt for me", "I earned 123456 dollars"] {
             let r = handle_text(&mut st, s);
-            assert!(r.kind != "confirm" && !r.text.contains("POST EXACTLY"), "{s}: {}", r.text);
+            assert!(r.kind != "confirm" && !r.text.contains("POST one JSON body"), "{s}: {}", r.text);
             assert!(st.pending.is_none(), "{s}");
         }
         // a real command still runs locally and is not turned into chat
         let r = handle_text(&mut st, "delete the folder nothere");
-        assert!(!r.text.contains("POST EXACTLY"), "{}", r.text);
+        assert!(!r.text.contains("POST one JSON body"), "{}", r.text);
         st.online_ctx = vec!["a".into(), "b".into()];
         handle_text(&mut st, "forget our chat");
         assert!(st.online_ctx.is_empty());
         handle_text(&mut st, "chat off");
         assert!(!st.online_chat);
         let r = handle_text(&mut st, "I think clouds look like sheep");
-        assert!(!r.text.contains("POST EXACTLY"));
+        assert!(!r.text.contains("POST one JSON body"));
     }
 
     #[test]
