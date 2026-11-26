@@ -2357,7 +2357,7 @@ impl App {
     fn x_event(&mut self, ev: XEv) {
         use XEv;
         if std::env::var_os("PAWLINE_DEBUG").is_some() {
-            eprintln!("xev {}", match &ev { XEv::Key { sym, .. } => format!("key {sym:x}"), XEv::Press { button, x, y, .. } => format!("press {button} {x} {y}"), XEv::Release { .. } => "release".into(), #[cfg(windows)] XEv::Text { .. } => "text".into(), XEv::Motion { .. } => "motion".into(), XEv::Expose => "expose".into() });
+            eprintln!("xev {}", match &ev { XEv::Key { .. } => "key (symbol not logged)".to_string(), XEv::Press { button, x, y, .. } => format!("press {button} {x} {y}"), XEv::Release { .. } => "release".into(), #[cfg(windows)] XEv::Text { .. } => "text".into(), XEv::Motion { .. } => "motion".into(), XEv::Expose => "expose".into() });
         }
         match ev {
             XEv::Expose => self.draw(),

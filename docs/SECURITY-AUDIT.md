@@ -27,7 +27,7 @@ Hosts present in source: text.pollinations.ai, image.pollinations.ai, aihorde.ne
 - Not done: fuzzing the tool-call parser.
 
 ## 5. Accidental logging of private data (source review)
-- eprintln/println sites: PERF timing (opt-in env), x11 diagnostics, terminal mode output, test messages. None prints file names or message text, except terminal mode which prints replies to the user's own terminal by design and the `xev` key line on main.rs (line ~2360, key symbols only, gated by an env var — verify the gate before release).
+- eprintln/println sites: PERF timing (opt-in env), x11 diagnostics, terminal mode output, test messages. None prints file names or message text, except terminal mode which prints replies to the user's own terminal by design and the `xev` debug line in main.rs. FINDING (fixed): with PAWLINE_DEBUG set that line printed the key symbol of every key press, i.e. a typed-text log (could include a pasted or typed secret). It now prints "key (symbol not logged)". The x11.rs `PAWLINE_DEBUG` lines print sizes only.
 - Not done: runtime log capture with a canary string.
 
 ## 6. File operations and permission boundaries
