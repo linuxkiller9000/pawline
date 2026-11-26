@@ -380,10 +380,19 @@ fn typo_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
     Some(out)
 }
 
+/// Picture bytes (already read through the confined reader) for the card that is about to be shown. The window takes them
+/// when it shows a confirm card and decodes them itself. Cleared on every new request so an old picture never lands on a new card.
+pub static CONFIRM_PREVIEW: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
+
+pub fn take_confirm_preview() -> Vec<Vec<u8>> {
+    CONFIRM_PREVIEW.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default()
+}
+
 pub static ONLINE_CHAT_UI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     state.online_pending = None;
+    let _ = take_confirm_preview();
     // Arabic requests (item 11a): a fixed set of command shapes becomes the English command the normal path already
     // understands, shown to the user. Names stay byte for byte. The normal path then applies its own rules (confirm card where it asks for one).
     match pawline_core::arabic::translate(input) {
@@ -922,6 +931,9 @@ fn deck_command(state: &mut UiState, input: &str) -> Option<UiReply> {
             });
             state.pending_request = None;
             state.organize_pending = None;
+            if let Ok(mut g) = CONFIRM_PREVIEW.lock() {
+                *g = slides.iter().filter_map(|s| s.image.as_ref().map(|im| im.data.clone())).take(3).collect();
+            }
             Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) })
         }
         _ => {

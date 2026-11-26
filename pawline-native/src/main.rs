@@ -306,6 +306,8 @@ struct App {
     msgs: Vec<Msg>,
     /// Plan text awaiting a decision.
     confirm: Option<String>,
+    /// Small pictures shown above the card text (deck pictures only), decoded from the same bytes that go into the file.
+    confirm_thumbs: Vec<Pixmap>,
     focus: Btn,
     /// Pixels scrolled up from the bottom of the chat (0 = latest).
     scroll: f32,
@@ -957,14 +959,35 @@ impl App {
             text
         };
         let lines = self.wrap(&text, PX, inner_w - 16.0);
-        let total = lines.len() as f32 * LH + 16.0;
+        // Deck pictures: a labelled strip above the text. It scrolls with the text, so the card text is never covered.
+        const PREVIEW_NOTE: &str = "Picture preview, decoded here from the bytes that go into the file. Not a PowerPoint render.";
+        let note_lines = if self.confirm_thumbs.is_empty() { vec![] } else { self.wrap(PREVIEW_NOTE, PX, inner_w - 16.0) };
+        let strip = if self.confirm_thumbs.is_empty() { 0.0 } else { THUMB_H as f32 + 8.0 + LH * note_lines.len() as f32 };
+        let total = lines.len() as f32 * LH + 16.0 + strip;
         let view = bot - top - 6.0;
         self.plan_max = (total - view).max(0.0);
         if self.plan_scroll > self.plan_max {
             self.plan_scroll = self.plan_max;
         }
+        if strip > 0.0 {
+            for (k, nl) in note_lines.iter().enumerate() {
+                let ly = top + 8.0 + (k as f32 + 1.0) * LH - 5.0 - self.plan_scroll;
+                self.text_m(pm, nl, PAD + 4.0, ly, PX, (190, 185, 215), (top + 3.0, bot - 3.0), shape::Mode::Strict);
+            }
+            let mut x = PAD + 4.0;
+            let ty = top + 8.0 + LH * note_lines.len() as f32 - self.plan_scroll;
+            // Clip to the card panel so a scrolled picture never paints over the header or the buttons.
+            let mut clip = tiny_skia::Mask::new(pm.width(), pm.height());
+            if let (Some(c), Some(r)) = (clip.as_mut(), tiny_skia::Rect::from_xywh(PAD, top + 3.0, w - 2.0 * PAD, (bot - 3.0) - (top + 3.0))) {
+                c.fill_path(&tiny_skia::PathBuilder::from_rect(r), tiny_skia::FillRule::Winding, false, Transform::identity());
+            }
+            for t in &self.confirm_thumbs {
+                pm.draw_pixmap(x as i32, ty as i32, t.as_ref(), &PixmapPaint::default(), Transform::identity(), clip.as_ref());
+                x += t.width() as f32 + 8.0;
+            }
+        }
         for (i, l) in lines.iter().enumerate() {
-            let y = top + 8.0 + (i as f32 + 1.0) * LH - 5.0 - self.plan_scroll;
+            let y = top + 8.0 + strip + (i as f32 + 1.0) * LH - 5.0 - self.plan_scroll;
             self.text_m(pm, l, PAD + 4.0, y, PX, (235, 230, 255), (top + 3.0, bot - 3.0), shape::Mode::Strict);
         }
         let can_yes = self.can_approve();
@@ -1565,6 +1588,7 @@ impl App {
             return;
         }
         self.confirm = None;
+        self.confirm_thumbs.clear();
         self.plan_scroll = 0.0;
         self.busy = true;
         let _ = self.tx.send(if yes { Req::Confirm } else { Req::Cancel });
@@ -1585,6 +1609,7 @@ impl App {
         self.zi_rows = if r.kind == "message" { r.plan.as_deref().map(|p| p.lines().map(String::from).collect()).unwrap_or_default() } else { vec![] };
         self.zi_sel = 0;
         if r.kind == "confirm" {
+            self.confirm_thumbs = bridge::take_confirm_preview().iter().filter_map(|b| thumb::from_bytes(b, THUMB_W, THUMB_H)).collect();
             self.confirm = Some(r.text);
             self.focus = Btn::No; // Cancel is focused by default
             self.plan_scroll = 0.0;
@@ -2695,6 +2720,7 @@ fn main() {
         reply: None,
         msgs: vec![Msg { user: false, kind: "message".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it. Right-click a message (or Ctrl+R) to reply to it.".into(), thumb: None, quote: None }],
         confirm: None,
+        confirm_thumbs: Vec::new(),
         focus: Btn::No,
         scroll: 0.0,
         plan_scroll: 0.0,
