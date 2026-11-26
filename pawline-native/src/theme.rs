@@ -14,11 +14,14 @@ pub struct Theme {
     pub accent: Rgb,
 }
 
-pub const THEMES: [Theme; 4] = [
+pub const THEMES: [Theme; 5] = [
     Theme { name: "Dusk", bg: [(30, 28, 40), (38, 30, 58), (28, 34, 52)], user: (62, 54, 112), input: (52, 48, 70), accent: (92, 80, 170) },
     Theme { name: "Ocean", bg: [(18, 32, 48), (20, 52, 66), (24, 38, 74)], user: (28, 82, 112), input: (30, 56, 78), accent: (40, 120, 170) },
     Theme { name: "Forest", bg: [(20, 36, 30), (30, 50, 38), (28, 42, 48)], user: (40, 92, 66), input: (36, 62, 50), accent: (60, 130, 90) },
     Theme { name: "Rose", bg: [(44, 26, 36), (58, 30, 46), (40, 28, 52)], user: (120, 52, 82), input: (74, 42, 58), accent: (170, 80, 120) },
+    // High contrast (item 13): near-black flat background (drift between near-identical stops is invisible),
+    // every surface at least 7:1 against body, hint and note text (WCAG AAA, checked by the tests below).
+    Theme { name: "Contrast", bg: [(6, 6, 9), (9, 9, 13), (6, 6, 9)], user: (0, 60, 120), input: (22, 22, 28), accent: (0, 80, 180) },
 ];
 
 /// Quiet text (hints, placeholder) and the label of a disabled button. Chosen so each is at least 4.5:1 on every panel colour
@@ -211,6 +214,26 @@ mod contrast_tests {
             assert!(r >= 4.5, "text on {} user bubble: {r:.2}", t.name);
         }
         assert!(contrast(DISABLED_FG, DISABLED_BG) >= 4.5);
+    }
+
+    /// The high-contrast theme must clear WCAG AAA (7:1) for body, hint and note text on every
+    /// surface it owns, and for the white text on its accent and user-bubble fills.
+    #[test]
+    fn high_contrast_theme_meets_7_to_1() {
+        let t = THEMES.iter().find(|t| t.name == "Contrast").expect("Contrast theme");
+        let mut surfaces: Vec<(&str, Rgb)> = vec![("card", CARD_BG)];
+        for (i, c) in t.bg.iter().enumerate() {
+            surfaces.push((match i { 0 => "bg0", 1 => "bg1", _ => "bg2" }, *c));
+        }
+        surfaces.push(("input", t.input));
+        for (name, bg) in &surfaces {
+            for (what, fg) in [("hint", HINT), ("note", NOTE), ("body", (235, 230, 255))] {
+                let r = contrast(fg, *bg);
+                assert!(r >= 7.0, "Contrast theme: {what} on {name}: {r:.2} < 7");
+            }
+        }
+        assert!(contrast((255, 255, 255), t.user) >= 7.0, "white on Contrast user bubble");
+        assert!(contrast((255, 255, 255), t.accent) >= 7.0, "white on Contrast accent");
     }
 
     #[test]
