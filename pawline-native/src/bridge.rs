@@ -28,19 +28,19 @@ pub static LAYA_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 // model loads or routes. Terminal mode installs nothing and behaves exactly as before.
 #[cfg(all(feature = "laya", not(windows)))]
 std::thread_local! {
-    static LAYA_THINKING: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+    static LAYA_THINKING: std::cell::RefCell<Option<Box<dyn Fn(&str)>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(all(feature = "laya", not(windows)))]
-pub fn set_laya_thinking_notifier(f: Option<Box<dyn Fn()>>) {
+pub fn set_laya_thinking_notifier(f: Option<Box<dyn Fn(&str)>>) {
     LAYA_THINKING.with(|c| *c.borrow_mut() = f);
 }
 
 #[cfg(all(feature = "laya", not(windows)))]
-fn notify_laya_thinking() {
+fn notify_laya_thinking(text: &str) {
     LAYA_THINKING.with(|c| {
         if let Some(f) = c.borrow().as_ref() {
-            f();
+            f(text);
         }
     });
 }
@@ -336,6 +336,9 @@ pub struct UiState {
     pub laya: Option<crate::laya::Laya>,
     #[cfg(all(feature = "laya", not(windows)))]
     pub laya_tried: bool,
+    /// One-time model download+convert card is on screen; only the card's Approve sets it off.
+    #[cfg(all(feature = "laya", not(windows)))]
+    pub laya_setup_pending: bool,
     pub online_ctx: Vec<String>,
     pub online_pending: Option<String>,
 }
@@ -477,7 +480,7 @@ fn laya_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
             if crate::laya::model_present(&dir) {
                 // The first load reads ~660 MB from disk; on an old computer this is
                 // the slow part, so the thinking line appears before it starts.
-                notify_laya_thinking();
+                notify_laya_thinking("Laya (experimental) is thinking... The model is local; the first suggestion of a session loads it, which can take a while on an old computer. You can keep typing; Esc stops the wait.");
                 state.laya = crate::laya::Laya::load(&dir).ok();
             }
         }
@@ -486,7 +489,7 @@ fn laya_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
         return Some(reply("message", "Stopped thinking. Nothing was suggested.".into()));
     }
     let laya = state.laya.as_mut()?;
-    notify_laya_thinking();
+    notify_laya_thinking("Laya (experimental) is thinking... The model is local; the first suggestion of a session loads it, which can take a while on an old computer. You can keep typing; Esc stops the wait.");
     let route = laya.route(input)?;
     if LAYA_CANCEL.swap(false, SeqCst) {
         return Some(reply("message", "Stopped thinking. Nothing was suggested.".into()));
@@ -720,14 +723,28 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             return reply("message", format!("Online chat is ON for this session only. Nothing was sent. Commands and offline help still run first and locally. When something is not a command, I will show you a card with the exact messages (up to {} earlier lines of this session, kept in memory only) before anything goes to text.pollinations.ai (free, no account, your IP address is visible, one request per 45 seconds). Your files, location and saved history are never sent; texts with paths, addresses, long numbers, file names, passwords or other credentials are not offered. Replies are AI-written and may be wrong. Say \"chat off\" to stop or \"forget our chat\" to clear the lines.", pawline_core::textfallback::CHAT_CONTEXT_LINES));
         }
         #[cfg(all(feature = "laya", not(windows)))]
-        if matches!(low, "laya on" | "turn on laya" | "enable laya" | "laya on please") {
-            state.laya_on = true;
-            let model_note = match crate::laya::model_dir() {
-                Some(dir) if crate::laya::model_present(&dir) => format!("Model found at {}. It loads on the first suggestion (about 700 MB RAM while loaded).", dir.display()),
-                Some(dir) => format!("No model installed yet: put laya_fp32.onnx, laya_fp32.onnx.data and tokenizer.json in {} (see README, section on the Laya experiment). Until then nothing changes.", dir.display()),
-                None => "No data folder found; the model cannot be installed.".into(),
-            };
-            return reply("message", format!("Laya suggestions are ON for this session only (EXPERIMENTAL). When my normal parser does not understand a message, a small local model may suggest a command. Nothing runs by itself: every suggestion still needs your pick, Enter and the usual confirmation. Local only, no network, English only, and slow on an old CPU (a few seconds per suggestion). {model_note} Say \"laya off\" to stop."));
+        if matches!(low, "laya on" | "turn on laya" | "enable laya" | "laya on please" | "laya setup" | "set up laya" | "install laya") {
+            let on_text = "Laya suggestions are ON for this session only (EXPERIMENTAL). When my normal parser does not understand a message, a small local model may suggest a command. Nothing runs by itself: every suggestion still needs your pick, Enter and the usual confirmation. Local only, English only, and slow on an old CPU (a few seconds per suggestion). Say \"laya off\" to stop.";
+            match crate::laya::model_dir() {
+                Some(dir) if crate::laya::model_present(&dir) => {
+                    state.laya_on = true;
+                    return reply("message", format!("{on_text} Model found at {}. It loads on the first suggestion (about 700 MB RAM while loaded). No network is used after setup.", dir.display()));
+                }
+                Some(_) => {
+                    if pawline_core::netgate::is_offline() {
+                        return reply("message", "Offline mode is on, so I cannot download the Laya model. Nothing was done and Laya stays off. Turn offline mode off in Settings and say \"laya on\" again if you want it.".into());
+                    }
+                    state.laya_setup_pending = true;
+                    return reply("confirm", format!("Set up Laya suggestions (EXPERIMENTAL, one time)?
+
+This downloads the Laya intent model (288 MB, made by vrajnotviraj, Apache-2.0) and a 2 MB tokenizer from huggingface.co - free, no account, no sign-up; huggingface.co sees your IP address. The model is then converted on this machine, which needs about 950 MB of free disk during setup and leaves about 640 MB installed (the download is removed). It uses about 700 MB of RAM while loaded.
+
+Nothing is sent from your machine, and after setup Laya works fully offline. You can cancel while it runs; nothing is installed until it finishes. Laya stays off until then. Say \"laya off\" at any time to stop using it."));
+                }
+                None => {
+                    return reply("message", "No data folder found, so the Laya model cannot be installed. Nothing was done.".into());
+                }
+            }
         }
         #[cfg(all(feature = "laya", not(windows)))]
         if matches!(low, "laya off" | "turn off laya" | "disable laya") {
@@ -1074,7 +1091,41 @@ pub fn with_notes(state: &mut UiState, mut r: UiReply) -> UiReply {
     r
 }
 
+/// The Laya setup card was approved: download + convert + install on this worker
+/// (the window stays responsive and Esc cancels), then load the model and turn on.
+#[cfg(all(feature = "laya", not(windows)))]
+fn laya_setup_exec(state: &mut UiState) -> UiReply {
+    use std::sync::atomic::Ordering::SeqCst;
+    let dir = match crate::laya::model_dir() {
+        Some(d) => d,
+        None => return reply("error", "No data folder found; cannot install the model.".into()),
+    };
+    LAYA_CANCEL.store(false, SeqCst);
+    let outcome = pawline_core::laya_setup::install(&dir, &LAYA_CANCEL, &|line| notify_laya_thinking(line));
+    match outcome {
+        Ok(pawline_core::laya_setup::Outcome::Canceled) => {
+            reply("message", "Laya setup cancelled. Nothing was installed and Laya stays off.".into())
+        }
+        Ok(pawline_core::laya_setup::Outcome::Installed) | Ok(pawline_core::laya_setup::Outcome::AlreadyInstalled) => {
+            notify_laya_thinking("Loading the model (about 700 MB RAM while loaded)...");
+            state.laya_tried = true;
+            state.laya = crate::laya::Laya::load(&dir).ok();
+            if state.laya.is_none() {
+                return reply("error", "The model was installed but did not load. Laya stays off; nothing else changed.".into());
+            }
+            state.laya_on = true;
+            reply("message", "Laya is set up and ON for this session only (EXPERIMENTAL). When my normal parser does not understand a message, the model may suggest a command. Nothing runs by itself: every suggestion still needs your pick, Enter and the usual confirmation. From now on it works fully offline. Say \"laya off\" to stop.".into())
+        }
+        Err(e) => reply("error", format!("Laya setup did not finish: {e}. Nothing was installed and Laya stays off.")),
+    }
+}
+
 fn confirm_exec(state: &mut UiState) -> UiReply {
+    #[cfg(all(feature = "laya", not(windows)))]
+    if state.laya_setup_pending {
+        state.laya_setup_pending = false;
+        return laya_setup_exec(state);
+    }
     let plan = match state.pending.take() {
         Some(p) => p,
         None => return reply("error", "Nothing waiting for confirmation.".into()),
@@ -1155,6 +1206,8 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
         laya: None,
         #[cfg(all(feature = "laya", not(windows)))]
         laya_tried: false,
+        #[cfg(all(feature = "laya", not(windows)))]
+        laya_setup_pending: false,
         online_ctx: vec![],
         online_pending: None,
         organize_pending: None,
@@ -1420,6 +1473,10 @@ fn organize_command(state: &mut UiState, input: &str) -> Option<UiReply> {
 
 pub fn cancel(state: &mut UiState) -> UiReply {
     state.carried = std::time::Duration::ZERO;
+    #[cfg(all(feature = "laya", not(windows)))]
+    {
+        state.laya_setup_pending = false;
+    }
     state.pending = None;
     state.pending_request = None;
     state.online_pending = None;
@@ -2158,10 +2215,27 @@ mod memory_tests {
         // off by default: an unrecognised sentence gets the plain parse reply, no suggestion
         let r = handle_text(&mut st, "zzqq nothingness");
         assert!(!r.text.contains("Laya"), "{}", r.text);
-        // opt-in card is honest about what it is; off again clears it
+        // with no model installed, "laya on" offers the one-time setup card and turns nothing on
         let r = handle_text(&mut st, "laya on");
-        assert!(r.text.contains("EXPERIMENTAL") && r.text.contains("session only") && st.laya_on, "{}", r.text);
-        assert!(r.text.contains("Nothing runs by itself"), "{}", r.text);
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(r.text.contains("288 MB") && r.text.contains("huggingface.co") && r.text.contains("Apache-2.0"), "{}", r.text);
+        assert!(r.text.contains("EXPERIMENTAL") && r.text.contains("stays off until then"), "{}", r.text);
+        assert!(st.laya_setup_pending && !st.laya_on, "flag {:?} on {:?}", st.laya_setup_pending, st.laya_on);
+        // typing never approves the card: the next message drops it
+        st.laya_setup_pending = false; // (the window clears it on any new input; cancel does too)
+        // cancel path: card shown, Cancel clears it and nothing happens
+        let r = handle_text(&mut st, "laya on");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        let r = cancel(&mut st);
+        assert!(r.text.contains("Cancelled") && !st.laya_setup_pending, "{}", r.text);
+        // offline mode refuses the download instead of showing the card
+        pawline_core::netgate::set_offline_for_this_thread(Some(true));
+        let r = handle_text(&mut st, "laya on");
+        pawline_core::netgate::set_offline_for_this_thread(Some(false));
+        assert!(r.kind == "message" && r.text.contains("Offline mode") && r.text.contains("stays off"), "{}", r.text);
+        assert!(!st.laya_setup_pending && !st.laya_on, "{}", r.text);
+        // off again clears it (simulate an enabled session)
+        st.laya_on = true;
         let r = handle_text(&mut st, "laya off");
         assert!(r.text.contains("OFF") && !st.laya_on && st.laya.is_none(), "{}", r.text);
     }

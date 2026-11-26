@@ -1304,6 +1304,7 @@ dependencies = [
  "ignore",
  "libc",
  "serde_json",
+ "sha2",
  "ureq",
  "windows-sys 0.59.0",
 ]

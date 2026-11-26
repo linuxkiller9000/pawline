@@ -34,7 +34,7 @@ fn file_name(f: &str) -> &str {
 #[test]
 fn http_client_primitives_live_only_in_the_two_gated_senders() {
     for (f, src) in srcs() {
-        let known_sender = file_name(&f) == "imagegen.rs" || file_name(&f) == "search.rs";
+        let known_sender = file_name(&f) == "imagegen.rs" || file_name(&f) == "search.rs" || file_name(&f) == "laya_setup.rs";
         let n = src.matches("ureq::").count();
         if known_sender {
             assert!(n > 0, "{f} lost its ureq client - did the sender change without updating this audit?");

@@ -73,7 +73,7 @@ fn tiny_model() -> Vec<u8> {
 fn converts_matmul_n_bits_and_preserves_everything_else() {
     let model = tiny_model();
     let mut data = Vec::new();
-    let (out, stats) = convert_onnx_bytes(&model, &mut data).expect("convert");
+    let (out, stats) = convert_onnx_bytes(&model, &mut data, &mut |_| Ok(())).expect("convert");
     assert_eq!(stats.nodes_converted, 1);
     assert_eq!(stats.initializers_replaced, 2);
     assert_eq!(stats.external_bytes, 64 * 2 * 4);
@@ -169,7 +169,7 @@ fn rejects_matmul_n_bits_with_extra_inputs() {
     let mut model = Vec::new();
     write_fields(&[vf(1, 9), lf(7, graph)], &mut model);
     let mut data = Vec::new();
-    let err = convert_onnx_bytes(&model, &mut data).unwrap_err();
+    let err = convert_onnx_bytes(&model, &mut data, &mut |_| Ok(())).unwrap_err();
     assert!(err.contains("expected 3"), "{err}");
 }
 
@@ -228,7 +228,7 @@ fn rejects_wrong_quantization_parameters() {
     let mut model = Vec::new();
     write_fields(&[vf(1, 9), lf(7, graph)], &mut model);
     let mut data = Vec::new();
-    let err = convert_onnx_bytes(&model, &mut data).unwrap_err();
+    let err = convert_onnx_bytes(&model, &mut data, &mut |_| Ok(())).unwrap_err();
     assert!(err.contains("bits"), "{err}");
 }
 
@@ -259,7 +259,7 @@ fn accepts_three_dim_weight_layout_like_the_real_model() {
     let mut model = Vec::new();
     write_fields(&[vf(1, 9), lf(7, graph)], &mut model);
     let mut data = Vec::new();
-    let (out, stats) = convert_onnx_bytes(&model, &mut data).expect("convert 3-D");
+    let (out, stats) = convert_onnx_bytes(&model, &mut data, &mut |_| Ok(())).expect("convert 3-D");
     assert_eq!(stats.nodes_converted, 1);
     assert_eq!(data.len(), 64 * 2 * 4);
     // W^T[k, n] = (B[n][k]-128)*S[n][k/32], B flat is [n][block][32] row-major = [n][k]

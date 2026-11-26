@@ -1097,7 +1097,10 @@ impl App {
         let hint_bot = self.scroll > 1.0;
         let top0 = CHAT_TOP;
         let voice_bar = !matches!(self.vstate, VState::Idle) || self.speaking.is_some() || self.vnote;
-        let bot0 = h - BOTTOM - self.input_extra + 4.0 - if self.reply.is_some() { REPLY_H } else { 0.0 } - if voice_bar { 34.0 } else { 0.0 };
+        // The zi chooser (pick rows) is an overlay above the input box: shrink the
+        // message view while it is up so the last bubble is never hidden under it.
+        let zi_h = if self.zi_active() { self.zi_rows.len() as f32 * 26.0 + 22.0 + 8.0 + 8.0 } else { 0.0 };
+        let bot0 = h - BOTTOM - self.input_extra + 4.0 - if self.reply.is_some() { REPLY_H } else { 0.0 } - if voice_bar { 34.0 } else { 0.0 } - zi_h;
         let top = top0 + if hint_top { 20.0 } else { 0.0 };
         let bot = bot0 - if hint_bot { 20.0 } else { 0.0 };
         // layout all messages
@@ -3573,6 +3576,10 @@ fn run_terminal() {
             break;
         }
         st.pending = None;
+        #[cfg(all(feature = "laya", not(windows)))]
+        {
+            st.laya_setup_pending = false;
+        }
         let r = bridge::handle_text(&mut st, t);
         let r = bridge::with_notes(&mut st, r);
         println!("{}", r.text);
@@ -3606,14 +3613,8 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<(UiReply, Vec<Vec<u8>>)
     #[cfg(all(feature = "laya", not(windows)))]
     {
         let thinking_tx = back.clone();
-        bridge::set_laya_thinking_notifier(Some(Box::new(move || {
-            let _ = thinking_tx.send((
-                bridge::reply(
-                    "thinking",
-                    "Laya (experimental) is thinking... The model is local; the first suggestion of a session loads it, which can take a while on an old computer. You can keep typing; Esc stops the wait.".into(),
-                ),
-                Vec::new(),
-            ));
+        bridge::set_laya_thinking_notifier(Some(Box::new(move |text: &str| {
+            let _ = thinking_tx.send((bridge::reply("thinking", text.to_string()), Vec::new()));
         })));
     }
     // Recovery notes from the previous run are shown first.
@@ -3625,6 +3626,10 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<(UiReply, Vec<Vec<u8>>)
         let r = match req {
             Req::Text(t, dir) => {
                 st.pending = None;
+        #[cfg(all(feature = "laya", not(windows)))]
+        {
+            st.laya_setup_pending = false;
+        }
                 let r = bridge::handle_text_in(&mut st, &t, dir.as_deref());
                 bridge::with_notes(&mut st, r)
             }

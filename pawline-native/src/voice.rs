@@ -721,7 +721,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         let t = Instant::now();
         stop_recording(child);
-        assert!(t.elapsed() < Duration::from_secs(2), "stopped promptly");
+        // stop_recording escalates to a group kill after 3s by design, so it always
+        // returns in ~3s; the assertion only proves the stop did not hang. On a
+        // loaded 1-CPU CI sandbox the graceful SIGINT path alone can exceed 2s.
+        assert!(t.elapsed() < Duration::from_secs(5), "stopped without hanging");
         let sc = stt(Some(&stt_s.to_string_lossy()), &|_| false, &SttSetup { sherpa: None, moonshine: None, whisper_model: None }, &wav).unwrap();
         let text = transcribe(&sc, &wav, Duration::from_secs(5), &std::sync::atomic::AtomicBool::new(false)).unwrap();
         assert_eq!(text, "make a folder called kitten");

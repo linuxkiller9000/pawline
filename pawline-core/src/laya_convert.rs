@@ -357,7 +357,12 @@ fn external_data_tensor(name: &str, dims: &[u64], offset: u64, length: u64) -> R
     Ok(out)
 }
 
-fn convert_graph(graph: &[u8], data_out: &mut impl Write, data_len: &mut u64) -> Result<(Vec<u8>, ConvertStats), String> {
+fn convert_graph(
+    graph: &[u8],
+    data_out: &mut impl Write,
+    data_len: &mut u64,
+    node_progress: &mut dyn FnMut(usize) -> Result<(), String>,
+) -> Result<(Vec<u8>, ConvertStats), String> {
     let fields = read_spans(graph)?;
     // header-only pass over initializers (no payload copies)
     let mut headers: Vec<TensorHeader> = Vec::new();
@@ -496,6 +501,7 @@ fn convert_graph(graph: &[u8], data_out: &mut impl Write, data_len: &mut u64) ->
             stats.initializers_replaced += 2;
             stats.external_bytes += length as usize;
             stats.nodes_converted += 1;
+            node_progress(stats.nodes_converted)?;
 
             // rewritten node: inputs [x, wname], outputs/name verbatim, op_type MatMul
             let mut node_fields: Vec<Field> = vec![string_field(1, inputs[0]), string_field(1, &wname)];
@@ -531,6 +537,7 @@ fn convert_graph(graph: &[u8], data_out: &mut impl Write, data_len: &mut u64) ->
 pub fn convert_onnx_bytes(
     input: &[u8],
     data_out: &mut impl Write,
+    node_progress: &mut dyn FnMut(usize) -> Result<(), String>,
 ) -> Result<(Vec<u8>, ConvertStats), String> {
     let fields = read_spans(input)?;
     let mut saw_graph = false;
@@ -540,7 +547,7 @@ pub fn convert_onnx_bytes(
     for f in &fields {
         if f.num == 7 && f.wire == 2 {
             let graph = span_len(f, 7).ok_or("onnx: graph not length-delimited")?;
-            let (g, gs) = convert_graph(graph, data_out, &mut data_len)?;
+            let (g, gs) = convert_graph(graph, data_out, &mut data_len, node_progress)?;
             stats.nodes_converted += gs.nodes_converted;
             stats.initializers_replaced += gs.initializers_replaced;
             stats.external_bytes += gs.external_bytes;
