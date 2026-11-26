@@ -30,3 +30,6 @@ After an Arabic command, a fixed Arabic line is added: "تم." after a finished 
 
 ## 11c: presentation shapes (partial)
 "اعمل/اكتب عرض تقديمي من <file>" becomes "make a presentation from <file>"; "... عن/حول <topic>" becomes "write a presentation about <topic>" (this goes to the normal online disclosure card, nothing is sent before it). File and topic are passed through verbatim. Questions and negations never run. The test list is author-written after the code, not independent. Edit, image, chart and source commands have no Arabic shapes.
+
+## 11d: small Arabic chat (partial)
+A fixed set of whole-message Arabic chat inputs gets a fixed Arabic reply: how are you, who are you, what can you do (the help text), and a tell-me-a-joke set of 4 jokes. Deterministic, nothing runs, nothing is read or sent. It is NOT open Arabic conversation: no follow-up memory, no Arabic discussion of actions (a how-to or question still gets the generic "nothing was run" line), no dialect coverage measured, confirm cards and errors stay English.

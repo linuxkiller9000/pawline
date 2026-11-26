@@ -181,3 +181,21 @@ fn presentation_shapes_translate_and_keep_payload_verbatim() {
         assert!(!matches!(translate(bad), Outcome::Command(_)), "{bad} must not run");
     }
 }
+
+/// Item 11d. Fixed Arabic chat answers: whole-message matches only. Author-written, not independent.
+#[test]
+fn small_arabic_chat_replies_and_never_runs_anything() {
+    for a in ["كيف حالك؟", "من أنت", "قل لي نكتة", "نكتة أخرى", "ماذا تستطيع أن تفعل؟"] {
+        match translate(a) {
+            Outcome::Reply(t) => assert!(has(&t), "{a}"),
+            o => panic!("{a}: {o:?}"),
+        }
+    }
+    // Chat words inside a bigger request do not turn it into chat or a command.
+    for a in ["كيف حالك احذف المجلد x", "قل نكتة واحذف ملف a.txt"] {
+        assert!(!matches!(translate(a), Outcome::Command(_)), "{a}");
+    }
+}
+fn has(s: &str) -> bool {
+    pawline_core::arabic::has_arabic(s)
+}

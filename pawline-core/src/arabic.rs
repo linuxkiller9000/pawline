@@ -24,6 +24,8 @@ pub fn fold(s: &str) -> String {
         .collect()
 }
 
+static CHAT_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 pub fn has_arabic(s: &str) -> bool {
     s.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c))
 }
@@ -299,6 +301,27 @@ fn greeting(f: &str) -> Option<&'static str> {
     }
 }
 
+pub const JOKES_AR: &[&str] = &[
+    "لماذا يحب المبرمجون الوضع المظلم؟ لأن الضوء يجذب الحشرات (bugs).",
+    "قال المجلد للطبيب: أشعر أن بداخلي مجلدات فرعية كثيرة لم أحلّها.",
+    "ما أحب أمر للقطط؟ sudo خرخر.",
+    "سألت الحاسوب: تعبت، فقال لي: لا مشكلة، سأنام أنا.",
+];
+
+/// Small fixed chat set (item 11d). Whole-message matches only, deterministic, nothing runs, nothing is read or sent.
+fn chat(f: &str, n: usize) -> Option<String> {
+    let f = f.trim().trim_end_matches(['!', '.', '?', ',']).trim();
+    let r = match f {
+        "كيف حالك" | "كيف الحال" | "شلونك" | "ازيك" | "كيفك" | "عامل ايه" | "اخبارك" => "بخير، شكراً! جاهز لمساعدتك في الملفات والمجلدات. اكتب \"مساعدة\" لأعرض لك ما أفهمه.".to_string(),
+        "من انت" | "مين انت" | "ما اسمك" | "شو اسمك" | "ايش اسمك" => "أنا Pawline، مساعد يعمل على جهازك. أفهم عدداً محدوداً من الأوامر بالعربي. اكتب \"مساعدة\" لتراها.".to_string(),
+        "ماذا تستطيع" | "ماذا تفعل" | "ماذا تستطيع ان تفعل" | "ايش تقدر تسوي" | "شو بتعمل" | "ماذا يمكنك ان تفعل" => HELP_AR.to_string(),
+        "قل نكته" | "احك نكته" | "احكي نكته" | "قول نكته" | "اعطني نكته" | "نكته" | "قل لي نكته" | "احكي لي نكته" | "ممكن نكته" => JOKES_AR[n % JOKES_AR.len()].to_string(),
+        "نكته اخري" | "نكته تانيه" | "واحده اخري" | "كمان نكته" | "اخري" => JOKES_AR[n % JOKES_AR.len()].to_string(),
+        _ => return None,
+    };
+    Some(r)
+}
+
 fn is_request_blocked(t: &[Tok], raw: &str) -> bool {
     raw.contains('؟') || raw.trim_end().ends_with('?') || t.first().is_some_and(|x| NOT_A_REQUEST.contains(&x.1.as_str()))
 }
@@ -314,6 +337,9 @@ pub fn translate(input: &str) -> Outcome {
     let whole = fold(input);
     if let Some(g) = greeting(&whole) {
         return Outcome::Reply(g.into());
+    }
+    if let Some(c) = chat(&whole, CHAT_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
+        return Outcome::Reply(c);
     }
     if t.len() <= 3 && HELP.contains(&whole.trim().trim_end_matches(['!', '.', '?']).trim()) {
         return Outcome::Reply(HELP_AR.into());
