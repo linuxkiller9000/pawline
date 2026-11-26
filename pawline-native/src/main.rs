@@ -22,14 +22,14 @@ use bridge::UiReply;
 #[cfg(unix)]
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,
+    delegate_dispatch2,
     data_device_manager::{
         data_device::{DataDevice, DataDeviceHandler},
         data_offer::{DataOfferHandler, DragOffer},
         data_source::{CopyPasteSource, DataSourceHandler},
         DataDeviceManagerState, WritePipe,
     },
-    delegate_data_device, delegate_registry, delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_window,
+    delegate_registry,
     output::{OutputHandler, OutputState},
     reexports::{
         calloop_wayland_source::WaylandSource,
@@ -2245,7 +2245,12 @@ impl KeyboardHandler for App {
         self.key(e);
     }
     fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent) {}
-    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, m: Modifiers, _: u32) {
+    fn repeat_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, serial: u32, e: KeyEvent) {
+        // same handling as a press: held keys repeat (0.19 delivered repeats through press_key)
+        self.serial = serial;
+        self.key(e);
+    }
+    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, m: Modifiers, _: smithay_client_toolkit::seat::keyboard::RawModifiers, _: u32) {
         self.ctrl = m.ctrl;
         self.shift = m.shift;
     }
@@ -2525,25 +2530,7 @@ impl ShmHandler for App {
     }
 }
 #[cfg(unix)]
-delegate_compositor!(App);
-#[cfg(unix)]
-delegate_output!(App);
-#[cfg(unix)]
-delegate_shm!(App);
-#[cfg(unix)]
-delegate_seat!(App);
-#[cfg(unix)]
-delegate_keyboard!(App);
-#[cfg(unix)]
-delegate_pointer!(App);
-#[cfg(unix)]
-delegate_layer!(App);
-#[cfg(unix)]
-delegate_xdg_shell!(App);
-#[cfg(unix)]
-delegate_xdg_window!(App);
-#[cfg(unix)]
-delegate_data_device!(App);
+delegate_dispatch2!(App);
 #[cfg(unix)]
 delegate_registry!(App);
 #[cfg(unix)]

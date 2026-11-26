@@ -20,10 +20,10 @@ image-webp = { version = "0.2", default-features = false }
 rustybuzz = "0.20"
 unicode-bidi = "0.3"
 
-calloop = "0.13"
+calloop = "0.14"
 
 [target.'cfg(unix)'.dependencies]
-smithay-client-toolkit = "0.19"
+smithay-client-toolkit = "0.21"
 x11rb = { version = "0.14", default-features = false, features = ["shape"] }
 
 [target.'cfg(windows)'.dependencies]
