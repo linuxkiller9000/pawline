@@ -1237,6 +1237,8 @@ fn finish(state: &mut UiState, r: UiReply, spent: std::time::Duration) -> UiRepl
 
 #[cfg(test)]
 mod memory_tests {
+    /// The weather chooser is process-wide state, so tests that touch it run one at a time.
+    static WEATHER_PICK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     /// Deck tests share the in-memory draft, so they run one at a time.
     static DECK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use super::*;
@@ -1313,6 +1315,35 @@ mod memory_tests {
         // no place: asks, no card, nothing sent
         let r = handle_text(&mut st, "what is the weather");
         assert!(r.text.contains("Which place") && st.pending.is_none());
+    }
+
+    #[test]
+    fn turning_offline_on_after_a_card_or_between_weather_requests_stops_the_next_request() {
+        use pawline_core::netgate;
+        use pawline_core::weather::Place;
+        let _wp = WEATHER_PICK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        netgate::set_offline_for_this_thread(Some(false));
+        let mut st = new_state(org_root("offline14b"));
+        // 1. a disclosure card is already pending, then offline is switched on: Do it sends nothing
+        let r = handle_text(&mut st, "what's the weather in Cairo?");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        netgate::set_offline_for_this_thread(Some(true));
+        let before = netgate::attempts();
+        let d = confirm_exec(&mut st);
+        assert!(d.kind == "failed" || d.kind == "error", "{} {}", d.kind, d.text);
+        assert!(d.text.contains("Offline mode is on"), "{}", d.text);
+        assert_eq!(netgate::attempts(), before, "no request passed the gate after the switch");
+        assert!(st.pending.is_none(), "the card is consumed, not left to be approved again");
+        // 2. multi-request weather: the place list was fetched while online; offline is switched on before the pick
+        netgate::set_offline_for_this_thread(Some(false));
+        *WEATHER_PICK.lock().unwrap() = Some(vec![Place { label: "A, X".into(), lat: 1.0, lon: 2.0 }, Place { label: "A, Y".into(), lat: 3.0, lon: 4.0 }]);
+        netgate::set_offline_for_this_thread(Some(true));
+        let before = netgate::attempts();
+        let r = weather_pick("2").expect("a number is a pick while the chooser is open");
+        assert!(r.kind == "failed" && r.text.contains("Offline mode is on"), "{} {}", r.kind, r.text);
+        assert_eq!(netgate::attempts(), before, "the forecast request was not made");
+        assert!(!weather_pick_open(), "the chooser is closed, a later number is plain text");
+        netgate::set_offline_for_this_thread(None);
     }
 
     #[test]
@@ -1554,6 +1585,7 @@ mod memory_tests {
 
     #[test]
     fn weather_chooser_pick_and_cancel_state() {
+        let _wp = WEATHER_PICK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use pawline_core::weather::Place;
         let mut st = new_state(org_root("wpick"));
         let opts = vec![Place { label: "A, X".into(), lat: 1.0, lon: 2.0 }, Place { label: "A, Y".into(), lat: 3.0, lon: 4.0 }];

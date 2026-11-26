@@ -668,7 +668,7 @@ impl App {
     }
 
     fn settings_geom(&self) -> (f32, f32) {
-        (CHAT_TOP + 34.0, 34.0)
+        (CHAT_TOP + 34.0, 28.0)
     }
 
     fn draw_settings(&mut self, pm: &mut Pixmap, w: f32, h: f32) {
@@ -682,31 +682,44 @@ impl App {
             if k < theme::THEMES.len() {
                 let t = &theme::THEMES[k];
                 for (i, c) in t.bg.iter().enumerate() {
-                    fill(pm, &rrect(PAD + 8.0 + i as f32 * 18.0, y + 8.0, 18.0, 18.0, 4.0), (c.0, c.1, c.2, 255));
+                    fill(pm, &rrect(PAD + 8.0 + i as f32 * 18.0, y + 5.0, 18.0, 18.0, 4.0), (c.0, c.1, c.2, 255));
                 }
-                fill(pm, &rrect(PAD + 66.0, y + 8.0, 18.0, 18.0, 9.0), (t.accent.0, t.accent.1, t.accent.2, 255));
+                fill(pm, &rrect(PAD + 66.0, y + 5.0, 18.0, 18.0, 9.0), (t.accent.0, t.accent.1, t.accent.2, 255));
                 let label = format!("Theme: {}", t.name);
-                self.text(pm, &label, PAD + 96.0, y + 22.0, 14.0, (255, 255, 255), (0.0, h));
+                self.text(pm, &label, PAD + 96.0, y + 19.0, 14.0, (255, 255, 255), (0.0, h));
                 if k == self.settings.theme {
-                    self.text(pm, "selected", w - PAD - 74.0, y + 22.0, 12.0, (150, 230, 180), (0.0, h));
+                    self.text(pm, "selected", w - PAD - 74.0, y + 19.0, 12.0, (150, 230, 180), (0.0, h));
                 }
             } else if k == theme::THEMES.len() + 3 {
-                let label = format!("Offline mode (no network at all): {}", if self.settings.offline { "ON" } else { "off" });
-                self.text(pm, &label, PAD + 10.0, y + 22.0, 14.0, (255, 255, 255), (0.0, h));
+                let label = format!("Offline mode (Pawline's own online features): {}", if self.settings.offline { "ON" } else { "off" });
+                self.text(pm, &label, PAD + 10.0, y + 19.0, 14.0, (255, 255, 255), (0.0, h));
             } else if k == theme::THEMES.len() + 2 {
                 let label = format!("Text size: {}% (Enter to change)", self.settings.text_pct);
-                self.text(pm, &label, PAD + 10.0, y + 22.0, 14.0, (255, 255, 255), (0.0, h));
+                self.text(pm, &label, PAD + 10.0, y + 19.0, 14.0, (255, 255, 255), (0.0, h));
             } else if k == theme::THEMES.len() + 1 {
                 let label = format!("Speak replies aloud (local engine): {}", if self.settings.speak { "on" } else { "off" });
-                self.text(pm, &label, PAD + 10.0, y + 22.0, 14.0, (255, 255, 255), (0.0, h));
+                self.text(pm, &label, PAD + 10.0, y + 19.0, 14.0, (255, 255, 255), (0.0, h));
             } else {
                 let label = format!("Colours drift slowly: {}", if self.settings.drift { "on" } else { "off" });
-                self.text(pm, &label, PAD + 10.0, y + 22.0, 14.0, (255, 255, 255), (0.0, h));
+                self.text(pm, &label, PAD + 10.0, y + 19.0, 14.0, (255, 255, 255), (0.0, h));
             }
         }
         let note_y = top + self.settings_rows() as f32 * (rh + 6.0) + 14.0;
         self.text(pm, "Up/Down choose, Enter applies, Esc closes.", PAD + 4.0, note_y, 12.0, (190, 185, 215), (0.0, h));
         self.text(pm, "Saved on this computer only; no request text.", PAD + 4.0, note_y + 18.0, 12.0, (190, 185, 215), (0.0, h));
+        // Offline mode covers Pawline's built-in requests only. Say so, and say when a custom speech command is configured.
+        let mut ny = note_y + 36.0;
+        let mut notes = vec!["Offline mode stops Pawline's own requests only, not apps you open.".to_string()];
+        let custom: Vec<&str> = ["PAWLINE_STT_CMD", "PAWLINE_TTS_CMD", "PAWLINE_REC_CMD"].into_iter().filter(|k| std::env::var_os(k).is_some()).collect();
+        if !custom.is_empty() {
+            notes.push(format!("Custom command set ({}): Pawline cannot control whether it uses the network.", custom.join(", ")));
+        }
+        for n in notes {
+            for l in self.wrap(&n, 12.0, w - 2.0 * PAD - 8.0) {
+                self.text(pm, &l, PAD + 4.0, ny, 12.0, (190, 185, 215), (0.0, h));
+                ny += 16.0;
+            }
+        }
     }
 
     fn draw_card(&mut self, pm: &mut Pixmap) {
