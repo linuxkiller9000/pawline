@@ -748,7 +748,7 @@ impl App {
     }
 
     fn settings_rows(&self) -> usize {
-        THEME_ROWS + 9
+        THEME_ROWS + 10
     }
 
     /// The drift animation runs only when its own switch is on and reduced motion is off (item 13).
@@ -787,6 +787,9 @@ impl App {
         } else if row == THEME_ROWS + 4 {
             self.settings.offline = !self.settings.offline;
             pawline_core::netgate::set_offline(self.settings.offline);
+        } else if row == THEME_ROWS + 9 {
+            self.settings.files_blocked = !self.settings.files_blocked;
+            pawline_core::filesgate::set_read_only(self.settings.files_blocked);
         } else {
             let i = theme::TEXT_SIZES.iter().position(|p| *p == self.settings.text_pct).unwrap_or(0);
             self.settings.text_pct = theme::TEXT_SIZES[(i + 1) % theme::TEXT_SIZES.len()];
@@ -881,6 +884,9 @@ impl App {
                 self.settings_fill(pm, PAD + 66.0, y + 4.0, 18.0, 18.0, 9.0, (t.accent.0, t.accent.1, t.accent.2, 255));
                 let label = format!("Theme: {} (Enter for next)", t.name);
                 self.text(pm, &label, PAD + 96.0, y + 18.0, 14.0, (255, 255, 255), clip);
+            } else if k == THEME_ROWS + 9 {
+                let label = format!("File changes: {}", if self.settings.files_blocked { "BLOCKED (Pawline stays read-only)" } else { "allowed" });
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
             } else if k == THEME_ROWS + 8 {
                 let label = format!("Speech rate: {} (Enter to change)", theme::SPEECH_RATES[self.settings.speech_rate.min(theme::SPEECH_RATES.len() - 1)].0);
                 self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
@@ -3383,7 +3389,9 @@ fn run_terminal() {
     // Honour the persisted offline switch, the same as the GUI at startup: without this the terminal
     // ignored a "yes" to offline mode and let online requests reach a disclosure card.
     if let Some(p) = settings_path() {
-        pawline_core::netgate::set_offline(theme::load(&p).offline);
+        let s = theme::load(&p);
+        pawline_core::netgate::set_offline(s.offline);
+        pawline_core::filesgate::set_read_only(s.files_blocked);
     }
     let mut st = bridge::new_state(work_root());
     println!("Pawline (terminal mode). Type a command, or 'quit' to leave.");
@@ -3714,6 +3722,7 @@ fn main() {
             let s = settings_path().map(|p| theme::load(&p)).unwrap_or_default();
             theme::set_text_pct(s.text_pct);
             pawline_core::netgate::set_offline(s.offline);
+            pawline_core::filesgate::set_read_only(s.files_blocked);
             bridge::set_assist_enabled(s.assist);
             s
         },

@@ -16,6 +16,7 @@ pub mod deck;
 pub mod dirs;
 pub mod error;
 pub mod exec;
+pub mod filesgate;
 pub mod finder;
 pub mod imagegen;
 pub mod intent;
@@ -185,6 +186,11 @@ impl Engine {
         assist: Option<&dyn Assist>,
     ) -> Result<Response, PawError> {
         let plan = self.plan_with(input, assist)?;
+        // Read-only mode (item 14): a plan that changes files never reaches a card
+        // (a card would promise a change) and never runs. The refusal is a plain message.
+        if filesgate::check_ops(&plan.ops).is_err() {
+            return Ok(Response::Message(filesgate::READ_ONLY_MESSAGE.to_string()));
+        }
         if plan.needs_confirmation && !confirmed {
             return Ok(Response::Confirm(plan));
         }
@@ -197,6 +203,10 @@ impl Engine {
         plan: Plan,
         backend: &dyn ExecutionBackend,
     ) -> Result<Response, PawError> {
+        // Defense in depth: a card confirmed before read-only mode was switched on still writes nothing.
+        if filesgate::check_ops(&plan.ops).is_err() {
+            return Ok(Response::Message(filesgate::READ_ONLY_MESSAGE.to_string()));
+        }
         let total = plan.ops.len();
         let mut outcomes = Vec::new();
         for op in &plan.ops {
