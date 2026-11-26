@@ -75,6 +75,10 @@ pub enum Operation {
     Shrink { from: PathBuf, to: PathBuf },
     /// Build a .pptx presentation at `to` from the outline file `from`. Local only; the outline is not changed.
     Deck { from: PathBuf, to: PathBuf },
+    /// Online: ask the model for an outline from a topic. Shown for review; writes nothing.
+    DeckDraft { topic: String },
+    /// Save the outline the user reviewed (held in memory) as a new .pptx.
+    DeckText { text: String, to: PathBuf },
     /// `argv` is the exact reviewed command (resolved at planning time); never run through a shell.
     OpenApp { name: String, argv: Vec<String> },
     SetWallpaper { image: PathBuf, via: Option<crate::wallpaper::Adapter>, no_backup_ok: bool },
@@ -100,6 +104,11 @@ impl Operation {
             Operation::Move { from, to } => format!("Move {} to {}", from.display(), to.display()),
             Operation::Copy { from, to } => format!("Copy {} to {}", from.display(), to.display()),
             Operation::List { path } => format!("List {}", path.display()),
+            Operation::DeckDraft { topic } => format!(
+                "Write a presentation outline about \"{topic}\" with the free online model (Pollinations \"Classic\": no account, best effort, about one request per 45 seconds per IP address). Pawline sends exactly this request text in the web address it asks text.pollinations.ai for, plus the usual web details (your IP address, a \"Pawline\" user-agent): \"{}\" Nothing from your files, chat history or location is sent. Pollinations says the same address returns the same cached answer to anyone who has it, and what it keeps is its own policy. Do not put passwords, secrets or private information in the topic. The reply is only shown to you as a draft, nothing is saved, and it is AI-written text that may contain mistakes: check every fact before you use it.",
+                crate::deck::author_prompt(topic)
+            ),
+            Operation::DeckText { to, .. } => format!("Save the reviewed presentation draft as {}. Nothing is sent anywhere. The slides are exactly the draft you were shown.", to.display()),
             Operation::Deck { from, to } => format!("Make a presentation {} from the outline {}. Nothing is sent anywhere. The outline is not changed.", to.display(), from.display()),
             Operation::Shrink { from, to } => format!("Shrink video {} into a NEW smaller copy {} (ffmpeg, H.264 quality 28, AAC 128k). This is a lossy re-encode: picture and sound quality can drop. {} The original is not changed.", from.display(), to.display(), crate::shrink::KEEPS),
             Operation::OpenApp { name, argv } => format!("Open {name}: run {}", argv.iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() }).collect::<Vec<_>>().join(" ")),
@@ -133,7 +142,7 @@ impl Operation {
     pub fn needs_confirmation(&self) -> bool {
         matches!(
             self,
-            Operation::Delete { .. } | Operation::Move { .. } | Operation::Shrink { .. } | Operation::Deck { .. } | Operation::SetWallpaper { .. }
+            Operation::Delete { .. } | Operation::Move { .. } | Operation::Shrink { .. } | Operation::Deck { .. } | Operation::DeckDraft { .. } | Operation::DeckText { .. } | Operation::SetWallpaper { .. }
                 | Operation::Undo { .. } | Operation::OpenApp { .. } | Operation::GenerateImage { .. } | Operation::AskOnline { .. } | Operation::Search { .. } | Operation::Weather { .. }
         )
     }

@@ -61,7 +61,11 @@ pub fn compose(text: &str) -> Result<(Vec<Slide>, Report), String> {
     let mut rep = Report::default();
     let raw = if has_headings { parse_outline(text)? } else { rep.from_prose = true; parse_prose(text)? };
     let mut out: Vec<Slide> = vec![];
+    let mut content_titles: Vec<String> = vec![];
     for (i, s) in raw.into_iter().enumerate() {
+        if i > 0 || !(s.bullets.len() <= 2 && first_is_title) {
+            content_titles.push(s.title.clone());
+        }
         if i == 0 && s.bullets.len() <= 2 && first_is_title {
             out.push(s);
             continue;
@@ -106,7 +110,6 @@ pub fn compose(text: &str) -> Result<(Vec<Slide>, Report), String> {
         }
     }
     // A Contents slide for longer talks: the original slide titles only (not continuations), after the title slide.
-    let content_titles: Vec<String> = out.iter().skip(1).filter(|s| !is_continuation(&s.title)).map(|s| s.title.clone()).collect();
     if out.len() >= 5 && content_titles.len() >= 4 && content_titles.len() <= SLIDE_LINES + 2 {
         out.insert(1, Slide { title: "Contents".into(), bullets: content_titles.into_iter().map(|t| (0, t)).collect() });
         rep.agenda = true;
@@ -117,6 +120,7 @@ pub fn compose(text: &str) -> Result<(Vec<Slide>, Report), String> {
     Ok((out, rep))
 }
 
+#[allow(dead_code)]
 fn is_continuation(t: &str) -> bool {
     t.ends_with(')') && t.rfind(" (").is_some_and(|i| t[i + 2..t.len() - 1].split_once('/').is_some_and(|(a, b)| a.parse::<usize>().is_ok() && b.parse::<usize>().is_ok()))
 }
@@ -190,30 +194,64 @@ fn parse_prose(text: &str) -> Result<Vec<Slide>, String> {
         } else {
             let all = p.join(" ");
             let sents = split_sent(&all.replace(" - ", " "), false).unwrap_or_else(|_| vec![all.clone()]);
-            let t = lead_words(&sents[0]);
-            (t, sents.into_iter().map(|x| (0u8, x)).collect())
+            prose_title(sents)
         };
         slides.push(Slide { title, bullets: rest });
     }
     Ok(slides)
 }
 
-/// Title from a paragraph's first words: up to 7 words, cut at a word boundary, no trailing punctuation.
+const DANGLING: [&str; 22] = ["a", "an", "the", "of", "in", "on", "at", "to", "for", "and", "or", "but", "with", "from", "by", "as", "that", "which", "who", "is", "are", "was"];
+
+fn words_n(s: &str) -> usize {
+    s.split_whitespace().count()
+}
+
+fn cap_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Title for a paragraph, from its own words only (nothing added). A short first sentence is the title and is NOT repeated in the body.
+/// A longer one is cut at its first comma/semicolon/colon when that leaves a short clause: the clause is the title and the rest stays as the first bullet.
+/// Otherwise the title is the first few words (no "..."), the sentence stays whole in the body, and the title repeats its start: a known limit.
+fn prose_title(sents: Vec<String>) -> (String, Vec<(u8, String)>) {
+    let first = sents[0].trim().to_string();
+    let bare = first.trim_end_matches(['.', '!', '?', ':', '\u{061F}']).trim().to_string();
+    let rest_of = |from: usize| sents[from..].iter().map(|x| (0u8, x.clone())).collect::<Vec<_>>();
+    if sents.len() > 1 && (2..=8).contains(&words_n(&bare)) && bare.chars().count() <= 50 && !bare.contains(',') {
+        return (bare, rest_of(1));
+    }
+    if let Some(at) = first.char_indices().find(|(_, c)| matches!(c, ',' | ';' | ':' | '\u{060C}')).map(|(i, _)| i) {
+        let (l, r) = (first[..at].trim(), first[at + first[at..].chars().next().unwrap().len_utf8()..].trim());
+        if (2..=8).contains(&words_n(l)) && l.chars().count() <= 50 && words_n(r) >= 3 && !DANGLING.contains(&l.split_whitespace().last().unwrap_or("").to_lowercase().as_str()) {
+            let mut body = vec![(0u8, cap_first(r))];
+            body.extend(rest_of(1));
+            return (l.to_string(), body);
+        }
+    }
+    (lead_words(&first), rest_of(0))
+}
+
+/// First words of a sentence as a title: up to 6 words and 38 characters, cut at a word boundary, never ending on a dangling word, no "...".
 fn lead_words(s: &str) -> String {
-    let mut t = String::new();
-    let mut more = false;
-    for (i, w) in s.split_whitespace().enumerate() {
-        if i >= 7 || (!t.is_empty() && t.chars().count() + 1 + w.chars().count() > 38) {
-            more = true;
+    let mut ws: Vec<&str> = vec![];
+    let mut len = 0;
+    for w in s.split_whitespace() {
+        if ws.len() >= 6 || len + w.chars().count() + 1 > 38 {
             break;
         }
-        if !t.is_empty() {
-            t.push(' ');
-        }
-        t.push_str(w);
+        len += w.chars().count() + 1;
+        ws.push(w);
     }
-    let t = t.trim_end_matches([',', ';', ':', '.', '!', '?', '-']).to_string();
-    if more { format!("{t}...") } else { t }
+    let whole = ws.len() == s.split_whitespace().count();
+    while !whole && ws.len() > 2 && DANGLING.contains(&ws.last().unwrap().trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase().as_str()) {
+        ws.pop();
+    }
+    ws.join(" ").trim_end_matches([',', ';', ':', '.', '!', '?', '-']).to_string()
 }
 
 pub fn parse_command(input: &str) -> Option<String> {
@@ -573,6 +611,148 @@ pub fn output_for(from: &Path) -> PathBuf {
     }
 }
 
+// ---- Writing a deck from a topic with the app's online model path (Pollinations text, as for online questions) ----
+
+pub const MAX_TOPIC_CHARS: usize = 200;
+const MAX_MODEL_REPLY: usize = 8000;
+
+/// "write/draft/make a presentation about <topic>" (also "on"). Not "from <file>": that is `parse_command`.
+pub fn parse_write_command(input: &str) -> Option<String> {
+    let t = input.trim().trim_end_matches(['.', '!']);
+    let low = t.to_lowercase();
+    for verb in ["write", "draft", "make", "create", "build", "prepare", "generate"] {
+        for noun in ["a presentation", "presentation", "a slideshow", "a slide deck", "a deck", "slides", "a talk"] {
+            for prep in ["about", "on"] {
+                let p = format!("{verb} {noun} {prep} ");
+                if low.starts_with(&p) {
+                    let rest = t[p.len()..].trim();
+                    return if rest.is_empty() { None } else { Some(rest.to_string()) };
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The exact text sent (after the topic is checked). It carries no file, history or location. Shown in the confirm card's disclosure.
+pub fn author_prompt(topic: &str) -> String {
+    format!(
+        "Write a slide presentation outline about: {topic}. Reply with only the outline in exactly this format: one line \"# Title\", then 5 to 7 slides, each a line \"## Slide title\" followed by 3 or 4 short lines that start with \"- \". Use only well-known general facts. Do not invent statistics, dates, names, quotes or sources. No introduction and no closing remarks."
+    )
+}
+
+/// "3. Condensation" / "3) Condensation" -> "Condensation": the deck numbers its own slides.
+fn unnumber(t: &str) -> String {
+    let t = t.trim();
+    let d = t.chars().take_while(|c| c.is_ascii_digit()).count();
+    if (1..=2).contains(&d) {
+        if let Some(r) = t[d..].strip_prefix(". ").or_else(|| t[d..].strip_prefix(") ")) {
+            if !r.trim().is_empty() {
+                return r.trim().to_string();
+            }
+        }
+    }
+    t.to_string()
+}
+
+/// Model reply -> a plain outline this module can build. Preamble before the first heading, code fences and bold markers are dropped;
+/// numbered/starred lines become bullets. Nothing is added. Errors mean nothing was usable.
+pub fn clean_model_outline(raw: &str) -> Result<String, String> {
+    let mut out: Vec<String> = vec![];
+    let mut started = false;
+    for l in raw.lines() {
+        let l: String = l.chars().filter(|c| !c.is_control() || *c == '\t').collect();
+        let l = l.replace("**", "").replace('`', "");
+        let t = l.trim();
+        if t.is_empty() || t.starts_with("```") || t == "---" {
+            continue;
+        }
+        let low = t.to_lowercase();
+        if let Some(r) = t.strip_prefix("### ").or_else(|| t.strip_prefix("## ")) {
+            started = true;
+            out.push(format!("## {}", unnumber(r)));
+        } else if let Some(r) = t.strip_prefix("# ") {
+            started = true;
+            out.push(format!("# {}", r.trim()));
+        } else if low.starts_with("slide ") && t.len() < 100 && t.split_once([':', '-', '\u{2013}']).is_some() && t[6..].starts_with(|c: char| c.is_ascii_digit()) {
+            started = true;
+            out.push(format!("## {}", t.split_once([':', '-', '\u{2013}']).unwrap().1.trim()));
+        } else if started {
+            let b = t.trim_start_matches(['-', '*', '+', '\u{2022}', '\u{2013}']).trim_start();
+            let b = match b.find(". ") {
+                Some(i) if i <= 2 && b[..i].chars().all(|c| c.is_ascii_digit()) => &b[i + 2..],
+                _ => b,
+            };
+            let lead = t.len() - t.trim_start().len();
+            out.push(format!("{}- {}", if lead >= 2 && !out.is_empty() && out.last().is_some_and(|x| x.starts_with("  - ") || x.starts_with("- ")) { "  " } else { "" }, b.trim()));
+        }
+    }
+    if !started || out.is_empty() {
+        return Err("the online model did not return an outline I could use".into());
+    }
+    let text = out.join("\n") + "\n";
+    let (slides, _) = compose(&text)?;
+    if slides.len() < 3 {
+        return Err("the online model returned too few slides".into());
+    }
+    Ok(text)
+}
+
+/// Ask the model for an outline. Only `author_prompt(topic)` and the usual web details leave the machine. `commit` is claimed just before the reply is used.
+pub fn author(http: &dyn crate::imagegen::Http, topic: &str, cancelled: &dyn Fn() -> bool, commit: &dyn Fn() -> bool) -> Result<String, crate::error::PawError> {
+    use crate::error::PawError;
+    let topic: String = topic.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ");
+    if topic.is_empty() || topic.chars().count() > MAX_TOPIC_CHARS {
+        return Err(PawError::Validation(format!("A topic must be 1 to {MAX_TOPIC_CHARS} characters. I won't cut it for you. Nothing was sent.")));
+    }
+    if crate::textfallback::classify(&format!("what is {topic}")) == crate::textfallback::Class::Block {
+        return Err(PawError::Validation("That topic looks like it contains a password, key, token or other secret. I won't send it online. Nothing was sent.".into()));
+    }
+    let r = http
+        .get(&crate::textfallback::pollinations_text_url(&author_prompt(&topic)), &[])
+        .map_err(|_| PawError::Exec("Pollinations could not be reached right now (no connection, or the service is down). No outline was written, and Pawline did not retry.".into()))?;
+    if cancelled() || !commit() {
+        return Err(PawError::Exec("Cancelled. Nothing was kept, and a late answer will be discarded.".into()));
+    }
+    match r.status {
+        200 => {
+            let text = String::from_utf8_lossy(&r.body);
+            let text: String = text.chars().take(MAX_MODEL_REPLY).collect();
+            clean_model_outline(&text).map_err(|e| PawError::Exec(format!("{e}. Nothing was saved.")))
+        }
+        402 | 429 => Err(PawError::Exec(format!("Pollinations said its free limit is reached right now (HTTP {}). I never pay or upgrade, so there is no outline.", r.status))),
+        s => Err(PawError::Exec(format!("Pollinations answered HTTP {s}; no outline."))),
+    }
+}
+
+/// "save the presentation" / "save it" after a reviewed draft.
+pub fn is_save_command(input: &str) -> bool {
+    let low = input.trim().trim_end_matches(['.', '!']).to_lowercase();
+    matches!(low.as_str(), "save the presentation" | "save presentation" | "save the draft" | "save the deck" | "save the slides" | "save these slides" | "save it as a presentation")
+}
+
+/// Full review text for a draft: every slide and every bullet, as it will be saved.
+pub fn review_text(slides: &[Slide], rep: &Report) -> String {
+    let mut s = format!("{} slide(s) ({}):\n", slides.len(), rep.describe());
+    for (i, sl) in slides.iter().enumerate() {
+        s.push_str(&format!("\n{}. {}\n", i + 1, sl.title));
+        for (lvl, b) in &sl.bullets {
+            s.push_str(&format!("{}- {}\n", if *lvl > 0 { "    " } else { "  " }, b));
+        }
+    }
+    s.trim_end().to_string()
+}
+
+/// `<Documents or home>/<title words>.pptx`, `-2`, ... when taken.
+pub fn output_in(dir: &Path, title: &str) -> PathBuf {
+    let mut stem: String = title.chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect::<String>().split('-').filter(|x| !x.is_empty()).collect::<Vec<_>>().join("-");
+    if stem.is_empty() {
+        stem = "presentation".into();
+    }
+    let stem: String = stem.chars().take(40).collect();
+    output_for(&dir.join(format!("{stem}.txt")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,8 +806,7 @@ mod tests {
         let (s, rep) = compose(t).unwrap();
         assert!(rep.from_prose);
         assert_eq!(s[0].title, "My trip notes");
-        assert_eq!(s[1].title, "We left early in the morning and...");
-        assert!(s[1].title.chars().count() <= 41);
+        assert_eq!(s[1].title, "We left early in the morning");
         assert_eq!(s[1].bullets.len(), 3);
         assert_eq!(s[2].title, "Day two");
         assert_eq!(s[2].bullets.len(), 2);
@@ -639,6 +818,70 @@ mod tests {
         assert!(rep.agenda && s[1].title == "Contents" && s[1].bullets.len() == 5);
         let (s, rep) = compose("# Talk\n## A\n- x\n## B\n- y\n").unwrap();
         assert!(!rep.agenda && s.len() == 3);
+    }
+    #[test]
+    fn prose_titles_do_not_repeat_the_body_and_never_end_on_a_dangling_word() {
+        let (s, _) = compose("Notes\n\nSlow growth. Sales rose in May. Costs stayed flat.\n\nThe club meets every second Saturday, and new members are welcome at any meeting. Bring a chair.\n\nWe left early in the morning and drove north along the coast to see the lighthouse at the end of the road.\n").unwrap();
+        assert_eq!(s[1].title, "Slow growth");
+        assert_eq!(s[1].bullets.len(), 2, "short first sentence becomes the title, not repeated");
+        assert_eq!(s[2].title, "The club meets every second Saturday");
+        assert_eq!(s[2].bullets[0].1, "And new members are welcome at any meeting.");
+        assert!(!s[3].title.ends_with("and") && !s[3].title.contains("..."), "{}", s[3].title);
+        let words = |v: &[Slide]| v.iter().flat_map(|x| x.bullets.iter().map(|b| b.1.clone())).collect::<Vec<_>>().join(" ").to_lowercase().replace(['.', ','], "");
+        assert!(words(&s).contains("bring a chair") && words(&s).contains("lighthouse"));
+    }
+    #[test]
+    fn contents_lists_every_original_section_once_including_continued_ones() {
+        let long: String = (1..=9).map(|i| format!("- Point number {i} is stated here\n")).collect();
+        let (s, rep) = compose(&format!("# Talk\n## Results\n{long}## A\n- x\n## B\n- y\n## C\n- z\n")).unwrap();
+        assert!(rep.agenda);
+        let c: Vec<&str> = s[1].bullets.iter().map(|b| b.1.as_str()).collect();
+        assert_eq!(c, ["Results", "A", "B", "C"]);
+        assert!(s.iter().any(|x| x.title == "Results (1/2)") && s.iter().any(|x| x.title == "Results (2/2)"));
+    }
+    #[test]
+    fn write_command_needs_a_topic_and_is_not_the_from_file_command() {
+        assert_eq!(parse_write_command("write a presentation about the water cycle").as_deref(), Some("the water cycle"));
+        assert_eq!(parse_write_command("make slides on bees.").as_deref(), Some("bees"));
+        assert_eq!(parse_write_command("write a presentation about "), None);
+        assert_eq!(parse_write_command("make a presentation from talk.md"), None);
+        assert!(parse_command("write a presentation about bees").is_none());
+        assert!(author_prompt("bees").contains("Do not invent"));
+    }
+    #[test]
+    fn model_reply_is_cleaned_without_adding_words_and_junk_is_refused() {
+        let raw = "Sure! Here you go:\n```markdown\n# Bees\n## Slide 1: Why bees matter\n* They pollinate **crops**\n1. They make honey\n## Hives\n- A hive has one queen\n- Workers forage\n## Risks\n- Habitat loss\n```\nHope this helps";
+        let t = clean_model_outline(raw).unwrap();
+        assert!(t.starts_with("# Bees\n## Slide 1: Why bees matter") || t.starts_with("# Bees\n## Why bees matter"));
+        assert!(t.contains("- They pollinate crops") && t.contains("- They make honey") && !t.contains("Sure"));
+        assert!(clean_model_outline("# T\n## 1. One\n- a\n## 2) Two\n- b\n## 3. Three\n- c\n").unwrap().contains("## Two\n"));
+        assert!(clean_model_outline("I cannot help with that.").is_err());
+        assert!(clean_model_outline("# T\n## Only\n- one").is_err());
+    }
+    struct Fake(u16, &'static str, std::cell::RefCell<Vec<String>>);
+    impl crate::imagegen::Http for Fake {
+        fn get(&self, url: &str, _h: &[(&str, &str)]) -> Result<crate::imagegen::HttpReply, crate::error::PawError> {
+            self.2.borrow_mut().push(url.to_string());
+            Ok(crate::imagegen::HttpReply { status: self.0, body: self.1.as_bytes().to_vec(), retry_after: None, content_type: String::new() })
+        }
+        fn post(&self, _u: &str, _h: &[(&str, &str)], _b: &str) -> Result<crate::imagegen::HttpReply, crate::error::PawError> {
+            unreachable!()
+        }
+    }
+    #[test]
+    fn author_sends_only_the_prompt_and_refuses_secrets_limits_and_cancel() {
+        let ok = "# Bees\n## A\n- x\n## B\n- y\n## C\n- z\n";
+        let f = Fake(200, ok, Default::default());
+        assert_eq!(author(&f, "bees", &|| false, &|| true).unwrap(), ok);
+        assert_eq!(f.2.borrow().len(), 1);
+        assert!(f.2.borrow()[0].starts_with("https://text.pollinations.ai/Write%20a%20slide"));
+        let f = Fake(200, ok, Default::default());
+        assert!(author(&f, "my password is hunter2", &|| false, &|| true).is_err());
+        assert!(author(&f, &"x".repeat(201), &|| false, &|| true).is_err());
+        assert!(author(&f, "bees", &|| true, &|| true).is_err());
+        assert!(f.2.borrow().is_empty() || f.2.borrow().len() == 1);
+        assert!(author(&Fake(429, "", Default::default()), "bees", &|| false, &|| true).unwrap_err().to_string().contains("never pay"));
+        assert!(author(&Fake(200, "no outline here", Default::default()), "bees", &|| false, &|| true).is_err());
     }
     #[test]
     fn type_gets_smaller_as_the_slide_fills() {

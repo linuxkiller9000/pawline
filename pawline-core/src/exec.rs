@@ -137,8 +137,8 @@ impl DirectFsBackend {
 
     /// Presentation from an outline file: built in memory, written to a unique temp file, published with no-replace.
     pub fn deck(&self, from: &Path, to: &Path) -> Result<String, PawError> {
-        use std::io::{Read, Write};
-        let (rf, rt) = (self.rel(from)?, self.rel(to)?);
+        use std::io::Read;
+        let rf = self.rel(from)?;
         let mut src = self.root.open(&rf)?.into_std();
         let sm = src.metadata()?;
         if !sm.is_file() || sm.len() > crate::deck::MAX_SOURCE {
@@ -147,7 +147,19 @@ impl DirectFsBackend {
         let mut text = String::new();
         Read::take(&mut src, crate::deck::MAX_SOURCE + 1).read_to_string(&mut text).map_err(|_| PawError::Validation("the outline is not readable UTF-8 text".into()))?;
         let (slides, _) = crate::deck::compose(&text).map_err(PawError::Validation)?;
-        let bytes = crate::deck::build_pptx(&slides);
+        self.publish_deck(&slides, to, "The outline is untouched.")
+    }
+
+    /// The reviewed draft text (held in memory by the UI) as a new deck: same build and no-replace publish as `deck`.
+    pub fn deck_text(&self, text: &str, to: &Path) -> Result<String, PawError> {
+        let (slides, _) = crate::deck::compose(text).map_err(PawError::Validation)?;
+        self.publish_deck(&slides, to, "It was written from the draft you reviewed.")
+    }
+
+    fn publish_deck(&self, slides: &[crate::deck::Slide], to: &Path, note: &str) -> Result<String, PawError> {
+        use std::io::Write;
+        let rt = self.rel(to)?;
+        let bytes = crate::deck::build_pptx(slides);
         refuse_clobber(&self.root, &rt)?;
         self.tracked("copy", self.rel_str(to)?, None, |id| {
             let nf = NewFile::create(&self.root, &rt)?;
@@ -157,7 +169,7 @@ impl DirectFsBackend {
                 return Err(e.into());
             }
             nf.publish(&self.root, &rt).inspect_err(|_| nf.discard(&self.root))?;
-            Ok((format!("Saved {} ({} slides). Open it with LibreOffice Impress, PowerPoint or Google Slides. The outline is untouched. Undo moves the new file to the Pawline trash.", to.display(), slides.len()), self.fingerprint_full(&rt)))
+            Ok((format!("Saved {} ({} slides). Open it with LibreOffice Impress, PowerPoint or Google Slides. {note} Undo moves the new file to the Pawline trash.", to.display(), slides.len()), self.fingerprint_full(&rt)))
         })
     }
 
@@ -601,6 +613,11 @@ impl ExecutionBackend for DirectFsBackend {
                 let detail = self.deck(from, to)?;
                 Ok(done(op, &detail))
             }
+            Operation::DeckText { text, to } => {
+                let detail = self.deck_text(text, to)?;
+                Ok(done(op, &detail))
+            }
+            Operation::DeckDraft { .. } => Err(PawError::Exec("Writing a draft needs the online step, which this runner does not have. Nothing was sent.".into())),
             Operation::Shrink { from, to } => {
                 let detail = self.shrink(from, to, &|| false)?;
                 Ok(done(op, &detail))

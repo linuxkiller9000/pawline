@@ -10,3 +10,12 @@ Local, deterministic, no AI, nothing sent anywhere. The source file is never cha
 - Arabic/Hebrew paragraphs are marked right-to-left.
 
 Not done: no images, charts, tables, speaker notes, themes or per-slide layouts beyond title + bullets; titles from first words can read awkwardly; no rewriting or summarising (by design); no reading of .docx/.pdf; not tested in PowerPoint (rendered with LibreOffice 7.x/DejaVu Sans in the sandbox only).
+
+## Writing a deck from a topic (online, reviewed)
+
+"write a presentation about <topic>" uses the same free online model path as online questions (Pollinations text, no account), never the on-device Needle model (that one only turns requests into tool calls and cannot write prose).
+1. A disclosure card shows the exact request text, that your IP address goes with it, that no files/history/location are sent, and that the reply is AI-written and unchecked. Nothing is sent until you confirm (Do it needs the card scrolled to the end). Topics up to 200 characters; secrets are blocked.
+2. The reply is cleaned (preamble, code fences, bold, "Slide 3:" and numbering removed, nothing added) and shown as a DRAFT in the chat, every slide and bullet. Nothing is saved. It is held in memory only.
+3. "save the presentation" opens a second card with the full file path and every slide. Only confirming it writes the .pptx (new file, never replaces, undoable).
+Limits: facts come from the model and are NOT verified or grounded in sources; prompt asks for general facts only, no invented numbers/names, but that cannot be guaranteed. Needs internet and Pollinations availability (free limit, one request per 45 s); fails with a plain message and no file. You cannot edit the draft in the app yet; edit the saved .pptx.
+Titles from your own paragraphs: a short first sentence becomes the title and is not repeated; otherwise the first clause (cut at a comma) or the first words are used and the sentence stays whole in the body, so some titles still repeat the start of the first bullet.

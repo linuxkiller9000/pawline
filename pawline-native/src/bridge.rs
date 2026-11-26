@@ -170,6 +170,21 @@ impl ExecutionBackend for UiBackend {
         if let Operation::AskOnline { text } = op {
             return Ok(OpOutcome { op: op.clone(), detail: ask_online(text)? });
         }
+        if let Operation::DeckDraft { topic } = op {
+            // Only reached after the disclosure card was confirmed. Same Pollinations slot as questions and pictures.
+            let t = topic.clone();
+            let outline = run_cancellable(pawline_core::imagegen::ImageProvider::Pollinations, move |cancelled, commit| {
+                let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(90));
+                pawline_core::deck::author(&http, &t, cancelled, commit)
+            })?;
+            let (slides, rep) = pawline_core::deck::compose(&outline).map_err(PawError::Validation)?;
+            let review = pawline_core::deck::review_text(&slides, &rep);
+            *DECK_DRAFT.lock().unwrap() = Some(outline);
+            return Ok(OpOutcome {
+                op: op.clone(),
+                detail: format!("Draft written by an online AI model (Pollinations, unchecked, may contain mistakes). NOTHING IS SAVED YET.\n{review}\n\nRead it. Say \"save the presentation\" to see the file name and confirm, or ignore it and nothing is kept (it is held in memory only)."),
+            });
+        }
         if let Operation::Shrink { from, to } = op {
             // Only reached after the card was confirmed. Esc/Cancel ends ffmpeg and removes the temporary file.
             use std::sync::atomic::Ordering::SeqCst;
@@ -342,6 +357,9 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
         }
         return r;
     }
+    if let Some(r) = deck_write_command(state, input).or_else(|| deck_save_command(state, input)) {
+        return r;
+    }
     if let Some(r) = deck_command(state, input) {
         return r;
     }
@@ -479,7 +497,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                         pawline_core::plan::Operation::GenerateImage { provider, .. } => {
                             format!("Picture ready ({})\n{}", provider.label(), o.detail)
                         }
-                        pawline_core::plan::Operation::Shrink { .. } | pawline_core::plan::Operation::Deck { .. } => o.detail.clone(),
+                        pawline_core::plan::Operation::Shrink { .. } | pawline_core::plan::Operation::Deck { .. } | pawline_core::plan::Operation::DeckDraft { .. } | pawline_core::plan::Operation::DeckText { .. } => o.detail.clone(),
                         pawline_core::plan::Operation::Weather { .. } => o.detail.clone(),
                         pawline_core::plan::Operation::Search { .. }
                         | pawline_core::plan::Operation::AskOnline { .. }
@@ -577,7 +595,7 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
                         pawline_core::plan::Operation::GenerateImage { provider, .. } => {
                             format!("Picture ready ({})\n{}", provider.label(), o.detail)
                         }
-                        pawline_core::plan::Operation::Shrink { .. } => o.detail.clone(),
+                        pawline_core::plan::Operation::Shrink { .. } | pawline_core::plan::Operation::Deck { .. } | pawline_core::plan::Operation::DeckDraft { .. } | pawline_core::plan::Operation::DeckText { .. } => o.detail.clone(),
                         pawline_core::plan::Operation::Weather { .. } => o.detail.clone(),
                         pawline_core::plan::Operation::Search { .. }
                         | pawline_core::plan::Operation::AskOnline { .. }
@@ -624,6 +642,49 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
 
 /// "organize <place>": plan moves of the loose files into type folders and ask. "undo organize" reverses the last one that ran.
 /// "make a presentation from <outline file>": local, deterministic, never changes the outline.
+/// The reviewed outline text from "write a presentation about ...". Memory only; replaced by the next draft, cleared once saved.
+static DECK_DRAFT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// "write a presentation about <topic>": a disclosure card first. Nothing leaves the machine until it is confirmed.
+fn deck_write_command(state: &mut UiState, input: &str) -> Option<UiReply> {
+    let topic = pawline_core::deck::parse_write_command(input)?;
+    if topic.chars().count() > pawline_core::deck::MAX_TOPIC_CHARS {
+        return Some(reply("failed", format!("Keep the topic under {} characters. Nothing was sent.", pawline_core::deck::MAX_TOPIC_CHARS)));
+    }
+    if pawline_core::textfallback::classify(&format!("what is {topic}")) == pawline_core::textfallback::Class::Block {
+        return Some(reply("message", "That looks like it contains a password, key, token or other secret. I won't send it to an online service, and there is no way to approve that. Nothing was sent.".into()));
+    }
+    let op = Operation::DeckDraft { topic };
+    let summary = format!("1. {}", op.describe());
+    state.pending = Some(Plan { ops: vec![op], needs_confirmation: true, confirmation_reasons: vec!["This would send your topic text to an online service.".into()], assist_derived: false, notes: vec![] });
+    state.pending_request = None;
+    state.organize_pending = None;
+    Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) })
+}
+
+/// "save the presentation" after a draft was shown: a second card with the full file path.
+fn deck_save_command(state: &mut UiState, input: &str) -> Option<UiReply> {
+    if !pawline_core::deck::is_save_command(input) {
+        return None;
+    }
+    let Some(text) = DECK_DRAFT.lock().unwrap().clone() else {
+        return Some(reply("message", "There is no reviewed draft to save. Ask me to write a presentation about a topic first. Nothing was changed.".into()));
+    };
+    let (slides, rep) = match pawline_core::deck::compose(&text) {
+        Ok(s) => s,
+        Err(e) => return Some(reply("failed", format!("I can't build that draft: {e}. Nothing was changed."))),
+    };
+    let home = std::fs::canonicalize(&state.root).unwrap_or_else(|_| state.root.clone());
+    let dir = if home.join("Documents").is_dir() { home.join("Documents") } else { home };
+    let to = pawline_core::deck::output_in(&dir, &slides[0].title);
+    let op = Operation::DeckText { text, to };
+    let summary = format!("1. {}\n{}", op.describe(), pawline_core::deck::review_text(&slides, &rep));
+    state.pending = Some(Plan { ops: vec![op], needs_confirmation: true, confirmation_reasons: vec!["This saves one new .pptx file.".into()], assist_derived: false, notes: vec![] });
+    state.pending_request = None;
+    state.organize_pending = None;
+    Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) })
+}
+
 fn deck_command(state: &mut UiState, input: &str) -> Option<UiReply> {
     let words = pawline_core::deck::parse_command(input)?;
     let home = std::fs::canonicalize(&state.root).unwrap_or_else(|_| state.root.clone());
@@ -1010,6 +1071,30 @@ mod memory_tests {
         // no place: asks, no card, nothing sent
         let r = handle_text(&mut st, "what is the weather");
         assert!(r.text.contains("Which place") && st.pending.is_none());
+    }
+
+    #[test]
+    fn written_presentation_needs_disclosure_then_review_then_a_second_card_to_save() {
+        let root = org_root("deckwrite");
+        let mut st = new_state(root.clone());
+        *DECK_DRAFT.lock().unwrap() = None;
+        let r = handle_text(&mut st, "write a presentation about the water cycle");
+        assert_eq!(r.kind, "confirm");
+        assert!(r.text.contains("text.pollinations.ai") && r.text.contains("IP address") && r.text.contains("Nothing from your files") && r.text.contains("may contain mistakes") && r.text.contains("nothing is saved"), "{}", r.text);
+        assert!(cancel(&mut st).text.contains("Nothing was done"));
+        let r = handle_text(&mut st, "write a presentation about my password is hunter2");
+        assert!(r.kind == "message" && r.text.contains("Nothing was sent") && st.pending.is_none(), "{}", r.text);
+        // no draft: save refuses, writes nothing
+        let r = handle_text(&mut st, "save the presentation");
+        assert!(r.text.contains("no reviewed draft") && st.pending.is_none());
+        // with a reviewed draft: a card with the full path and every slide
+        *DECK_DRAFT.lock().unwrap() = Some("# Water\n## Rain\n- Falls from clouds\n## Rivers\n- Flow to the sea\n## Sun\n- Lifts water up\n".into());
+        let r = handle_text(&mut st, "save the presentation");
+        assert_eq!(r.kind, "confirm");
+        assert!(r.text.contains(&root.display().to_string()) && r.text.contains(".pptx") && r.text.contains("Falls from clouds"), "{}", r.text);
+        let n = std::fs::read_dir(&root).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "pptx")).count();
+        assert_eq!(n, 0, "nothing is written before the card is confirmed");
+        assert!(cancel(&mut st).text.contains("Nothing was done"));
     }
 
     #[test]
