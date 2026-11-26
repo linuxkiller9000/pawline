@@ -181,8 +181,12 @@ pub struct VLine {
     pub runs: Vec<Run>,
 }
 
-pub const BODY_PX: f32 = 15.0;
-const LH: f32 = 20.0;
+pub fn body_px() -> f32 {
+    15.0 * crate::theme::text_scale()
+}
+fn lh() -> f32 {
+    20.0 * crate::theme::text_scale()
+}
 
 fn words(runs: &[Run]) -> Vec<(String, Style, bool)> {
     // (word, style, preceded by a space); a space at the end of one run counts for the next run's first word
@@ -265,8 +269,8 @@ pub fn layout(blocks: &[Block], maxw: f32, adv: &mut dyn FnMut(char, f32) -> f32
                 }
             }
             Block::Para(runs) => {
-                for l in wrap_runs(runs, BODY_PX, maxw, adv) {
-                    out.push(VLine { kind: Kind::Text, indent: 0.0, px: BODY_PX, h: LH, marker: None, runs: l });
+                for l in wrap_runs(runs, body_px(), maxw, adv) {
+                    out.push(VLine { kind: Kind::Text, indent: 0.0, px: body_px(), h: lh(), marker: None, runs: l });
                 }
                 gap(&mut out);
             }
@@ -276,13 +280,13 @@ pub fn layout(blocks: &[Block], maxw: f32, adv: &mut dyn FnMut(char, f32) -> f32
                     _ => (if *lvl == 0 { "\u{2022}" } else { "-" }).to_string(),
                 };
                 let ind = 18.0 + *lvl as f32 * 16.0;
-                for (k, l) in wrap_runs(runs, BODY_PX, maxw - ind, adv).into_iter().enumerate() {
-                    out.push(VLine { kind: Kind::Text, indent: ind, px: BODY_PX, h: LH, marker: if k == 0 { Some(marker.clone()) } else { None }, runs: l });
+                for (k, l) in wrap_runs(runs, body_px(), maxw - ind, adv).into_iter().enumerate() {
+                    out.push(VLine { kind: Kind::Text, indent: ind, px: body_px(), h: lh(), marker: if k == 0 { Some(marker.clone()) } else { None }, runs: l });
                 }
             }
             Block::Quote(runs) => {
-                for l in wrap_runs(runs, BODY_PX, maxw - 14.0, adv) {
-                    out.push(VLine { kind: Kind::Quote, indent: 14.0, px: BODY_PX, h: LH, marker: None, runs: l });
+                for l in wrap_runs(runs, body_px(), maxw - 14.0, adv) {
+                    out.push(VLine { kind: Kind::Quote, indent: 14.0, px: body_px(), h: lh(), marker: None, runs: l });
                 }
                 gap(&mut out);
             }
@@ -306,11 +310,11 @@ pub fn layout(blocks: &[Block], maxw: f32, adv: &mut dyn FnMut(char, f32) -> f32
                 }
                 gap(&mut out);
             }
-            Block::Rule => out.push(VLine { kind: Kind::Rule, indent: 0.0, px: BODY_PX, h: 12.0, marker: None, runs: vec![] }),
+            Block::Rule => out.push(VLine { kind: Kind::Rule, indent: 0.0, px: body_px(), h: 12.0, marker: None, runs: vec![] }),
         }
     }
     if let Some(l) = out.last_mut() {
-        if l.h > LH + 3.0 && matches!(l.kind, Kind::Text | Kind::Quote | Kind::Code) {
+        if l.h > lh() + 3.0 && matches!(l.kind, Kind::Text | Kind::Quote | Kind::Code) {
             l.h -= 4.0;
         }
     }

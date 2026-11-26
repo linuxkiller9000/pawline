@@ -120,8 +120,12 @@ const H: u32 = 470;
 const COMPACT: u32 = 68;
 const BAR_W: u32 = 300;
 const BAR_H: u32 = 40;
-const PX: f32 = 15.0;
-const LH: f32 = 20.0;
+fn px() -> f32 {
+    15.0 * theme::text_scale()
+}
+fn lh() -> f32 {
+    20.0 * theme::text_scale()
+}
 const PAD: f32 = 14.0;
 const CHAT_TOP: f32 = 64.0;
 const BOTTOM: f32 = 64.0;
@@ -635,7 +639,7 @@ impl App {
     }
 
     fn settings_rows(&self) -> usize {
-        theme::THEMES.len() + 2
+        theme::THEMES.len() + 3
     }
 
     fn apply_setting(&mut self, row: usize) {
@@ -643,11 +647,17 @@ impl App {
             self.settings.theme = row;
         } else if row == theme::THEMES.len() {
             self.settings.drift = !self.settings.drift;
-        } else {
+        } else if row == theme::THEMES.len() + 1 {
             self.settings.speak = !self.settings.speak;
             if !self.settings.speak {
                 self.stop_speaking();
             }
+        } else {
+            let i = theme::TEXT_SIZES.iter().position(|p| *p == self.settings.text_pct).unwrap_or(0);
+            self.settings.text_pct = theme::TEXT_SIZES[(i + 1) % theme::TEXT_SIZES.len()];
+            theme::set_text_pct(self.settings.text_pct);
+            self.scroll = 0.0;
+            self.plan_scroll = 0.0;
         }
         if let Some(p) = settings_path() {
             let _ = theme::save(&p, &self.settings);
@@ -677,6 +687,9 @@ impl App {
                 if k == self.settings.theme {
                     self.text(pm, "selected", w - PAD - 74.0, y + 22.0, 12.0, (150, 230, 180), (0.0, h));
                 }
+            } else if k == theme::THEMES.len() + 2 {
+                let label = format!("Text size: {}% (Enter to change)", self.settings.text_pct);
+                self.text(pm, &label, PAD + 10.0, y + 22.0, 14.0, (255, 255, 255), (0.0, h));
             } else if k == theme::THEMES.len() + 1 {
                 let label = format!("Speak replies aloud (local engine): {}", if self.settings.speak { "on" } else { "off" });
                 self.text(pm, &label, PAD + 10.0, y + 22.0, 14.0, (255, 255, 255), (0.0, h));
@@ -726,7 +739,7 @@ impl App {
             let wmax = inner_w - 30.0;
             let chars: Vec<char> = self.input.text().chars().collect();
             self.input_w = wmax;
-            let full = self.shaper.layout(&self.input.text(), PX, shape::Mode::Auto);
+            let full = self.shaper.layout(&self.input.text(), px(), shape::Mode::Auto);
             let widths: Vec<f32> = full.ext.iter().map(|e| (e.1 - e.0).max(0.0)).collect();
             let spaces: Vec<bool> = chars.iter().map(|c| *c == ' ').collect();
             let lines = wrap_ranges(&widths, wmax, &spaces);
@@ -740,7 +753,7 @@ impl App {
                 self.input_top = cl + 1 - nl;
             }
             self.input_top = self.input_top.min(lines.len().saturating_sub(nl));
-            self.input_extra = (nl as f32 - 1.0) * LH + self.chip_h();
+            self.input_extra = (nl as f32 - 1.0) * lh() + self.chip_h();
             let bh = 40.0 + self.input_extra;
             let top = h - 12.0 - bh;
             self.input_box_top = top;
@@ -757,22 +770,22 @@ impl App {
             for k in 0..nl {
                 let li = self.input_top + k;
                 let (ls, le) = lines[li];
-                let ly = top + 6.0 + self.chip_h() + k as f32 * LH;
+                let ly = top + 6.0 + self.chip_h() + k as f32 * lh();
                 let text: String = chars[ls..le].iter().collect();
-                let laid = self.shaper.layout(&text, PX, shape::Mode::Auto);
+                let laid = self.shaper.layout(&text, px(), shape::Mode::Auto);
                 let x0 = PAD + 8.0 + if laid.rtl { (wmax - laid.width).max(0.0) } else { 0.0 };
                 if let Some((sa, sb)) = sel {
                     let (a, b) = (sa.max(ls), sb.min(le));
                     if b > a {
                         for (l, r) in laid.sel_rects(a - ls, b - ls) {
-                            fill(pm, &rrect(x0 + l, ly, r - l, LH, 3.0), self.th().accent.rgba());
+                            fill(pm, &rrect(x0 + l, ly, r - l, lh(), 3.0), self.th().accent.rgba());
                         }
                     }
                 }
-                self.text(pm, &text, x0, ly + 15.0, PX, col, (0.0, h));
+                self.text(pm, &text, x0, ly + 15.0, px(), col, (0.0, h));
                 if li == cl {
                     let cx = laid.caret_x(caret.min(le) - ls);
-                    fill(pm, &rrect(x0 + cx, ly + 1.0, 2.0, LH - 2.0, 1.0), (255, 255, 255, 255));
+                    fill(pm, &rrect(x0 + cx, ly + 1.0, 2.0, lh() - 2.0, 1.0), (255, 255, 255, 255));
                 }
             }
             self.input_lines = lines;
@@ -819,10 +832,10 @@ impl App {
             } else {
                 None
             };
-            let lines = if mdl.is_some() { vec![] } else { self.wrap(&text, PX, bub_w - 20.0) };
+            let lines = if mdl.is_some() { vec![] } else { self.wrap(&text, px(), bub_w - 20.0) };
             let body_h = match &mdl {
                 Some(m) => md::height(m),
-                None => lines.len() as f32 * LH,
+                None => lines.len() as f32 * lh(),
             };
             let bh = body_h + 14.0 + quote.as_ref().map_or(0.0, |_| 18.0) + thumb.as_ref().map_or(0.0, |t| t.height() as f32 + 6.0);
             total += bh + 8.0;
@@ -840,7 +853,7 @@ impl App {
         for (idx, (user, kind, lines, bh, thumb, quote, mdl)) in items.into_iter().enumerate() {
             let mut bw0 = 0.0f32;
             for l in &lines {
-                bw0 = bw0.max(self.measure(l, PX, line_mode(l)));
+                bw0 = bw0.max(self.measure(l, px(), line_mode(l)));
             }
             let qw = match &quote {
                 Some(q) => (self.measure(q, 12.0, shape::Mode::Auto) + 8.0).min(bub_w - 20.0),
@@ -877,10 +890,10 @@ impl App {
                     }
                 }
                 for (i, l) in lines.iter().enumerate() {
-                    self.para(&mut cp, l, bx + 10.0, bw - 20.0, y + qh + 7.0 + (i as f32 + 1.0) * LH - 5.0, PX, (235, 232, 245), (0.0, view), line_mode(l));
+                    self.para(&mut cp, l, bx + 10.0, bw - 20.0, y + qh + 7.0 + (i as f32 + 1.0) * lh() - 5.0, px(), (235, 232, 245), (0.0, view), line_mode(l));
                 }
                 if let Some(t) = &thumb {
-                    let body_h = mdl.as_ref().map_or(lines.len() as f32 * LH, |m| md::height(m));
+                    let body_h = mdl.as_ref().map_or(lines.len() as f32 * lh(), |m| md::height(m));
                     let ty = y + qh + 7.0 + body_h + 2.0;
                     cp.draw_pixmap((bx + 10.0) as i32, ty as i32, t.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
                 }
@@ -958,12 +971,12 @@ impl App {
         } else {
             text
         };
-        let lines = self.wrap(&text, PX, inner_w - 16.0);
+        let lines = self.wrap(&text, px(), inner_w - 16.0);
         // Deck pictures: a labelled strip above the text. It scrolls with the text, so the card text is never covered.
         const PREVIEW_NOTE: &str = "Picture preview, decoded here from the bytes that go into the file. Not a PowerPoint render.";
-        let note_lines = if self.confirm_thumbs.is_empty() { vec![] } else { self.wrap(PREVIEW_NOTE, PX, inner_w - 16.0) };
-        let strip = if self.confirm_thumbs.is_empty() { 0.0 } else { THUMB_H as f32 + 8.0 + LH * note_lines.len() as f32 };
-        let total = lines.len() as f32 * LH + 16.0 + strip;
+        let note_lines = if self.confirm_thumbs.is_empty() { vec![] } else { self.wrap(PREVIEW_NOTE, px(), inner_w - 16.0) };
+        let strip = if self.confirm_thumbs.is_empty() { 0.0 } else { THUMB_H as f32 + 8.0 + lh() * note_lines.len() as f32 };
+        let total = lines.len() as f32 * lh() + 16.0 + strip;
         let view = bot - top - 6.0;
         self.plan_max = (total - view).max(0.0);
         if self.plan_scroll > self.plan_max {
@@ -971,11 +984,11 @@ impl App {
         }
         if strip > 0.0 {
             for (k, nl) in note_lines.iter().enumerate() {
-                let ly = top + 8.0 + (k as f32 + 1.0) * LH - 5.0 - self.plan_scroll;
-                self.text_m(pm, nl, PAD + 4.0, ly, PX, (190, 185, 215), (top + 3.0, bot - 3.0), shape::Mode::Strict);
+                let ly = top + 8.0 + (k as f32 + 1.0) * lh() - 5.0 - self.plan_scroll;
+                self.text_m(pm, nl, PAD + 4.0, ly, px(), (190, 185, 215), (top + 3.0, bot - 3.0), shape::Mode::Strict);
             }
             let mut x = PAD + 4.0;
-            let ty = top + 8.0 + LH * note_lines.len() as f32 - self.plan_scroll;
+            let ty = top + 8.0 + lh() * note_lines.len() as f32 - self.plan_scroll;
             // Clip to the card panel so a scrolled picture never paints over the header or the buttons.
             let mut clip = tiny_skia::Mask::new(pm.width(), pm.height());
             if let (Some(c), Some(r)) = (clip.as_mut(), tiny_skia::Rect::from_xywh(PAD, top + 3.0, w - 2.0 * PAD, (bot - 3.0) - (top + 3.0))) {
@@ -987,8 +1000,8 @@ impl App {
             }
         }
         for (i, l) in lines.iter().enumerate() {
-            let y = top + 8.0 + strip + (i as f32 + 1.0) * LH - 5.0 - self.plan_scroll;
-            self.text_m(pm, l, PAD + 4.0, y, PX, (235, 230, 255), (top + 3.0, bot - 3.0), shape::Mode::Strict);
+            let y = top + 8.0 + strip + (i as f32 + 1.0) * lh() - 5.0 - self.plan_scroll;
+            self.text_m(pm, l, PAD + 4.0, y, px(), (235, 230, 255), (top + 3.0, bot - 3.0), shape::Mode::Strict);
         }
         let can_yes = self.can_approve();
         if self.plan_max > 0.0 && !can_yes {
@@ -1001,8 +1014,8 @@ impl App {
         let (yes_bg, yes_fg) = if can_yes { ((46, 125, 80, 255), (255, 255, 255)) } else { ((60, 60, 66, 255), theme::DISABLED_FG) };
         fill(pm, &rrect(self.r_yes.0, by, 120.0, 34.0, 10.0), yes_bg);
         fill(pm, &rrect(self.r_no.0, by, 120.0, 34.0, 10.0), (110, 60, 70, 255));
-        self.text(pm, "Do it", self.r_yes.0 + 36.0, by + 23.0, PX, yes_fg, (0.0, h));
-        self.text(pm, "Cancel", self.r_no.0 + 30.0, by + 23.0, PX, (255, 255, 255), (0.0, h));
+        self.text(pm, "Do it", self.r_yes.0 + 36.0, by + 23.0, 15.0, yes_fg, (0.0, h));
+        self.text(pm, "Cancel", self.r_no.0 + 30.0, by + 23.0, 15.0, (255, 255, 255), (0.0, h));
         let fr = if self.focus == Btn::Yes { self.r_yes } else { self.r_no };
         stroke(pm, &rrect(fr.0 - 2.0, fr.1 - 2.0, fr.2 + 4.0, fr.3 + 4.0, 12.0), (34, 211, 238, 255), 2.5);
         self.text(pm, "Left/Right, Enter", PAD + 280.0, by + 21.0, 12.0, theme::HINT, (0.0, h));
@@ -1072,10 +1085,10 @@ impl App {
         self.orb(pm, 20.0, h / 2.0, 11.0, self.busy);
         let chars: Vec<char> = self.input.text().chars().collect();
         if chars.is_empty() {
-            self.text(pm, "Ask Pawline...", 40.0, h / 2.0 + 5.0, PX, theme::HINT, (0.0, w));
+            self.text(pm, "Ask Pawline...", 40.0, h / 2.0 + 5.0, px(), theme::HINT, (0.0, w));
             return;
         }
-        let full = self.shaper.layout(&self.input.text(), PX, shape::Mode::Auto);
+        let full = self.shaper.layout(&self.input.text(), px(), shape::Mode::Auto);
         let widths: Vec<f32> = full.ext.iter().map(|e| (e.1 - e.0).max(0.0)).collect();
         let avail = w - 40.0 - 12.0;
         let caret = self.input.caret().min(chars.len());
@@ -1090,9 +1103,9 @@ impl App {
             end += 1;
         }
         let shown: String = chars[start..end].iter().collect();
-        let laid = self.shaper.layout(&shown, PX, shape::Mode::Auto);
+        let laid = self.shaper.layout(&shown, px(), shape::Mode::Auto);
         let x0 = 40.0 + if laid.rtl { (avail - laid.width).max(0.0) } else { 0.0 };
-        self.text(pm, &shown, x0, h / 2.0 + 5.0, PX, (255, 255, 255), (0.0, w));
+        self.text(pm, &shown, x0, h / 2.0 + 5.0, px(), (255, 255, 255), (0.0, w));
         let cx = laid.caret_x(caret.min(end) - start);
         fill(pm, &rrect(x0 + cx, h / 2.0 - 9.0, 2.0, 18.0, 1.0), (255, 255, 255, 255));
     }
@@ -1655,8 +1668,8 @@ impl App {
                 Keysym::Left | Keysym::Right | Keysym::Tab => {
                     self.focus = if self.focus == Btn::Yes { Btn::No } else { Btn::Yes };
                 }
-                Keysym::Down => self.plan_scroll = (self.plan_scroll + LH).min(self.plan_max),
-                Keysym::Up => self.plan_scroll = (self.plan_scroll - LH).max(0.0),
+                Keysym::Down => self.plan_scroll = (self.plan_scroll + lh()).min(self.plan_max),
+                Keysym::Up => self.plan_scroll = (self.plan_scroll - lh()).max(0.0),
                 Keysym::Page_Down => self.plan_scroll = (self.plan_scroll + page).min(self.plan_max),
                 Keysym::Page_Up => self.plan_scroll = (self.plan_scroll - page).max(0.0),
                 Keysym::Return | Keysym::KP_Enter => {
@@ -1857,11 +1870,11 @@ impl App {
         let chars: Vec<char> = self.input.text().chars().collect();
         let n = self.input_lines.len().max(1);
         let vis = n.min(MAX_IN_LINES);
-        let k = (((y - self.input_box_top - 6.0 - self.chip_h()) / LH).floor().max(0.0) as usize).min(vis - 1);
+        let k = (((y - self.input_box_top - 6.0 - self.chip_h()) / lh()).floor().max(0.0) as usize).min(vis - 1);
         let (ls, le) = self.input_lines.get(self.input_top + k).copied().unwrap_or((0, chars.len()));
         let (ls, le) = (ls.min(chars.len()), le.min(chars.len()));
         let text: String = chars[ls..le].iter().collect();
-        let laid = self.shaper.layout(&text, PX, shape::Mode::Auto);
+        let laid = self.shaper.layout(&text, px(), shape::Mode::Auto);
         let off = if laid.rtl { (self.input_w - laid.width).max(0.0) } else { 0.0 };
         ls + laid.index_at(target - off).min(le - ls)
     }
@@ -1877,7 +1890,7 @@ impl App {
         let (ls, le) = self.input_lines.get(k).copied().unwrap_or((0, chars.len()));
         let (ls, le) = (ls.min(chars.len()), le.min(chars.len()));
         let text: String = chars[ls..le].iter().collect();
-        let laid = self.shaper.layout(&text, PX, shape::Mode::Auto);
+        let laid = self.shaper.layout(&text, px(), shape::Mode::Auto);
         match laid.step(caret.clamp(ls, le) - ls, left) {
             Some(i) => self.input.set_caret(ls + i, extend),
             None => {
@@ -2758,7 +2771,11 @@ fn main() {
         pill_show: false,
         r_pill_name: (0.0, 0.0, 0.0, 0.0),
         r_pill_x: (0.0, 0.0, 0.0, 0.0),
-        settings: settings_path().map(|p| theme::load(&p)).unwrap_or_default(),
+        settings: {
+            let s = settings_path().map(|p| theme::load(&p)).unwrap_or_default();
+            theme::set_text_pct(s.text_pct);
+            s
+        },
         settings_open: false,
         settings_sel: 0,
         t0: std::time::Instant::now(),

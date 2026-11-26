@@ -42,8 +42,20 @@ pub fn contrast(a: Rgb, b: Rgb) -> f32 {
     (x.max(y) + 0.05) / (x.min(y) + 0.05)
 }
 
+/// Text size choices in percent (item 13). 100 is the original size.
+pub const TEXT_SIZES: [u32; 3] = [100, 125, 150];
+static TEXT_PCT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+pub fn set_text_pct(p: u32) {
+    TEXT_PCT.store(if TEXT_SIZES.contains(&p) { p } else { 100 }, std::sync::atomic::Ordering::Relaxed);
+}
+/// Current text scale factor (1.0, 1.25 or 1.5). One window per process, so a process-wide value is enough.
+pub fn text_scale() -> f32 {
+    TEXT_PCT.load(std::sync::atomic::Ordering::Relaxed) as f32 / 100.0
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Settings {
+    pub text_pct: u32,
     pub theme: usize,
     pub drift: bool,
     /// Speak Pawline's plain answers aloud with a local engine. Off until switched on.
@@ -52,7 +64,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: 0, drift: true, speak: false }
+        Settings { text_pct: 100, theme: 0, drift: true, speak: false }
     }
 }
 
@@ -68,6 +80,7 @@ pub fn load(path: &Path) -> Settings {
                 }
                 Some(("drift", v)) => s.drift = v.trim() != "off",
                 Some(("speak", v)) => s.speak = v.trim() == "on",
+                Some(("text", v)) => s.text_pct = v.trim().parse().ok().filter(|p| TEXT_SIZES.contains(p)).unwrap_or(100),
                 _ => {}
             }
         }
@@ -79,7 +92,7 @@ pub fn save(path: &Path, s: &Settings) -> std::io::Result<()> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
-    std::fs::write(path, format!("theme={}\ndrift={}\nspeak={}\n", THEMES[s.theme.min(THEMES.len() - 1)].name, if s.drift { "on" } else { "off" }, if s.speak { "on" } else { "off" }))
+    std::fs::write(path, format!("theme={}\ndrift={}\nspeak={}\ntext={}\n", THEMES[s.theme.min(THEMES.len() - 1)].name, if s.drift { "on" } else { "off" }, if s.speak { "on" } else { "off" }, s.text_pct))
 }
 
 /// Gradient offset along the diagonal for a moment in time: a slow back-and-forth, 0 when drift is off.
@@ -101,7 +114,7 @@ mod tests {
         save(&f, &Settings { theme: 2, drift: false, speak: true }).unwrap();
         assert_eq!(load(&f), Settings { theme: 2, drift: false, speak: true });
         std::fs::write(&f, "theme=Nope\ndrift=maybe\nspeak=maybe\njunk").unwrap();
-        assert_eq!(load(&f), Settings { theme: 0, drift: true, speak: false });
+        assert_eq!(load(&f), Settings { text_pct: 100, theme: 0, drift: true, speak: false });
         let t = std::fs::read_to_string(&f).unwrap();
         assert!(!t.contains("request"));
         assert_eq!(drift_offset(5.0, 300.0, false), 0.0);
@@ -139,5 +152,26 @@ mod contrast_tests {
     fn contrast_function_matches_known_values() {
         assert!((contrast((0, 0, 0), (255, 255, 255)) - 21.0).abs() < 0.01);
         assert!((contrast((119, 119, 119), (255, 255, 255)) - 4.48).abs() < 0.02);
+    }
+}
+
+#[cfg(test)]
+mod text_size_tests {
+    use super::*;
+
+    #[test]
+    fn text_size_round_trips_and_bad_values_fall_back_to_100() {
+        let d = std::env::temp_dir().join(format!("pawline-textsize-{}", std::process::id()));
+        let f = d.join("ui-settings.txt");
+        for p in TEXT_SIZES {
+            let s = Settings { text_pct: p, ..Settings::default() };
+            save(&f, &s).unwrap();
+            assert_eq!(load(&f).text_pct, p);
+        }
+        for bad in ["text=300", "text=abc", "text=", "text=-5"] {
+            std::fs::write(&f, format!("theme=Dusk\n{bad}\n")).unwrap();
+            assert_eq!(load(&f).text_pct, 100, "{bad}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
