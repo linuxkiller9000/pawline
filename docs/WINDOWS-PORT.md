@@ -18,6 +18,12 @@ Check commands: `cargo check -p pawline-core --target x86_64-pc-windows-gnu`; `c
 - File identity: cap-std exposes volume serial/file index only behind nightly cfgs, so it stays "cannot tell" (callers refuse) until a handle-based GetFileInformationByHandle function replaces the Metadata-based one.
 - No Wine and no Windows machine in the dev sandbox, so no Windows behaviour is verified.
 
+## Item 8 window backend (cross-compiles and links; NEVER RUN on Windows)
+- `pawline-native` now builds for x86_64-pc-windows-gnu and links to a real PE32+ exe (debug, ~125 MB, console subsystem). Wayland/X11 code is cfg(unix); smithay and x11rb are unix-only deps; calloop is a direct dep.
+- `winb.rs`: layered always-on-top popup, per-pixel alpha via UpdateLayeredWindow, window thread with its own message loop, mouse/wheel/keyboard (WM_KEYDOWN for named keys and Ctrl chords, WM_CHAR for typed Unicode text), clipboard (CF_UNICODETEXT), work area from SPI_GETWORKAREA (primary monitor only, not updated live). Same `Xb`/`XEv` API as x11.rs, so the shared drawing and key handling is the Linux code. `keys.rs` supplies Keysym/KeyEvent stand-ins.
+- Visibly unavailable on Windows: panel control socket (--ctl, widgets), embedded Needle assist (Cactus runtime is Linux-only; stubs report unavailable), moving files, saving new files, file identity (undo), swaybg handling. Voice recording code compiles but no Windows recorder/STT command is configured.
+- Not verified at all: that the window appears, takes focus, renders correctly, handles IME/DPI/multi-monitor, or that confirm cards behave. Readiness gate: a real Windows run.
+
 ## What the Unix-only code was (all now behind platform.rs, refusing on Windows)
 | File | What | Windows plan |
 |---|---|---|

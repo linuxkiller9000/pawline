@@ -11,6 +11,7 @@ use std::ffi::{CStr, CString};
 #[allow(non_camel_case_types)]
 type c_char = std::os::raw::c_char;
 
+#[cfg(not(windows))]
 extern "C" {
     fn cactus_load(cact: *const u8, n: u64) -> i32;
     fn cactus_init(system_prompt: *const c_char, tools_json: *const c_char, tool_index_path: *const c_char) -> i32;
@@ -20,7 +21,30 @@ extern "C" {
 }
 
 /// The weights, baked in. Apache-2.0 (Cactus-Compute/needle3); see NOTICE.
+#[cfg(not(windows))]
 pub static NEEDLE3_CACT: &[u8] = include_bytes!("../needle3.cact");
+/// Windows: no embedded assist (the runtime is Linux-only for now), so there are no weights to carry.
+#[cfg(windows)]
+pub static NEEDLE3_CACT: &[u8] = &[];
+
+#[cfg(windows)]
+unsafe fn cactus_load(_c: *const u8, _n: u64) -> i32 {
+    -1
+}
+#[cfg(windows)]
+unsafe fn cactus_init(_s: *const c_char, _t: *const c_char, _i: *const c_char) -> i32 {
+    -1
+}
+#[cfg(windows)]
+unsafe fn cactus_complete(_i: *const c_char, _p: *const f32, _s: i32, _m: i32, _o: *mut c_char, _c: i32) -> i32 {
+    -1
+}
+#[cfg(windows)]
+unsafe fn cactus_last_error() -> *const c_char {
+    b"the embedded assist is not available on Windows\0".as_ptr() as *const c_char
+}
+#[cfg(windows)]
+unsafe fn cactus_reset() {}
 
 pub struct Needle {
     handle: i32,

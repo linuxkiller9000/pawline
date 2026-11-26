@@ -11,8 +11,14 @@ mod md;
 mod thumb;
 
 mod ctl;
+#[cfg(unix)]
 mod x11;
+#[cfg(unix)]
+use x11::{Xb, XEv};
+#[cfg(windows)]
+use winb::{Xb, XEv};
 use bridge::UiReply;
+#[cfg(unix)]
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,
@@ -25,7 +31,6 @@ use smithay_client_toolkit::{
     delegate_data_device, delegate_registry, delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     reexports::{
-        calloop::{channel, EventLoop},
         calloop_wayland_source::WaylandSource,
         client::{globals::registry_queue_init, protocol::*, Connection, QueueHandle},
     },
@@ -46,6 +51,13 @@ use smithay_client_toolkit::{
     },
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
+use calloop::{channel, EventLoop};
+#[cfg(windows)]
+mod keys;
+#[cfg(windows)]
+mod winb;
+#[cfg(windows)]
+use keys::{KeyEvent, Keysym};
 use std::collections::HashMap;
 use std::sync::mpsc;
 use tiny_skia::*;
@@ -235,11 +247,13 @@ enum VEv {
     Text(u64, Result<String, String>),
 }
 
+#[cfg(unix)]
 enum Surf {
     Layer(LayerSurface),
     Win(Window),
 }
 
+#[cfg(unix)]
 impl Surf {
     fn wl(&self) -> &wl_surface::WlSurface {
         match self {
@@ -253,21 +267,35 @@ impl Surf {
 }
 
 struct App {
+    #[cfg(unix)]
     registry: Option<RegistryState>,
+    #[cfg(unix)]
     seat: Option<SeatState>,
+    #[cfg(unix)]
     output: Option<OutputState>,
+    #[cfg(unix)]
     shm: Option<Shm>,
+    #[cfg(unix)]
     pool: Option<SlotPool>,
+    #[cfg(unix)]
     surf: Option<Surf>,
+    #[cfg(unix)]
     qh: Option<QueueHandle<App>>,
     /// X11 backend (XFCE and other X11 sessions). None on Wayland.
-    xb: Option<x11::Xb>,
+    xb: Option<Xb>,
+    #[cfg(unix)]
     ddm: Option<DataDeviceManagerState>,
+    #[cfg(unix)]
     ddev: Option<DataDevice>,
+    #[cfg(unix)]
     csrc: Option<CopyPasteSource>,
+    #[cfg(unix)]
     clip_text: String,
+    #[cfg(unix)]
     serial: u32,
+    #[cfg(unix)]
     kb: Option<wl_keyboard::WlKeyboard>,
+    #[cfg(unix)]
     ptr: Option<wl_pointer::WlPointer>,
     w: u32,
     h: u32,
@@ -522,9 +550,13 @@ impl App {
         if self.hidden {
             if let Some(x) = self.xb.as_mut() {
                 x.hide();
-            } else if let Some(sf) = &self.surf {
-                sf.wl().attach(None, 0, 0);
-                sf.commit();
+            }
+            #[cfg(unix)]
+            if self.xb.is_none() {
+                if let Some(sf) = &self.surf {
+                    sf.wl().attach(None, 0, 0);
+                    sf.commit();
+                }
             }
             return;
         }
@@ -548,6 +580,13 @@ impl App {
             }
             return;
         }
+        #[cfg(unix)]
+        self.present_wl(&pm);
+    }
+
+    #[cfg(unix)]
+    fn present_wl(&mut self, pm: &Pixmap) {
+        let (w, h) = (self.w, self.h);
         let stride = w as i32 * 4;
         let (buffer, canvas) = self
             .pool
@@ -972,6 +1011,7 @@ impl App {
         } else {
             (self.w, self.h) = if self.bar { (BAR_W, BAR_H) } else { (COMPACT, COMPACT) };
         }
+        #[cfg(unix)]
         match self.surf.as_ref() {
             None => {}
             Some(Surf::Layer(l)) => {
@@ -1977,6 +2017,7 @@ impl App {
     }
 }
 
+#[cfg(unix)]
 impl CompositorHandler for App {
     fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: i32) {}
     fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
@@ -1984,6 +2025,7 @@ impl CompositorHandler for App {
     fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
     fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
 }
+#[cfg(unix)]
 impl OutputHandler for App {
     fn output_state(&mut self) -> &mut OutputState {
         self.output.as_mut().unwrap()
@@ -1992,6 +2034,7 @@ impl OutputHandler for App {
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
     fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 }
+#[cfg(unix)]
 impl LayerShellHandler for App {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {
         self.exit = true;
@@ -2000,6 +2043,7 @@ impl LayerShellHandler for App {
         self.draw();
     }
 }
+#[cfg(unix)]
 impl WindowHandler for App {
     fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window) {
         self.exit = true;
@@ -2008,6 +2052,7 @@ impl WindowHandler for App {
         self.draw();
     }
 }
+#[cfg(unix)]
 impl SeatHandler for App {
     fn seat_state(&mut self) -> &mut SeatState {
         self.seat.as_mut().unwrap()
@@ -2036,6 +2081,7 @@ impl SeatHandler for App {
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
 }
+#[cfg(unix)]
 impl KeyboardHandler for App {
     fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, serial: u32, _: &[u32], _: &[Keysym]) {
         self.serial = serial;
@@ -2051,6 +2097,7 @@ impl KeyboardHandler for App {
         self.shift = m.shift;
     }
 }
+#[cfg(unix)]
 impl PointerHandler for App {
     fn pointer_frame(&mut self, conn: &Connection, _: &QueueHandle<Self>, _: &wl_pointer::WlPointer, evs: &[PointerEvent]) {
         for e in evs {
@@ -2074,12 +2121,18 @@ impl PointerHandler for App {
 }
 
 impl App {
+    #[cfg(unix)]
     fn can_drag(&self) -> bool {
         self.xb.is_some() || matches!(self.surf, Some(Surf::Layer(_)))
+    }
+    #[cfg(windows)]
+    fn can_drag(&self) -> bool {
+        self.xb.is_some()
     }
 
     /// Move the orb to the current margins (Wayland layer margins, or the X11 window position).
     fn apply_margin(&mut self) {
+        #[cfg(unix)]
         if let Some(Surf::Layer(l)) = &self.surf {
             l.set_margin(self.margin.0, self.margin.1, 0, 0);
         }
@@ -2148,10 +2201,10 @@ impl App {
         false
     }
 
-    fn x_event(&mut self, ev: x11::XEv) {
-        use x11::XEv;
+    fn x_event(&mut self, ev: XEv) {
+        use XEv;
         if std::env::var_os("PAWLINE_DEBUG").is_some() {
-            eprintln!("xev {}", match &ev { XEv::Key { sym, .. } => format!("key {sym:x}"), XEv::Press { button, x, y, .. } => format!("press {button} {x} {y}"), XEv::Release { .. } => "release".into(), XEv::Motion { .. } => "motion".into(), XEv::Expose => "expose".into() });
+            eprintln!("xev {}", match &ev { XEv::Key { sym, .. } => format!("key {sym:x}"), XEv::Press { button, x, y, .. } => format!("press {button} {x} {y}"), XEv::Release { .. } => "release".into(), #[cfg(windows)] XEv::Text { .. } => "text".into(), XEv::Motion { .. } => "motion".into(), XEv::Expose => "expose".into() });
         }
         match ev {
             XEv::Expose => self.draw(),
@@ -2159,8 +2212,12 @@ impl App {
                 self.shift = state & 1 != 0;
                 self.ctrl = state & 4 != 0;
                 let ks = Keysym::new(sym);
-                // plain text only: Ctrl/Alt chords and control characters carry no text
+                // plain text only: Ctrl/Alt chords and control characters carry no text. (Windows sends typed text as
+                // XEv::Text, so a Windows key event never carries text.)
+                #[cfg(unix)]
                 let utf8 = if self.ctrl || state & 8 != 0 { None } else { ks.key_char().filter(|c| !c.is_control()).map(|c| c.to_string()) };
+                #[cfg(windows)]
+                let utf8 = None;
                 self.key(KeyEvent { time: 0, raw_code: 0, keysym: ks, utf8 });
             }
             XEv::Press { button, x, y, rx, ry, state } => {
@@ -2178,6 +2235,10 @@ impl App {
                     5 => self.wheel(40.0),
                     _ => {}
                 }
+            }
+            #[cfg(windows)]
+            XEv::Text { sym, text } => {
+                self.key(KeyEvent { time: 0, raw_code: 0, keysym: Keysym(sym), utf8: Some(text) });
             }
             XEv::Release { x, y } => {
                 self.ptr_pos = (x, y);
@@ -2199,6 +2260,7 @@ fn strip_took(t: &str) -> String {
 const CLIP_MIMES: [&str; 5] = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "TEXT", "STRING"];
 const CLIP_MAX: u64 = 64 * 1024;
 
+#[cfg(unix)]
 impl DataDeviceHandler for App {
     fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice, _: f64, _: f64, _: &wl_surface::WlSurface) {}
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
@@ -2206,10 +2268,12 @@ impl DataDeviceHandler for App {
     fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
     fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
 }
+#[cfg(unix)]
 impl DataOfferHandler for App {
     fn source_actions(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: wl_data_device_manager::DndAction) {}
     fn selected_action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: wl_data_device_manager::DndAction) {}
 }
+#[cfg(unix)]
 impl DataSourceHandler for App {
     fn accept_mime(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_source::WlDataSource, _: Option<String>) {}
     fn send_request(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_source::WlDataSource, mime: String, fd: WritePipe) {
@@ -2238,6 +2302,17 @@ impl App {
         if let Some(x) = &self.xb {
             return x.clip_copy(text);
         }
+        #[cfg(unix)]
+        {
+            self.clip_copy_wl(text)
+        }
+        #[cfg(windows)]
+        {
+            false
+        }
+    }
+    #[cfg(unix)]
+    fn clip_copy_wl(&mut self, text: String) -> bool {
         let (Some(m), Some(dev)) = (&self.ddm, &self.ddev) else { return false };
         let src = m.create_copy_paste_source(self.qh.as_ref().unwrap(), CLIP_MIMES);
         src.set_selection(dev, self.serial);
@@ -2250,6 +2325,17 @@ impl App {
         if let Some(x) = &self.xb {
             return x.clip_paste();
         }
+        #[cfg(unix)]
+        {
+            self.clip_paste_wl()
+        }
+        #[cfg(windows)]
+        {
+            None
+        }
+    }
+    #[cfg(unix)]
+    fn clip_paste_wl(&mut self) -> Option<String> {
         if self.csrc.is_some() {
             // we own the selection: a self-read would wait on our own event loop
             return Some(self.clip_text.clone());
@@ -2279,22 +2365,35 @@ impl App {
     }
 }
 
+#[cfg(unix)]
 impl ShmHandler for App {
     fn shm_state(&mut self) -> &mut Shm {
         self.shm.as_mut().unwrap()
     }
 }
+#[cfg(unix)]
 delegate_compositor!(App);
+#[cfg(unix)]
 delegate_output!(App);
+#[cfg(unix)]
 delegate_shm!(App);
+#[cfg(unix)]
 delegate_seat!(App);
+#[cfg(unix)]
 delegate_keyboard!(App);
+#[cfg(unix)]
 delegate_pointer!(App);
+#[cfg(unix)]
 delegate_layer!(App);
+#[cfg(unix)]
 delegate_xdg_shell!(App);
+#[cfg(unix)]
 delegate_xdg_window!(App);
+#[cfg(unix)]
 delegate_data_device!(App);
+#[cfg(unix)]
 delegate_registry!(App);
+#[cfg(unix)]
 impl ProvidesRegistryState for App {
     fn registry(&mut self) -> &mut RegistryState {
         self.registry.as_mut().unwrap()
@@ -2444,8 +2543,15 @@ fn main() {
         run_terminal();
         return;
     }
+    #[cfg(unix)]
     let x_mode = std::env::var("PAWLINE_BACKEND").is_ok_and(|v| v == "x11") || std::env::var_os("WAYLAND_DISPLAY").is_none();
-    if x_mode && std::env::var_os("DISPLAY").is_none() {
+    #[cfg(windows)]
+    let x_mode = true; // the Windows window backend plays the role of the X11 one (see winb.rs)
+    #[cfg(unix)]
+    let no_display = x_mode && std::env::var_os("DISPLAY").is_none();
+    #[cfg(windows)]
+    let no_display = false;
+    if no_display {
         eprintln!("No Wayland or X11 display found, so the window can't open. Starting terminal mode (same commands, same confirmations). Use --no-ui to choose this directly.");
         run_terminal();
         return;
@@ -2456,6 +2562,7 @@ fn main() {
     }
     let panel_only = args.iter().any(|a| a == "--panel-only");
     let state: ctl::Shared = std::sync::Arc::new(std::sync::Mutex::new("idle"));
+    #[cfg(unix)]
     struct Wl {
         conn: Connection,
         queue: smithay_client_toolkit::reexports::client::EventQueue<App>,
@@ -2465,6 +2572,7 @@ fn main() {
         surf: Surf,
         layer_mode: bool,
     }
+    #[cfg(unix)]
     let wl: Option<Wl> = if x_mode {
         None
     } else {
@@ -2500,9 +2608,9 @@ fn main() {
         let pool = SlotPool::new((W * H * 4) as usize, &shm).unwrap();
         Some(Wl { conn, queue, globals, shm, pool, surf, layer_mode })
     };
-    let (x_tx, x_rx) = channel::channel::<x11::XEv>();
+    let (x_tx, x_rx) = channel::channel::<XEv>();
     let xb = if x_mode {
-        match x11::Xb::open(COMPACT as u16, COMPACT as u16, x_tx) {
+        match Xb::open(COMPACT as u16, COMPACT as u16, x_tx) {
             Ok(x) => Some(x),
             Err(e) => {
                 eprintln!("Could not open the X11 display ({e}). Starting terminal mode (same commands, same confirmations).");
@@ -2520,27 +2628,46 @@ fn main() {
     let (search_tx, search_rx) = channel::channel::<(u64, String, Vec<std::path::PathBuf>)>();
     std::thread::spawn(move || worker(req_rx, back_tx));
 
+    #[cfg(unix)]
     let (conn_opt, queue_opt, mut wl_rest) = match wl {
         Some(w) => (Some(w.conn), Some(w.queue), Some((w.globals, w.shm, w.pool, w.surf, w.layer_mode))),
         None => (None, None, None),
     };
+    #[cfg(unix)]
     let layer_mode = wl_rest.as_ref().is_some_and(|r| r.4);
+    #[cfg(windows)]
+    let layer_mode = false;
+    #[cfg(unix)]
     let qh0 = queue_opt.as_ref().map(|q| q.handle());
     let mut app = App {
+        #[cfg(unix)]
         registry: wl_rest.as_ref().map(|r| RegistryState::new(&r.0)),
+        #[cfg(unix)]
         seat: wl_rest.as_ref().zip(qh0.as_ref()).map(|(r, q)| SeatState::new(&r.0, q)),
+        #[cfg(unix)]
         output: wl_rest.as_ref().zip(qh0.as_ref()).map(|(r, q)| OutputState::new(&r.0, q)),
+        #[cfg(unix)]
         shm: None,
+        #[cfg(unix)]
         pool: None,
+        #[cfg(unix)]
         surf: None,
+        #[cfg(unix)]
         qh: qh0.clone(),
         xb,
+        #[cfg(unix)]
         ddm: wl_rest.as_ref().zip(qh0.as_ref()).and_then(|(r, q)| DataDeviceManagerState::bind(&r.0, q).ok()),
+        #[cfg(unix)]
         ddev: None,
+        #[cfg(unix)]
         csrc: None,
+        #[cfg(unix)]
         clip_text: String::new(),
+        #[cfg(unix)]
         serial: 0,
+        #[cfg(unix)]
         kb: None,
+        #[cfg(unix)]
         ptr: None,
         w: COMPACT,
         h: COMPACT,
@@ -2621,6 +2748,7 @@ fn main() {
         plan_max: 0.0,
         chat_max: 0.0,
     };
+    #[cfg(unix)]
     if let Some(r) = wl_rest.take() {
         app.shm = Some(r.1);
         app.pool = Some(r.2);
@@ -2635,6 +2763,7 @@ fn main() {
         app.hidden = false;
         app.w = W;
         app.h = H;
+        #[cfg(unix)]
         if let Some(Surf::Layer(l)) = &app.surf {
             l.set_size(W, H);
         }
@@ -2643,6 +2772,7 @@ fn main() {
         app.expanded = true;
         app.w = W;
         app.h = H;
+        #[cfg(unix)]
         if let Some(Surf::Layer(l)) = &app.surf {
             l.set_size(W, H);
         }
@@ -2650,6 +2780,7 @@ fn main() {
 
     let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
     let handle = event_loop.handle();
+    #[cfg(unix)]
     if let (Some(c), Some(q)) = (conn_opt.clone(), queue_opt) {
         WaylandSource::new(c, q).insert(handle.clone()).unwrap();
     }
@@ -2691,13 +2822,13 @@ fn main() {
     // the background colours drift slowly: redraw about once a second, only while the card is open and drift is on
     handle
         .insert_source(
-            smithay_client_toolkit::reexports::calloop::timer::Timer::from_duration(std::time::Duration::from_millis(1000)),
+            calloop::timer::Timer::from_duration(std::time::Duration::from_millis(1000)),
             |_, _, app: &mut App| {
                 if app.settings.drift && app.expanded && !app.hidden && app.confirm.is_none() {
                     app.draw();
                 }
                 app.voice_tick();
-                smithay_client_toolkit::reexports::calloop::timer::TimeoutAction::ToDuration(std::time::Duration::from_millis(1000))
+                calloop::timer::TimeoutAction::ToDuration(std::time::Duration::from_millis(1000))
             },
         )
         .unwrap();

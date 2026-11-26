@@ -1,4 +1,9 @@
 fn main() {
+    // The Cactus runtime we ship is a Linux static library. Windows builds have no embedded assist: lib.rs provides
+    // stubs that report it as unavailable, so nothing is linked here.
+    if std::env::var("CARGO_CFG_TARGET_OS").is_ok_and(|t| t == "windows") {
+        return;
+    }
     // libc++ compatibility shim (legacy __hash_memory symbol) — our source,
     // compiled here so no system libc++ needs to export it.
     cc::Build::new().file("shim.c").compile("cactusshim");

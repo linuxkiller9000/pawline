@@ -3,7 +3,6 @@
 //! keyboard/mouse events and the clipboard are different here.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use smithay_client_toolkit::reexports::calloop;
 use tiny_skia::Pixmap;
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::xproto::*;

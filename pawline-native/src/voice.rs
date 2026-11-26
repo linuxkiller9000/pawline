@@ -213,8 +213,14 @@ pub fn temp_wav() -> PathBuf {
 
 /// Start the recorder. The file is created private (0600) before the recorder opens it.
 pub fn start_recording(cmd: &Cmd, out: &Path) -> Result<Child, String> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(out).map_err(|e| format!("Could not create the private audio file: {e}"))?;
+    let mut oo = std::fs::OpenOptions::new();
+    oo.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        oo.mode(0o600);
+    }
+    oo.open(out).map_err(|e| format!("Could not create the private audio file: {e}"))?;
     let mut c = Command::new(&cmd.program);
     c.args(&cmd.args).envs(cmd.env.iter().cloned()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     group(&mut c).spawn().map_err(|e| {
@@ -254,9 +260,15 @@ pub fn kill_group(child: &mut Child) {
     let _ = child.wait();
 }
 
+#[cfg(unix)]
 fn group(c: &mut Command) -> &mut Command {
     use std::os::unix::process::CommandExt;
     c.process_group(0)
+}
+#[cfg(windows)]
+fn group(c: &mut Command) -> &mut Command {
+    use std::os::windows::process::CommandExt;
+    c.creation_flags(0x0000_0200 | 0x0800_0000) // CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
 }
 
 /// Run the STT command on the WAV; the WAV is deleted whatever happens (done, failed, timed out, cancelled).

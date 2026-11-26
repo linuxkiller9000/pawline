@@ -271,6 +271,10 @@ fn is_our_swaybg(pid: u32, start: u64) -> bool {
         && cmdline.contains(".local/share/pawline/wallpapers/")
 }
 
+#[cfg(not(unix))]
+fn terminate(_pid: u32) {} // swaybg is a Linux program; nothing to stop here
+
+#[cfg(unix)]
 fn terminate(pid: u32) {
     extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;

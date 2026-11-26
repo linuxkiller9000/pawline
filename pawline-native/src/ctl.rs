@@ -3,7 +3,9 @@
 //! No text from the socket is ever treated as a request, a command or a path. The socket lives in
 //! $XDG_RUNTIME_DIR (mode 0600, owner only).
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -15,20 +17,36 @@ pub enum Ctl {
     Hide,
 }
 
+#[cfg(windows)]
+pub fn ask(_word: &str) -> Result<String, String> {
+    Err("the panel control socket is not available on Windows".into())
+}
+#[cfg(windows)]
+pub fn running() -> bool {
+    false
+}
+#[cfg(windows)]
+pub fn serve(_tx: calloop::channel::Sender<Ctl>, _state: Shared) -> bool {
+    false
+}
+
 pub type Shared = Arc<Mutex<&'static str>>;
 
+#[cfg(unix)]
 pub fn sock_path() -> Option<PathBuf> {
     let d = std::env::var_os("XDG_RUNTIME_DIR")?;
     Some(PathBuf::from(d).join("pawline.sock"))
 }
 
 /// Our own user id (from /proc/self, no libc needed).
+#[cfg(unix)]
 fn my_uid() -> Option<u32> {
     std::fs::metadata("/proc/self").ok().map(|m| m.uid())
 }
 
 /// The socket path is only used when it is a real socket owned by us, in a folder owned by us that
 /// nobody else can write to. A foreign or odd file is never connected to and never deleted.
+#[cfg(unix)]
 pub fn path_ok(p: &std::path::Path, uid: u32) -> Result<(), String> {
     let dir = p.parent().ok_or("no parent folder")?;
     let dm = std::fs::metadata(dir).map_err(|e| e.to_string())?;
@@ -43,10 +61,12 @@ pub fn path_ok(p: &std::path::Path, uid: u32) -> Result<(), String> {
 }
 
 /// Ask a running Pawline. Err when none is running.
+#[cfg(unix)]
 pub fn ask(word: &str) -> Result<String, String> {
     ask_at(&sock_path().ok_or("no XDG_RUNTIME_DIR")?, word)
 }
 
+#[cfg(unix)]
 pub fn ask_at(p: &std::path::Path, word: &str) -> Result<String, String> {
     path_ok(p, my_uid().ok_or("no uid")?)?;
     if !p.exists() {
@@ -62,16 +82,19 @@ pub fn ask_at(p: &std::path::Path, word: &str) -> Result<String, String> {
 }
 
 /// True when another Pawline already answers on the socket.
+#[cfg(unix)]
 pub fn running() -> bool {
     ask("status").is_ok()
 }
 
-pub fn serve(tx: smithay_client_toolkit::reexports::calloop::channel::Sender<Ctl>, state: Shared) -> bool {
+#[cfg(unix)]
+pub fn serve(tx: calloop::channel::Sender<Ctl>, state: Shared) -> bool {
     let Some(p) = sock_path() else { return false };
     serve_at(&p, tx, state)
 }
 
-pub fn serve_at(p: &std::path::Path, tx: smithay_client_toolkit::reexports::calloop::channel::Sender<Ctl>, state: Shared) -> bool {
+#[cfg(unix)]
+pub fn serve_at(p: &std::path::Path, tx: calloop::channel::Sender<Ctl>, state: Shared) -> bool {
     let Some(uid) = my_uid() else { return false };
     if path_ok(p, uid).is_err() {
         return false; // foreign/odd file or shared folder: leave it alone
@@ -107,7 +130,8 @@ pub fn serve_at(p: &std::path::Path, tx: smithay_client_toolkit::reexports::call
     true
 }
 
-fn send(tx: &smithay_client_toolkit::reexports::calloop::channel::Sender<Ctl>, c: Ctl) -> String {
+#[cfg(unix)]
+fn send(tx: &calloop::channel::Sender<Ctl>, c: Ctl) -> String {
     if tx.send(c).is_ok() { "ok".into() } else { "gone".into() }
 }
 
@@ -153,7 +177,7 @@ pub fn genmon(state: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smithay_client_toolkit::reexports::calloop::channel;
+    use calloop::channel;
     use std::os::unix::fs::PermissionsExt;
 
     fn private_dir(tag: &str) -> PathBuf {

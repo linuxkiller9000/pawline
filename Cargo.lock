@@ -630,6 +630,7 @@ dependencies = [
 name = "pawline-native"
 version = "0.2.1-beta"
 dependencies = [
+ "calloop",
  "fontdue",
  "image-webp",
  "jpeg-decoder",
@@ -640,6 +641,7 @@ dependencies = [
  "smithay-client-toolkit",
  "tiny-skia",
  "unicode-bidi",
+ "windows-sys 0.59.0",
  "x11rb",
 ]
 

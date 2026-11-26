@@ -10,10 +10,8 @@ name = "pawline"
 path = "src/main.rs"
 
 [dependencies]
-smithay-client-toolkit = "0.19"
 tiny-skia = "0.11"
 fontdue = "0.9"
-x11rb = { version = "0.14", default-features = false, features = ["shape"] }
 pawline-core = { path = "../pawline-core" }
 pawline-needle = { path = "../pawline-needle" }
 jpeg-decoder = { version = "0.3", default-features = false }
@@ -21,3 +19,12 @@ png = "0.17"
 image-webp = { version = "0.2", default-features = false }
 rustybuzz = "0.20"
 unicode-bidi = "0.3"
+
+calloop = "0.13"
+
+[target.'cfg(unix)'.dependencies]
+smithay-client-toolkit = "0.19"
+x11rb = { version = "0.14", default-features = false, features = ["shape"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_UI_HiDpi"] }
