@@ -109,7 +109,7 @@ pub fn check_review_text(file: &str, checks: &[LineCheck]) -> String {
     let not_found = checks.iter().filter(|c| !c.found()).count();
     let mut t = format!(
         "Checked the draft against {file}: {} of {total} lines were NOT found there.\n\
-         This is a word-level match against your file, not understanding: a line can match and still be wrong, and a correct line can be flagged when the file words it differently. Tables and charts are not checked. The draft is unchanged.\n",
+         This is a word-level match, not understanding: a line can match and still be wrong, and a correct line can be flagged when the file words it differently. Tables and charts are not checked. The draft is unchanged.\n",
         not_found
     );
     let mut last_slide = 0usize;
@@ -387,7 +387,7 @@ mod tests {
         let ok = FakeHttp { status: 200, ct: "text/html; charset=utf-8", body: "<p>Rain falls from clouds.</p><script>evil()</script>" };
         let r = fetch_and_check(&ok, "https://example.com/rain", &slides).unwrap();
         assert_eq!(r.checks.iter().filter(|c| !c.found()).count(), 1, "{:?}", r.checks);
-        assert!(r.review.contains("word-level match against your file, not understanding"));
+        assert!(r.review.contains("word-level match, not understanding"));
         // non-200, wrong type and empty text are all refused with reasons
         assert!(fetch_and_check(&FakeHttp { status: 404, ..ok }, "https://example.com/rain", &slides).is_err());
         assert!(fetch_and_check(&FakeHttp { status: 200, ct: "application/pdf", ..ok }, "https://example.com/rain", &slides).is_err());
@@ -402,7 +402,7 @@ mod tests {
         let r = check_slides_against_source(&slides, src);
         assert!(r.iter().all(|c| c.slide == 2), "{r:?}");
         let t = check_review_text("facts.txt", &r);
-        assert!(t.contains("word-level match against your file, not understanding"));
+        assert!(t.contains("word-level match, not understanding"));
         assert!(t.contains("NOT found: beta gamma (missing: gamma)"));
         assert!(t.contains("The draft is unchanged."));
     }

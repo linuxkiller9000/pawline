@@ -2318,7 +2318,7 @@ mod memory_tests {
         *DECK_DRAFT.lock().unwrap() = Some("# Water\n## Rain\n- Falls from clouds\n- 42 percent of rain is purple\n".into());
         let r = handle_text(&mut st, "check the draft against facts.txt");
         assert_eq!(r.kind, "message", "{}", r.text);
-        assert!(r.text.contains("word-level match against your file, not understanding"), "{}", r.text);
+        assert!(r.text.contains("word-level match, not understanding"), "{}", r.text);
         assert!(r.text.contains("found: Falls from clouds"), "{}", r.text);
         assert!(r.text.contains("NOT found: 42 percent of rain is purple"), "{}", r.text);
         assert!(r.text.contains("missing: 42") && r.text.contains("percent") && r.text.contains("purple"), "{}", r.text);
