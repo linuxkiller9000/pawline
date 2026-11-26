@@ -175,7 +175,7 @@ signing or release commitment without approval. Publishing needs the user's expl
 
 ### 10 slice: check the draft against a local file (PARTIAL)
 - "check the draft against <file>" on a reviewed in-memory draft: word-level comparison against a UTF-8 text/markdown file the user chose (home-confined via cap_std like image:, 256 KB cap, outside-home / non-text / empty refused). Every content word and number of each slide title and bullet must appear in the file, or the line is reported "NOT found" with the missing words named; Eastern Arabic digits fold to ASCII. Deterministic, no AI, no network.
-- Honest label on every result: "word-level match, not understanding" (neutral wording since bundle 170, user-approved); tables and charts are not checked; the draft is never changed and no card is created by the check itself. The save card afterwards repeats the not-found count. The stored check is memory-only and dropped on edit, on save and on a new draft.
+- Honest label on every result: "word-level match, not understanding" (neutral wording since bundle 170, approved by main relaying the user); tables and charts are not checked; the draft is never changed and no card is created by the check itself. The save card afterwards repeats the not-found count. The stored check is memory-only and dropped on edit, on save and on a new draft.
 - Tests: 4 core + 1 bridge end-to-end (refusals, review content, save-card repeat, stale check dropped after edit, /etc refusal), all behavioural. Xvfb pixel proof: live Pollinations draft then the check review then the save card.
 - NOT in this slice: checking tables/charts, any notion of truth beyond word presence.
 
