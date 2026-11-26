@@ -56,6 +56,8 @@ use smithay_client_toolkit::{
 use calloop::{channel, EventLoop};
 #[cfg(windows)]
 mod keys;
+#[cfg(all(feature = "laya", not(windows)))]
+mod laya;
 #[cfg(windows)]
 mod winb;
 #[cfg(windows)]

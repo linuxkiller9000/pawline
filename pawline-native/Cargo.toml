@@ -22,6 +22,16 @@ unicode-bidi = "0.3"
 
 calloop = "0.14"
 
+[features]
+default = ["laya"]
+# Experimental Laya intent router (Linux only): tract + tokenizers never build for Windows.
+laya = ["dep:tract-onnx", "dep:tokenizers", "dep:regex"]
+
+[target.'cfg(not(windows))'.dependencies]
+tract-onnx = { version = "0.23", optional = true }
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"], optional = true }
+regex = { version = "1", optional = true }
+
 [target.'cfg(unix)'.dependencies]
 smithay-client-toolkit = "0.21"
 x11rb = { version = "0.14", default-features = false, features = ["shape"] }

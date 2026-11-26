@@ -56,6 +56,28 @@ Unreleased (in source, not in any beta yet):
   wallpaper) after confirming. Delete no longer destroys data: it moves the
   item into ~/.local/share/pawline/trash. Nothing empties the trash yet.
 
+## Experimental: Laya suggestions (opt-in, off by default)
+
+When the normal parser does not understand a message, Pawline can ask a small
+local model (Laya intent router, 150M, Apache-2.0, by vrajnotviraj) what you
+probably meant and SUGGEST a command. The suggestion never runs by itself: it
+only refills the input, and pressing Enter sends it through the normal parser
+and the usual confirmation cards. The model makes no decisions about your
+files; it runs fully offline (no network), in English only.
+
+Honest costs: the model is a 656 MB download (one time, converted locally from
+the author's int8 original), uses about 700 MB RAM while loaded, and a
+suggestion takes about a second on a fast desktop and several seconds on an
+old CPU. It is a fallback for messages the parser misses; normal commands
+never touch it. Linux only for now.
+
+Setup (needs python3 and about 2 GB free during conversion):
+
+    sh tools/laya-setup.sh
+
+Then say "laya on" inside Pawline (session only; "laya off" unloads it).
+Without the model files, "laya on" explains the setup and nothing changes.
+
 Planned, in stages: named reusable actions through
 the same safety checks, KDE Plasma integration and KDE Connect, theme matching.
 

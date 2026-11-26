@@ -301,6 +301,13 @@ pub struct UiState {
     pub chat: pawline_core::chat::ChatState,
     /// Online chat for this session only (off at start, never saved): on/off, earlier lines that were really sent/answered, and the user line of the card now pending.
     pub online_chat: bool,
+    /// Experimental Laya router: session-only opt-in, lazily loaded model, one load attempt.
+    #[cfg(all(feature = "laya", not(windows)))]
+    pub laya_on: bool,
+    #[cfg(all(feature = "laya", not(windows)))]
+    pub laya: Option<crate::laya::Laya>,
+    #[cfg(all(feature = "laya", not(windows)))]
+    pub laya_tried: bool,
     pub online_ctx: Vec<String>,
     pub online_pending: Option<String>,
 }
@@ -425,6 +432,37 @@ fn typo_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
     );
     state.picks = vec![s.corrected.clone()];
     out.plan = Some(format!("{}\t{}", s.corrected, s.corrected));
+    Some(out)
+}
+
+/// Experimental Laya suggestion path: lazily loads the model once, routes the missed
+/// message, and turns a confident match into a pick that refills the input. Typing never
+/// approves anything: the picked text goes through the normal parser and its confirmations.
+/// Runs on the worker thread like the other assists, so the window stays responsive.
+#[cfg(all(feature = "laya", not(windows)))]
+fn laya_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
+    if !state.laya_tried {
+        state.laya_tried = true;
+        if let Some(dir) = crate::laya::model_dir() {
+            if crate::laya::model_present(&dir) {
+                state.laya = crate::laya::Laya::load(&dir).ok();
+            }
+        }
+    }
+    let laya = state.laya.as_mut()?;
+    let route = laya.route(input)?;
+    let sug = crate::laya::suggest(route.intent, input)?;
+    let mut out = reply(
+        "message",
+        format!(
+            "Laya (experimental, a small local model) thinks this is \"{}\". Did you mean:
+{sug}
+Pick it (click, or Up/Down then Tab), then press Enter. Nothing was done yet. You will still see the full request and confirm before anything changes. If it reads wrong, just retype or say \"laya off\".",
+            route.intent.replace('_', " ")
+        ),
+    );
+    state.picks = vec![sug.clone()];
+    out.plan = Some(format!("{sug}	{sug}"));
     Some(out)
 }
 
@@ -641,6 +679,22 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             state.online_chat = true;
             return reply("message", format!("Online chat is ON for this session only. Nothing was sent. Commands and offline help still run first and locally. When something is not a command, I will show you a card with the exact messages (up to {} earlier lines of this session, kept in memory only) before anything goes to text.pollinations.ai (free, no account, your IP address is visible, one request per 45 seconds). Your files, location and saved history are never sent; texts with paths, addresses, long numbers, file names, passwords or other credentials are not offered. Replies are AI-written and may be wrong. Say \"chat off\" to stop or \"forget our chat\" to clear the lines.", pawline_core::textfallback::CHAT_CONTEXT_LINES));
         }
+        #[cfg(all(feature = "laya", not(windows)))]
+        if matches!(low, "laya on" | "turn on laya" | "enable laya" | "laya on please") {
+            state.laya_on = true;
+            let model_note = match crate::laya::model_dir() {
+                Some(dir) if crate::laya::model_present(&dir) => format!("Model found at {}. It loads on the first suggestion (about 700 MB RAM while loaded).", dir.display()),
+                Some(dir) => format!("No model installed yet: put laya_fp32.onnx, laya_fp32.onnx.data and tokenizer.json in {} (see README, section on the Laya experiment). Until then nothing changes.", dir.display()),
+                None => "No data folder found; the model cannot be installed.".into(),
+            };
+            return reply("message", format!("Laya suggestions are ON for this session only (EXPERIMENTAL). When my normal parser does not understand a message, a small local model may suggest a command. Nothing runs by itself: every suggestion still needs your pick, Enter and the usual confirmation. Local only, no network, English only, and slow on an old CPU (a few seconds per suggestion). {model_note} Say \"laya off\" to stop."));
+        }
+        #[cfg(all(feature = "laya", not(windows)))]
+        if matches!(low, "laya off" | "turn off laya" | "disable laya") {
+            state.laya_on = false;
+            state.laya = None; // free the model memory
+            return reply("message", "Laya suggestions are OFF and the model is unloaded.".into());
+        }
         if matches!(low, "chat off" | "stop online chat" | "turn off online chat" | "chat offline" | "online chat off") {
             state.online_chat = false;
             state.online_ctx.clear();
@@ -782,6 +836,15 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     // A single word is either a known command (already parsed) or not worth seconds of model
     // inference: fail fast and let the message offer the closest commands instead.
     let single_word = input.trim().split_whitespace().count() == 1;
+    // Experimental Laya router: on a parser gap it may SUGGEST a normalized command.
+    // The suggestion only refills the input; accepting it re-enters the normal parser,
+    // so every confirm card and validation still applies. Nothing runs from the model.
+    #[cfg(all(feature = "laya", not(windows)))]
+    if matches!(&r, Err(PawError::Parse(_))) && state.laya_on {
+        if let Some(out) = laya_gate(state, input) {
+            return out;
+        }
+    }
     if r.is_err() && !too_long_for_assist && !single_word && assist_enabled() {
         if !state.assist_tried {
             // A busy error is transient (an earlier abandoned inference still holds the native
@@ -1046,6 +1109,12 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
         picks: vec![],
         chat: Default::default(),
         online_chat: false,
+        #[cfg(all(feature = "laya", not(windows)))]
+        laya_on: false,
+        #[cfg(all(feature = "laya", not(windows)))]
+        laya: None,
+        #[cfg(all(feature = "laya", not(windows)))]
+        laya_tried: false,
         online_ctx: vec![],
         online_pending: None,
         organize_pending: None,
@@ -2039,6 +2108,22 @@ mod memory_tests {
             assert!(line.contains("AI-generated") && line.contains("unchecked"), "{line}");
             assert!(line.contains("/home/u/Pictures/x.png"), "detail kept: {line}");
         }
+    }
+
+    #[cfg(all(feature = "laya", not(windows)))]
+    #[test]
+    fn laya_is_session_opt_in_and_never_acts_alone() {
+        let root = org_root("laya1");
+        let mut st = new_state(root.clone());
+        // off by default: an unrecognised sentence gets the plain parse reply, no suggestion
+        let r = handle_text(&mut st, "zzqq nothingness");
+        assert!(!r.text.contains("Laya"), "{}", r.text);
+        // opt-in card is honest about what it is; off again clears it
+        let r = handle_text(&mut st, "laya on");
+        assert!(r.text.contains("EXPERIMENTAL") && r.text.contains("session only") && st.laya_on, "{}", r.text);
+        assert!(r.text.contains("Nothing runs by itself"), "{}", r.text);
+        let r = handle_text(&mut st, "laya off");
+        assert!(r.text.contains("OFF") && !st.laya_on && st.laya.is_none(), "{}", r.text);
     }
 
     #[test]
