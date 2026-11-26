@@ -252,6 +252,43 @@ fn weather(t: &[Tok]) -> Option<String> {
     Some(format!("weather in {place}{when}"))
 }
 
+/// Presentation shapes (item 11c): "اعمل عرض تقديمي من notes.txt" and "اكتب عرض تقديمي عن دورة الماء".
+/// The file name or topic is passed through byte for byte. The "about" form only reaches the normal path's online disclosure card.
+fn deck(t: &[Tok]) -> Option<String> {
+    let t = skip_filler(t);
+    let head = t.first()?.1.as_str();
+    if !(CREATE.contains(&head) || head == "اكتب") {
+        return None;
+    }
+    let mut i = 1;
+    if t.get(i).is_some_and(|x| x.1 == "لي") {
+        i += 1;
+    }
+    let first = t.get(i)?.1.as_str();
+    if first == "عرض" && t.get(i + 1).is_some_and(|x| x.1 == "تقديمي") {
+        i += 2;
+    } else if matches!(first, "بوربوينت" | "سلايدات" | "شرايح" | "بريزنتيشن" | "عرضا") {
+        i += 1;
+        if first == "عرضا" && t.get(i).is_some_and(|x| x.1 == "تقديميا") {
+            i += 1;
+        }
+    } else {
+        return None;
+    }
+    let marker = t.get(i)?.1.as_str();
+    let rest = &t[i + 1..];
+    if rest.is_empty() {
+        return None;
+    }
+    let arg = join_orig(rest);
+    let arg = arg.trim().to_string();
+    match marker {
+        "من" => Some(format!("make a presentation from {arg}")),
+        "عن" | "حول" => Some(format!("write a presentation about {arg}")),
+        _ => None,
+    }
+}
+
 fn greeting(f: &str) -> Option<&'static str> {
     let f = f.trim().trim_end_matches(['!', '.', '?']).trim();
     match f {
@@ -283,7 +320,7 @@ pub fn translate(input: &str) -> Outcome {
     }
     let blocked = is_request_blocked(&t, input);
     if !blocked {
-        if let Some(c) = command(&t) {
+        if let Some(c) = deck(&t).or_else(|| command(&t)) {
             return Outcome::Command(c);
         }
     }

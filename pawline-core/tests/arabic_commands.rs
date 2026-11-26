@@ -165,3 +165,19 @@ fn harder_phrases_and_fail_closed_cases() {
     }
     assert!(bad.is_empty(), "{bad:#?}");
 }
+
+/// Item 11c. Author-written after the code, not independent. Only the translation is checked here; the normal path owns the cards.
+#[test]
+fn presentation_shapes_translate_and_keep_payload_verbatim() {
+    for (a, e) in [
+        ("اعمل عرض تقديمي من notes.txt", "make a presentation from notes.txt"),
+        ("أنشئ لي عرضاً تقديمياً من ملاحظاتي.txt", "make a presentation from ملاحظاتي.txt"),
+        ("اكتب عرض تقديمي عن دورة الماء", "write a presentation about دورة الماء"),
+        ("اعمل لي شرائح عن القطط", "write a presentation about القطط"),
+    ] {
+        assert_eq!(cmd(a), e, "{a}");
+    }
+    for bad in ["هل تعمل عرض تقديمي من a.txt؟", "لا تعمل عرض تقديمي من a.txt", "اعمل عرض تقديمي", "اعمل عرض تقديمي في a.txt", "كيف اعمل عرض تقديمي عن القطط"] {
+        assert!(!matches!(translate(bad), Outcome::Command(_)), "{bad} must not run");
+    }
+}

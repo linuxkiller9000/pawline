@@ -27,3 +27,6 @@ Not done / limits (item 11 stays PARTIAL, not counted done):
 
 ## 11b: status lines (partial)
 After an Arabic command, a fixed Arabic line is added: "تم." after a finished action, or "هذا يحتاج تأكيدك قبل أي تغيير." when a confirm card is shown. Everything else in the reply (paths, card text, errors) stays English. This is not Arabic reply support.
+
+## 11c: presentation shapes (partial)
+"اعمل/اكتب عرض تقديمي من <file>" becomes "make a presentation from <file>"; "... عن/حول <topic>" becomes "write a presentation about <topic>" (this goes to the normal online disclosure card, nothing is sent before it). File and topic are passed through verbatim. Questions and negations never run. The test list is author-written after the code, not independent. Edit, image, chart and source commands have no Arabic shapes.
