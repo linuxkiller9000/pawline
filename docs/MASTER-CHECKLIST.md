@@ -165,7 +165,7 @@ signing or release commitment without approval. Publishing needs the user's expl
 
 
 ## Tracked gaps (file safety, item 17)
-- Rename with a quoted name containing spaces (rename the folder "a b" to c) fails: the quotes become part of the name. Delete/remove with quoted names works since 2026-11-26.
+- Rename with quoted names: fixed 2026-11-26 (second fix). Remaining failing shapes had been: filler words before a quoted target (rename the folder "a b" to c: quotes stayed in the name, safe refusal) and a quoted target containing the separator (rename "x to y" to z: split inside the quotes, safe refusal). Both now parse correctly; parser tests plus an end-to-end terminal run renamed real folders on disk. Filler is stripped only when a quote follows, so a real folder named "folder x" is untouched. Unquoted and single/curly-quoted shapes already worked; delete/remove with quoted names works since 2026-11-26 (first fix).
 
 ## Tracked cross-item notes (from main, 3:35)
 - 14 privacy: claims for the earlier GET routes (Q&A, deck draft, search) and the new POST chat route must be stated per route, not generalized from one. The privacy facts on the chat card come from pollinations.ai/privacy (2026-11-17) only.

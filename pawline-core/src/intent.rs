@@ -278,9 +278,19 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
     if first == "rename" {
         // "rename <target> to <new name>"
         let body = cmd.splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim();
-        let (t, n) = body
-            .split_once(" to ")
-            .ok_or_else(|| PawError::Parse("rename needs \"... to <new name>\"".into()))?;
+        let (t, n) = split_rename(body).ok_or_else(|| PawError::Parse("rename needs \"... to <new name>\"".into()))?;
+        let t = t.trim();
+        // Filler before a quoted name: "rename the folder \"a b\" to c" - the quoted part is the name.
+        // Only stripped when what follows is quoted, so a real folder called "folder x" is untouched.
+        let lt = t.to_lowercase();
+        let t = ["the folder ", "the file ", "folder ", "file ", "the "]
+            .iter()
+            .find(|p| lt.starts_with(**p))
+            .and_then(|p| {
+                let rest = t[p.len()..].trim_start();
+                rest.starts_with(['"', '\'', '\u{201c}', '\u{2018}']).then_some(rest)
+            })
+            .unwrap_or(t);
         return Ok(Directive::Rename {
             target: place_ref(t),
             new_name: unwrap_quotes(n.trim()),
@@ -600,6 +610,26 @@ fn split_name_list(s: &str) -> Vec<String> {
 /// is looked up that way; there is no case-insensitive nearest match.
 /// "name" or 'name' or `name` (or curly quotes) around a whole new name are the quoting syntax, not part of the name.
 /// Anything else, including quotes inside the name, is kept exactly.
+/// Split "X to <new name>": the separator is the first " to " outside quotes, so a quoted
+/// name that itself contains " to " ("rename \"x to y\" to z") stays one name.
+fn split_rename(body: &str) -> Option<(&str, &str)> {
+    let mut close: Option<char> = None;
+    for (i, ch) in body.char_indices() {
+        match close {
+            Some(q) if ch == q => close = None,
+            None => match ch {
+                '"' | '\'' | '`' => close = Some(ch),
+                '\u{201c}' => close = Some('\u{201d}'),
+                '\u{2018}' => close = Some('\u{2019}'),
+                _ if body[i..].starts_with(" to ") => return Some((&body[..i], &body[i + 4..])),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    None
+}
+
 fn unwrap_quotes(s: &str) -> String {
     let c: Vec<char> = s.chars().collect();
     if c.len() >= 2 {
@@ -784,6 +814,43 @@ mod case_tests {
                 Directive::Rename { new_name, .. } => assert_eq!(new_name, want, "{inp}"),
                 d => panic!("{d:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn quoted_rename_target_with_filler_or_separator_inside() {
+        // filler words before a quoted name: the quoted part is the target
+        match one("rename the folder \"a b\" to c") {
+            Directive::Rename { target, new_name } => {
+                assert_eq!(target, LocationRef::Named("a b".into()));
+                assert_eq!(new_name, "c");
+            }
+            d => panic!("{d:?}"),
+        }
+        match one("rename the file 'x y' to z") {
+            Directive::Rename { target, .. } => assert_eq!(target, LocationRef::Named("x y".into())),
+            d => panic!("{d:?}"),
+        }
+        // a quoted target may itself contain " to "
+        match one("rename \"x to y\" to z") {
+            Directive::Rename { target, new_name } => {
+                assert_eq!(target, LocationRef::Named("x to y".into()));
+                assert_eq!(new_name, "z");
+            }
+            d => panic!("{d:?}"),
+        }
+        // unquoted shapes unchanged: first " to " separates
+        match one("rename a b to c") {
+            Directive::Rename { target, new_name } => {
+                assert_eq!(target, LocationRef::Named("a b".into()));
+                assert_eq!(new_name, "c");
+            }
+            d => panic!("{d:?}"),
+        }
+        // filler without quotes is NOT stripped: "folder x" can be a real name
+        match one("rename folder x to y") {
+            Directive::Rename { target, .. } => assert_eq!(target, LocationRef::Named("folder x".into())),
+            d => panic!("{d:?}"),
         }
     }
 
