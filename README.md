@@ -1,3 +1,42 @@
+# Pawline v0.3.0-test.4 - test binaries (pre-release)
+
+Test builds of commit f25a913 (successor line, on top of v0.3.0-test.3).
+SANDBOX-TESTED ONLY: not verified on real hardware, real audio, a real
+desktop, or Windows. The audits mentioned in the docs are author-written.
+
+Linux x86_64 only this time. The Windows build is unchanged since test.3
+(the new feature below is Linux-only for now), so Windows testers should
+keep pawline-v0.3.0-test.3-windows-x86_64.exe.
+
+## What changed since v0.3.0-test.3: the Laya experiment (opt-in, OFF by default)
+
+When the normal parser does not understand a message, Pawline can now ask a
+small LOCAL model (Laya intent router, 150M, Apache-2.0, by vrajnotviraj)
+what you probably meant and SUGGEST one rephrased command. Nothing runs by
+itself: the suggestion only refills the input, and pressing Enter sends it
+through the normal parser and the usual confirmation cards. No network,
+English only.
+
+It is OFF by default and session-only: say "laya on" to try it, "laya off"
+to stop. Without the model files, "laya on" just explains the setup.
+
+Setup (one time, needs python3 and about 2 GB free during conversion):
+
+    sh laya-setup.sh        # included next to this README
+
+It downloads the author's int8 model (~160 MB) and converts it locally to
+the fp32 files Pawline loads (656 MB final). Then say "laya on" in Pawline.
+
+Honest costs: about 700 MB RAM while the model is loaded, and a suggestion
+takes about a second on a fast desktop - expect several seconds on the Dell
+(the first suggestion of a session also loads the model, slower still).
+While it thinks you see a "thinking" line, you can keep typing, and Esc
+stops the wait. Normal commands never touch the model.
+
+This is an experiment: the normal keyword parser stays the default and is
+unchanged. Please try your usual "it didn't understand me" phrasings with
+laya on and tell me which suggestions read wrong.
+
 # Pawline v0.3.0-test.3 - test binaries (pre-release)
 
 Test builds of commit 49042aa (successor line, on top of v0.3.0-test.2).
