@@ -2,6 +2,7 @@
 Package version in pawline-native/Cargo.toml is still 0.2.1-beta. No new version number is assigned: that needs the owner's approval.
 ## Unreleased (successor line)
 - Settings screen now shows the running package version (local build-time value, no network).
+- History switched on mid-session now keeps only what is submitted from then on; the user guide inventory was verified by a live file-diff run and now lists the working-folder journal/trash/wallpapers area.
 - Held-key repeat on Wayland; sctk 0.21 migration (memmap2 advisory gone).
 - Chat/history list caps and paging; opt-in history (off by default); reset settings.
 - Safer file operations and Windows name rules (Windows never run).

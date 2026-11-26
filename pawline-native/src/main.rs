@@ -325,6 +325,8 @@ struct App {
     /// The microphone notice has been shown once this session.
     mic_told: bool,
     history_warned: bool,
+    /// First message index the history file may hold: switching history ON mid-session starts from then, not from what was already on screen.
+    hist_from: usize,
     focus: Btn,
     /// Pixels scrolled up from the bottom of the chat (0 = latest).
     scroll: f32,
@@ -1184,6 +1186,7 @@ impl App {
                 Err(e) => self.push(false, "error", format!("Could not delete the saved conversation ({e}), so saving stays ON."), None),
             }
         } else {
+            self.hist_from = self.msgs.len();
             self.settings.keep_history = true;
             self.persist_history();
         }
@@ -1193,7 +1196,7 @@ impl App {
         if !self.settings.keep_history {
             return;
         }
-        let lines: Vec<history::Line> = self.msgs.iter().filter(|m| m.kind != "welcome" && history::keep_kind(m.user, &m.kind)).map(|m| history::Line { user: m.user, text: m.text.clone() }).collect();
+        let lines = Self::hist_lines(&self.msgs, self.hist_from);
         if let Some(p) = history_path() {
             if history::save(&p, &lines).is_err() && !self.history_warned {
                 self.history_warned = true;
@@ -1201,6 +1204,12 @@ impl App {
             }
         }
     }
+
+/// Messages the history file may hold, from index `from` on. The welcome line, cards, errors and
+/// anything before a mid-session ON are left out.
+fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
+    msgs.iter().skip(from).filter(|m| m.kind != "welcome" && history::keep_kind(m.user, &m.kind)).map(|m| history::Line { user: m.user, text: m.text.clone() }).collect()
+}
 
     fn push(&mut self, user: bool, kind: &str, text: String, quote: Option<String>) {
         let thumb = if user { None } else { saved_picture(&text).and_then(|p| thumb::load(&p, THUMB_W, THUMB_H)) };
@@ -2870,6 +2879,7 @@ fn main() {
         confirm_thumbs: Vec::new(),
         mic_told: false,
         history_warned: false,
+        hist_from: 0,
         focus: Btn::No,
         scroll: 0.0,
         plan_scroll: 0.0,
@@ -3044,6 +3054,26 @@ fn main() {
 #[cfg(test)]
 mod wrap_tests {
     use super::*;
+    #[test]
+    fn history_file_starts_at_switch_on() {
+        let m = |user: bool, kind: &str, text: &str| Msg { user, kind: kind.into(), text: text.into(), md: false, thumb: None, quote: None };
+        let msgs = vec![
+            m(false, "welcome", "hi"),
+            m(true, "user", "private while off"),
+            m(false, "message", "reply while off"),
+            m(true, "user", "after on"),
+            m(false, "md", "answer after on"),
+            m(false, "error", "boom"),
+        ];
+        // from 0: welcome and error kinds are never kept, conversation lines are
+        assert_eq!(App::hist_lines(&msgs, 0).len(), 4);
+        // mid-session ON: nothing from before the switch is written
+        assert_eq!(
+            App::hist_lines(&msgs, 3),
+            vec![history::Line { user: true, text: "after on".into() }, history::Line { user: false, text: "answer after on".into() }]
+        );
+    }
+
     #[test]
     fn path_lines_are_laid_out_strictly_and_prose_is_not() {
         assert_eq!(line_mode("1. Move /tmp/ah/Downloads/\u{62a}\u{642}.txt to"), shape::Mode::Strict);
