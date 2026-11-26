@@ -12,6 +12,7 @@ pub mod weather;
 pub mod assist;
 pub mod chat;
 pub mod context;
+pub mod laya_convert;
 pub mod deck;
 pub mod dirs;
 pub mod error;
