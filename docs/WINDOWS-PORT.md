@@ -13,6 +13,11 @@ Status at this commit (cross-compile checks only, nothing has run on Windows):
 
 Check commands: `cargo check -p pawline-core --target x86_64-pc-windows-gnu`; `cargo check -p pawline-native --target x86_64-pc-windows-gnu` (fails at wayland-sys today).
 
+## Item 8 findings (cross-compile only, nothing run on Windows)
+- `platform::detach` now sets CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS on Windows (compiles; unrun).
+- File identity: cap-std exposes volume serial/file index only behind nightly cfgs, so it stays "cannot tell" (callers refuse) until a handle-based GetFileInformationByHandle function replaces the Metadata-based one.
+- No Wine and no Windows machine in the dev sandbox, so no Windows behaviour is verified.
+
 ## What the Unix-only code was (all now behind platform.rs, refusing on Windows)
 | File | What | Windows plan |
 |---|---|---|

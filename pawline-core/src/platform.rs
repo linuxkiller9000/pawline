@@ -23,7 +23,10 @@ pub fn id_std(m: &std::fs::Metadata) -> Option<FileId> {
 }
 #[cfg(not(unix))]
 pub fn id_cap(_m: &cap_std::fs::Metadata) -> Option<FileId> {
-    None // TODO(windows): volume serial + file index from GetFileInformationByHandle
+    // Windows: cap-std only exposes volume serial/file index behind nightly cfgs (windows_by_handle), so on stable Rust
+    // this needs our own GetFileInformationByHandle on an open handle (a different signature than Metadata). Until
+    // then: "cannot tell", and callers refuse.
+    None
 }
 #[cfg(not(unix))]
 pub fn id_std(_m: &std::fs::Metadata) -> Option<FileId> {
@@ -89,10 +92,14 @@ pub fn detach(cmd: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
 }
-#[cfg(not(unix))]
-pub fn detach(_cmd: &mut std::process::Command) {
-    // TODO(windows): CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+#[cfg(windows)]
+pub fn detach(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS. Not run on Windows yet.
+    cmd.creation_flags(0x0000_0200 | 0x0000_0008);
 }
+#[cfg(not(any(unix, windows)))]
+pub fn detach(_cmd: &mut std::process::Command) {}
 
 /// Symbolic link creation inside the confined root.
 #[cfg(unix)]
