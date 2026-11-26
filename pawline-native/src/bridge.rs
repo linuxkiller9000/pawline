@@ -448,6 +448,22 @@ fn history_search_query(input: &str) -> Option<&str> {
     None
 }
 
+/// "delete conversation 2" style phrases (item 19: per-conversation delete). Returns the text
+/// after the fixed prefix, matched ASCII case-insensitively; empty when nothing followed.
+/// Only a bare number deletes (resolved against a fresh listing in the window); anything
+/// else gets a hint, never a deletion.
+fn delete_conversation_query(input: &str) -> Option<String> {
+    let t = input.trim().trim_end_matches(['.', '!']).trim_end();
+    for p in ["delete conversation", "delete archived conversation", "delete saved conversation", "delete my conversation", "delete my saved conversation", "delete that conversation"] {
+        if let Some(rest) = t.get(p.len()..).filter(|_| t.get(..p.len()).map(|h| h.eq_ignore_ascii_case(p)).unwrap_or(false)) {
+            if rest.is_empty() || rest.starts_with(' ') {
+                return Some(rest.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
 fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     state.online_pending = None;
     state.confirm_preview.clear();
@@ -500,6 +516,29 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             // The window owns the history file: it shows the confirm card with the real counts.
             // Terminal mode keeps no history file, so say so instead of pretending.
             return reply("delhist", "The app will list the saved conversation file and any archived copies and ask before deleting. (Terminal sessions keep no history file.)".into());
+        }
+        if matches!(low, "list conversations" | "list my conversations" | "list saved conversations" | "list my saved conversations" | "what conversations are saved" | "what conversations do i have saved" | "show saved conversations" | "show my saved conversations") {
+            // The window owns the history files and lists them with real counts.
+            return reply("listconv", "The window lists the saved conversation and any archived copies. (Terminal sessions keep no history file.)".into());
+        }
+        if let Some(rest) = delete_conversation_query(input) {
+            // The window resolves the number against a FRESH listing and shows the exact file in a
+            // confirm card; a stale or wrong number deletes nothing.
+            if rest.is_empty() && low == "delete saved conversation" {
+                // Singular of the shipped "delete saved conversations": the whole-history card,
+                // which names everything it would remove and can be cancelled.
+                return reply("delhist", "The app will list the saved conversation file and any archived copies and ask before deleting. (Terminal sessions keep no history file.)".into());
+            }
+            match rest.parse::<usize>() {
+                Ok(n) if n > 0 => {
+                    let mut r = reply("delconv", "The window will name the exact conversation file and ask before deleting. (Terminal sessions keep no history file.)".into());
+                    r.plan = Some(rest);
+                    return r;
+                }
+                _ => {
+                    return reply("message", "Say \"list conversations\" to see the saved conversations and their numbers, then for example \"delete conversation 2\". Nothing was deleted.".into());
+                }
+            }
         }
         if matches!(low, "export history" | "export my history" | "export saved history" | "export my saved history" | "export saved conversation" | "export saved conversations" | "export my saved conversation" | "export my saved conversations" | "export chat history") {
             // The window owns the history files: it shows the exact target path and asks first.
@@ -1821,6 +1860,48 @@ mod memory_tests {
         assert!(st.pending.is_none(), "no engine plan may pend: deletion is app-level and confirmed there");
         let names: Vec<String> = std::fs::read_dir(&root).unwrap().flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
         assert_eq!(names, vec!["Downloads"], "nothing deleted or created: {names:?}");
+    }
+
+    #[test]
+    fn list_conversations_phrases_are_app_level() {
+        let root = org_root("listconv");
+        let mut st = new_state(root.clone());
+        for p in ["list conversations", "List my conversations.", "what conversations are saved", "show my saved conversations"] {
+            let r = handle_text(&mut st, p);
+            assert_eq!(r.kind, "listconv", "{p}: {}", r.text);
+        }
+        assert!(st.pending.is_none(), "listing is app-level, never an engine plan");
+    }
+
+    #[test]
+    fn delete_conversation_number_is_app_level_and_only_numbers_delete() {
+        let root = org_root("delconv");
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "delete conversation 2");
+        assert_eq!(r.kind, "delconv", "{}", r.text);
+        assert_eq!(r.plan.as_deref(), Some("2"), "the number travels to the window's fresh listing");
+        assert!(st.pending.is_none(), "no engine plan may pend: deletion is app-level and confirmed there");
+        let r = handle_text(&mut st, "Delete archived conversation 12.");
+        assert_eq!(r.kind, "delconv");
+        assert_eq!(r.plan.as_deref(), Some("12"));
+        for p in ["delete conversation", "delete that conversation", "delete conversation abc", "delete conversation 0", "delete conversation -1"] {
+            let r = handle_text(&mut st, p);
+            assert_eq!(r.kind, "message", "{p} gets a hint, never a deletion: {}", r.text);
+            assert!(r.text.contains("list conversations"), "{p}: {}", r.text);
+            assert!(r.text.contains("Nothing was deleted"), "{p}: {}", r.text);
+        }
+        let names: Vec<String> = std::fs::read_dir(&root).unwrap().flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+        assert_eq!(names, vec!["Downloads"], "nothing deleted or created: {names:?}");
+    }
+
+    #[test]
+    fn whole_history_delete_phrases_stay_whole_history() {
+        let root = org_root("delhist-stays");
+        let mut st = new_state(root);
+        for p in ["delete saved history", "delete my saved conversation", "delete saved conversations", "delete saved conversation"] {
+            let r = handle_text(&mut st, p);
+            assert_eq!(r.kind, "delhist", "{p}: {}", r.text);
+        }
     }
 
     #[test]

@@ -297,6 +297,8 @@ enum AppAction {
     /// Chosen target path and the already-rendered text (rendered when the card is shown,
     /// so the card's line count is exactly what is written).
     ExportHistory { target: std::path::PathBuf, text: String },
+    /// One saved-conversation file chosen from a fresh listing (item 19: per-conversation delete).
+    DeleteConversation { path: std::path::PathBuf, label: String, current: bool, lines: usize },
 }
 
 enum Req {
@@ -1404,6 +1406,66 @@ impl App {
         }
     }
 
+    /// "list conversations" (item 19): read-only numbered listing of the current saved
+    /// conversation and every archived copy, with real line counts.
+    fn reply_list_conversations(&mut self) {
+        let Some(dir) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
+            self.push(false, "message", "No place to keep a conversation file was found, so nothing is saved or listed.".into(), None);
+            self.draw();
+            return;
+        };
+        let entries = history::list_dir(&dir);
+        if entries.is_empty() {
+            let on = self.settings.keep_history;
+            self.push(false, "message", if on {
+                "There are no saved conversations yet: keeping is on, so lines from now on are saved. Nothing was written.".into()
+            } else {
+                "There are no saved conversations: history keeping is off and nothing is saved. Turn it on in Settings first. Nothing was written.".into()
+            }, None);
+            self.draw();
+            return;
+        }
+        let total = entries.len();
+        let mut text = String::from("Saved conversations (nothing was written or deleted):");
+        for (i, e) in entries.iter().take(20).enumerate() {
+            text.push_str(&format!("\n{}. {} - {} saved lines", i + 1, e.label, e.lines));
+        }
+        if total > 20 {
+            text.push_str(&format!("\n... and {} more archived copies", total - 20));
+        }
+        text.push_str("\nSay \"delete conversation 2\" to remove one (a card asks first), \"export history\" to write them to one readable text file, or \"delete saved history\" to remove everything.");
+        self.push(false, "message", text, None);
+        self.draw();
+    }
+
+    /// "delete conversation N" (item 19): resolve N against a FRESH listing and show the exact
+    /// file in a confirm card. A stale or wrong number deletes nothing.
+    fn ask_delete_conversation(&mut self, num: &str) {
+        let Some(dir) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
+            self.push(false, "error", "No place to keep a conversation file was found, so there is nothing to delete.".into(), None);
+            self.draw();
+            return;
+        };
+        let entries = history::list_dir(&dir);
+        let n: usize = num.trim().parse().unwrap_or(0);
+        if n == 0 || n > entries.len() {
+            self.push(false, "error", format!("There is no saved conversation number {n}: {} exist(s). Say \"list conversations\" to see them. Nothing was deleted.", entries.len()), None);
+            self.draw();
+            return;
+        }
+        let e = &entries[n - 1];
+        let card = if e.current {
+            format!("Delete conversation {n} - {} ({} saved lines)? This cannot be undone. The on-screen conversation stays and keeping stays ON, so lines from now on are saved fresh. Nothing else is touched.", e.label, e.lines)
+        } else {
+            format!("Delete conversation {n} - {} ({} saved lines)? This cannot be undone. Only that file is removed from the Pawline data folder. Nothing else is touched.", e.label, e.lines)
+        };
+        self.confirm = Some(card);
+        self.app_pending = Some(AppAction::DeleteConversation { path: e.path.clone(), label: format!("conversation {n} ({})", e.label), current: e.current, lines: e.lines });
+        self.focus = Btn::No;
+        self.plan_scroll = 0.0;
+        self.draw();
+    }
+
     /// Preview + confirm card for "delete saved history": lists exactly what will go.
     fn ask_delete_history(&mut self) {
         let mut targets: Vec<std::path::PathBuf> = Vec::new();
@@ -2086,7 +2148,7 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
             if !yes {
                 let msg = match &act {
                     AppAction::ExportHistory { .. } => "Cancelled. Nothing was written.",
-                    AppAction::DeleteHistory(_) => "Cancelled. Nothing was deleted.",
+                    AppAction::DeleteHistory(_) | AppAction::DeleteConversation { .. } => "Cancelled. Nothing was deleted.",
                 };
                 self.push(false, "message", msg.into(), None);
                 self.draw();
@@ -2125,6 +2187,24 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
                     }
                     self.draw();
                 }
+                AppAction::DeleteConversation { path, label, current, lines } => {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {
+                            if current {
+                                // Keeping stays ON: without this the next save would rewrite the
+                                // lines just deleted. From now on only new lines are saved.
+                                self.hist_from = self.msgs.len();
+                            }
+                            let extra = if current { " The on-screen conversation stays and keeping stays ON, so lines from now on are saved fresh." } else { "" };
+                            self.push(false, "message", format!("Deleted {label} ({lines} saved lines).{extra} Nothing else was touched."), None);
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            self.push(false, "message", format!("{label} was already gone. Nothing was deleted."), None);
+                        }
+                        Err(e) => self.push(false, "error", format!("Could not delete {label} ({e}). Nothing was changed."), None),
+                    }
+                    self.draw();
+                }
             }
             return;
         }
@@ -2147,6 +2227,14 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
         }
         if r.kind == "exphist" {
             self.ask_export_history();
+            return;
+        }
+        if r.kind == "listconv" {
+            self.reply_list_conversations();
+            return;
+        }
+        if r.kind == "delconv" {
+            self.ask_delete_conversation(r.plan.as_deref().unwrap_or(""));
             return;
         }
         self.push(false, &r.kind, r.text.clone(), None);

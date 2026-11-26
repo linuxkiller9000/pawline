@@ -161,6 +161,43 @@ pub fn render_export(dir: &Path) -> (String, usize) {
     (out, total)
 }
 
+/// One entry of the saved-conversation listing (item 19): the current saved conversation first,
+/// then every archived copy in name order. `lines` counts decodable lines; a file that exists but
+/// is empty or unreadable through `load` is still listed, with 0 lines.
+pub struct ConvEntry {
+    pub path: std::path::PathBuf,
+    pub label: String,
+    pub current: bool,
+    pub lines: usize,
+}
+
+/// List the current saved conversation and every archived copy in `dir`. Read-only.
+pub fn list_dir(dir: &Path) -> Vec<ConvEntry> {
+    let mut out: Vec<ConvEntry> = Vec::new();
+    let cur = dir.join("history.txt");
+    if cur.symlink_metadata().map(|m| m.is_file()).unwrap_or(false) {
+        out.push(ConvEntry { lines: load(&cur).len(), path: cur, label: "current saved conversation".into(), current: true });
+    }
+    let mut arch: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("history-archived-") && n.ends_with(".txt"))
+                .unwrap_or(false)
+        })
+        .collect();
+    arch.sort();
+    for p in arch {
+        let label = format!("archived copy {}", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+        out.push(ConvEntry { lines: load(&p).len(), path: p, label, current: false });
+    }
+    out
+}
+
 /// Write `text` to `target` without ever replacing an existing file: a temporary sibling is written
 /// and flushed, hard-linked into place (fails cleanly when the name is taken), then removed.
 /// Ok(true) = written, Ok(false) = the name was taken and nothing was written.
@@ -246,6 +283,39 @@ pub fn search_dir(dir: &Path, query: &str) -> (Vec<Hit>, usize) {
 }
 
 #[cfg(test)]
+mod list_tests {
+    use super::*;
+
+    #[test]
+    fn lists_current_first_then_archives_with_counts() {
+        let d = std::env::temp_dir().join(format!("pawline-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        save(&d.join("history.txt"), &[Line { user: true, text: "hi".into() }, Line { user: false, text: "hello".into() }]).unwrap();
+        save(&d.join("history-archived-2000.txt"), &[Line { user: true, text: "b".into() }]).unwrap();
+        save(&d.join("history-archived-1000.txt"), &[Line { user: true, text: "a1".into() }, Line { user: false, text: "a2".into() }, Line { user: true, text: "a3".into() }]).unwrap();
+        std::fs::write(d.join("unrelated.txt"), "not a conversation").unwrap();
+        let v = list_dir(&d);
+        assert_eq!(v.len(), 3, "unrelated files are not listed");
+        assert!(v[0].current && v[0].label == "current saved conversation" && v[0].lines == 2, "{:?}", v[0].label);
+        assert!(!v[1].current && v[1].label == "archived copy history-archived-1000.txt" && v[1].lines == 3, "{:?}", v[1].label);
+        assert!(!v[2].current && v[2].lines == 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn missing_dir_lists_nothing_and_empty_file_still_lists() {
+        let d = std::env::temp_dir().join(format!("pawline-list-none-{}", std::process::id()));
+        assert!(list_dir(&d).is_empty());
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("history-archived-3000.txt"), "").unwrap();
+        let v = list_dir(&d);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].lines, 0, "an existing but empty file is listed with 0 lines");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
 mod export_tests {
     use super::*;
 
