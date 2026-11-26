@@ -29,7 +29,7 @@ The app works without a network for local features. Anything online asks first w
 
 ## Platforms and limits
 Verified: headless sway/Wayland and an X11 virtual display in the sandbox. UNVERIFIED: KDE, XFCE, niri, real GPU, fractional scale, multi-monitor, orb drag, paste into Pawline, Windows, and the user's N5010.
-Dependency warnings visible: rustybuzz and ttf-parser flagged unmaintained (RUSTSEC-2026-0206, RUSTSEC-2026-0192 for ttf-parser; check the audit for the rustybuzz ID).
+Dependency warnings visible (unmaintained, no fix available): rustybuzz 0.20.1 RUSTSEC-2026-0206, ttf-parser 0.25.1 RUSTSEC-2026-0192.
 
 ## Troubleshooting (draft)
 - No voice input: STT tools/models not installed; Pawline says so and downloads nothing.
