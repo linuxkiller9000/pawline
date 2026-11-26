@@ -15,8 +15,17 @@ Scope: misspelled COMMAND WORDS only (pawline-core/src/typo.rs). Local, determin
   the input; Enter then shows the normal confirm card with the full path (a picked suggestion is also forced to confirm).
 - Typing never approves anything (a misspelled "yes" does nothing); Enter on a card still means the focused button, Cancel by default.
 
-Not covered (limits): English only; no Arabic typo handling yet (roadmap step 11); questions, small talk, weather, search and
-voice text are not corrected; no phonetic or keyboard-layout typos; typos beyond the distance above are not guessed.
+Also covered (step 8 extension): the weather word ("wether in cairo"), search words ("serach wikipdia for cats"), the question word
+("waht is gravity"), and a single misspelled greeting/help word (answered directly, text only). The place, query, question text, topic,
+names and quoted text are payload and stay byte for byte; the suggestion is shown first and the existing online disclosure cards still apply.
+
+Not covered (limits): English only; no Arabic typo handling yet (roadmap step 11); conversation text (step 9) is not corrected yet;
+voice text is not corrected; no phonetic or keyboard-layout typos; typos beyond the distance above are not guessed.
+
+Held-out set (pawline-core/tests/typo_heldout.rs, written before the weather/search/question scanners and not tuned on): 38/40 positives
+as expected and 29/29 negative controls left alone. Known misses, left as they are: "mkae folder reports" (the corrected "make folder reports" is not
+understood by the parser, so nothing is suggested) and "copy the flie a.txt to docs" (the original already parses as copying a thing named
+"flie a.txt", so it is not touched; it then fails safe as not found). This is a small set, not an accuracy rate.
 
 Tests: `cargo test -p pawline-core typo` (a 26-sentence typo list plus names/ties/quotes/yes cases) and the bridge test
 `typo_suggestion_never_acts_and_a_pick_still_needs_the_card`.
@@ -27,4 +36,6 @@ Tests: `cargo test -p pawline-core typo` (a 26-sentence typo list plus names/tie
 5 voice code (old 5), 6 weather and Q&A (old 6), 7 basic presentations (old 9) - scoped done;
 8 typo tolerance, 9 conversation/hints/jokes, 10 presentation extras, 11 Arabic commands/weather/voice,
 12 voice and audio hardware, 13 desktop polish, 14 Windows (old 8, NOT done), 15 Linux desktop verification (old 7, partial),
-16 final integration and packaging (old 10).
+16 final integration and packaging (old 10), 27 documentation (install, build, offline behaviour, platforms and limits, troubleshooting,
+clean uninstall from a verified inventory, user documents kept by default), 28 real-world testing (normal and wrong/ambiguous commands, long sessions,
+offline, after reboot, on the actual N5010 - a VM does not replace it). 27 and 28 are closeout gates; numbers 17-26 are not used.

@@ -100,23 +100,18 @@ const REAL_WORDS: &[&str] = &[
     "snow", "slow", "mode", "made", "male", "cope", "code", "cook", "crate", "lost", "last", "lust", "cost", "post", "host", "most", "mote", "move", "moved", "rove",
     "loot", "lift", "lust", "chow", "shot", "shop", "stow", "sew", "ships", "whow", "sort", "sorts", "mace", "mage", "mate", "mare", "mike", "lake", "take", "wake", "bake",
     "fake", "rake", "cake", "dale", "date", "deal", "dell", "role", "rose", "rule", "rename", "coy", "coop", "pen", "open", "oven", "opens", "wrote", "write", "writer",
+    "whether", "thank", "hell", "held", "helps", "yelp", "whale", "where", "wheat", "whats", "white", "which", "whit", "shat", "defy", "refine",
 ];
 
 fn name_like(w: &str) -> bool {
     w.is_empty() || !w.chars().all(|c| c.is_ascii_alphabetic())
 }
 
-/// Suggest a corrected request, or None when nothing needs or may be corrected.
-/// `recognised` tells whether Pawline's own parsers understand a sentence.
-pub fn suggest(input: &str, recognised: &dyn Fn(&str) -> bool) -> Option<Suggestion> {
-    let t = input.trim();
-    if t.is_empty() || t.starts_with('/') || t.contains('"') || t.contains('\'') {
-        return None;
-    }
-    if recognised(t) {
-        return None; // already understood: never touched
-    }
-    let mut spans: Vec<(usize, usize)> = vec![];
+type Span = (usize, usize);
+type Change = (usize, usize, String, String); // byte start, end, typed, corrected
+
+fn spans_of(t: &str) -> Vec<Span> {
+    let mut spans: Vec<Span> = vec![];
     let mut start = None;
     for (i, c) in t.char_indices() {
         match (c.is_whitespace(), start) {
@@ -131,41 +126,77 @@ pub fn suggest(input: &str, recognised: &dyn Fn(&str) -> bool) -> Option<Suggest
     if let Some(s) = start {
         spans.push((s, t.len()));
     }
+    spans
+}
+
+/// The word without trailing punctuation, lowercased, and its byte length.
+fn core_of(t: &str, sp: Span) -> (String, usize) {
+    let raw = &t[sp.0..sp.1];
+    let core = raw.trim_end_matches([',', '?', '!', ';', ':']);
+    (core.to_ascii_lowercase(), core.len())
+}
+
+fn apply(t: &str, from: usize, changes: &[Change]) -> String {
+    let mut out = String::new();
+    let mut at = from;
+    for (s, e, _, to) in changes {
+        out.push_str(&t[at..*s]);
+        out.push_str(to);
+        at = *e;
+    }
+    out.push_str(&t[at..]);
+    out
+}
+
+fn finish(t: &str, from: usize, changes: Vec<Change>, direct_ok: bool) -> Option<Suggestion> {
+    if changes.is_empty() && from == 0 {
+        return None;
+    }
+    let corrected = apply(t, from, &changes);
+    if !recognised_any(&corrected) {
+        return None;
+    }
+    // Only dropping a polite lead-in (no word changed) or fixing a plain greeting/help word may run directly.
+    let direct = changes.is_empty() || direct_ok;
+    Some(Suggestion { corrected, changes: changes.into_iter().map(|c| (c.2, c.3)).collect(), direct })
+}
+
+/// File/folder/presentation commands: "dlete the folder kp".
+fn scan_files(t: &str, spans: &[Span]) -> Option<Suggestion> {
     let all_verbs: Vec<&str> = RISKY_VERBS.iter().chain(SAFE_VERBS).copied().collect();
-    let mut changes: Vec<(usize, usize, String, String)> = vec![];
+    let mut changes: Vec<Change> = vec![];
     let mut verb_seen = false;
     let mut verb_start = 0usize;
-    let mut window = 0usize; // words checked after the verb
-    for &(s, e) in &spans {
-        let raw = &t[s..e];
-        let core = raw.trim_end_matches([',', '?', '!', ';', ':']);
-        let low = core.to_ascii_lowercase();
+    let mut window = 0usize;
+    for (idx, &(s, e)) in spans.iter().enumerate() {
+        let _ = e;
+        let (low, clen) = core_of(t, (s, e));
         if name_like(&low) {
             if verb_seen {
-                break; // first name-like word: the rest is names
+                break; // first name-like or quoted word: the rest is payload
             }
             return None;
         }
         if !verb_seen {
             if POLITE.contains(&low.as_str()) || (low.len() >= 5 && distance(&low, "please") <= 1) {
-                continue; // a polite lead-in is dropped from the corrected sentence (Pawline's parsers do not take it)
+                continue; // a polite lead-in is dropped from the corrected sentence
             }
             if all_verbs.contains(&low.as_str()) {
                 verb_seen = true;
                 verb_start = s;
                 continue;
             }
-            if REAL_WORDS.contains(&low.as_str()) && !all_verbs.contains(&low.as_str()) {
+            if REAL_WORDS.contains(&low.as_str()) {
                 return None;
             }
             match closest(&low, &all_verbs) {
                 Some(v) => {
-                    changes.push((s, s + core.len(), core.to_string(), v.to_string()));
+                    changes.push((s, s + clen, t[s..s + clen].to_string(), v.to_string()));
                     verb_seen = true;
                     verb_start = s;
                     continue;
                 }
-                None => return None, // the first real word is not a typo of a command
+                None => return None,
             }
         }
         window += 1;
@@ -186,46 +217,137 @@ pub fn suggest(input: &str, recognised: &dyn Fn(&str) -> bool) -> Option<Suggest
             continue;
         }
         if let Some(v) = closest(&low, FIXED) {
-            changes.push((s, s + core.len(), core.to_string(), v.to_string()));
             if noun_then_name(v) {
+                // A noun typo is only fixed when a name follows it. "delete foldr" or "move foldr to docs" is a NAME.
+                let next = spans.get(idx + 1).map(|&sp| core_of(t, sp).0);
+                let follows_name = matches!(&next, Some(n) if !matches!(n.as_str(), "to" | "into" | "in" | "inside" | "from" | "on" | "of" | "and" | "then"));
+                if !follows_name {
+                    break;
+                }
+                changes.push((s, s + clen, t[s..s + clen].to_string(), v.to_string()));
                 break;
             }
+            changes.push((s, s + clen, t[s..s + clen].to_string(), v.to_string()));
         } else {
-            break; // an unknown word here is a name: left exactly as typed
+            break;
         }
     }
     if !verb_seen {
         return None;
     }
-    if changes.is_empty() && verb_start == 0 {
-        return None; // nothing to fix and nothing dropped
-    }
-    let mut out = String::new();
-    let mut at = verb_start;
-    for (s, e, _, to) in &changes {
-        out.push_str(&t[at..*s]);
-        out.push_str(to);
-        at = *e;
-    }
-    out.push_str(&t[at..]);
-    if !recognised(&out) {
-        return None;
-    }
-    let first_verb = out
-        .split_whitespace()
-        .map(|w| w.trim_end_matches([',', '?', '!']).to_ascii_lowercase())
-        .find(|w| all_verbs.contains(&w.as_str()))
-        .unwrap_or_default();
-    let _ = (&first_verb, SAFE_VERBS);
-    // Only dropping a polite lead-in may run directly. Any changed word is shown as a suggestion first, because a typo can be a real word ("snow in cairo").
-    let direct = changes.is_empty();
-    Some(Suggestion { corrected: out, changes: changes.into_iter().map(|c| (c.2, c.3)).collect(), direct })
+    finish(t, verb_start, changes, false)
 }
 
-/// Pawline's own parsers: does any of them understand this sentence?
-pub fn recognised_by_parsers(s: &str) -> bool {
+const WEATHER_SKIP: &[&str] = &["whats", "what's", "the", "how", "hows", "how's", "is", "check", "show", "me", "tell", "get", "give", "a", "like"];
+
+/// "wether in cairo": only the word weather/forecast is fixed; the place is payload.
+fn scan_weather(t: &str, spans: &[Span]) -> Option<Suggestion> {
+    for &sp in spans.iter().take(6) {
+        let (low, clen) = core_of(t, sp);
+        if matches!(low.as_str(), "weather" | "forecast") {
+            return None;
+        }
+        if WEATHER_SKIP.contains(&low.as_str()) {
+            continue;
+        }
+        if REAL_WORDS.contains(&low.as_str()) || name_like(&low.replace('\'', "")) {
+            return None;
+        }
+        let v = closest(&low, &["weather", "forecast"])?;
+        let ch = vec![(sp.0, sp.0 + clen, t[sp.0..sp.0 + clen].to_string(), v.to_string())];
+        let out = apply(t, 0, &ch);
+        if crate::weather::parse_place(&out.to_lowercase()).is_none() {
+            return None;
+        }
+        return finish(t, 0, ch, false);
+    }
+    None
+}
+
+/// "serach for cats": only the search words are fixed; the query is payload.
+fn scan_search(t: &str, spans: &[Span]) -> Option<Suggestion> {
+    const HEAD_EXACT: &[&str] = &["the", "web", "for", "up", "on"];
+    let mut changes: Vec<Change> = vec![];
+    let mut seen_search = false;
+    for (i, &sp) in spans.iter().enumerate() {
+        let (low, clen) = core_of(t, sp);
+        if name_like(&low) {
+            break;
+        }
+        if i == 0 {
+            if low == "search" {
+                seen_search = true;
+                continue;
+            }
+            let v = closest(&low, &["search"])?;
+            changes.push((sp.0, sp.0 + clen, t[sp.0..sp.0 + clen].to_string(), v.to_string()));
+            seen_search = true;
+            continue;
+        }
+        if !seen_search || i > 4 {
+            break;
+        }
+        if HEAD_EXACT.contains(&low.as_str()) || matches!(low.as_str(), "wikipedia" | "online") {
+            continue;
+        }
+        match closest(&low, &["wikipedia", "online"]) {
+            Some(v) => changes.push((sp.0, sp.0 + clen, t[sp.0..sp.0 + clen].to_string(), v.to_string())),
+            None => break, // payload starts here, exactly as typed
+        }
+    }
+    if changes.is_empty() {
+        return None;
+    }
+    finish(t, 0, changes, false)
+}
+
+/// "waht is gravity": only the question word is fixed.
+fn scan_question(t: &str, spans: &[Span]) -> Option<Suggestion> {
+    let &sp = spans.first()?;
+    let (low, clen) = core_of(t, sp);
+    if name_like(&low) || REAL_WORDS.contains(&low.as_str()) {
+        return None;
+    }
+    let v = closest(&low, &["what", "where", "which", "when", "explain", "define", "describe"])?;
+    finish(t, 0, vec![(sp.0, sp.0 + clen, t[sp.0..sp.0 + clen].to_string(), v.to_string())], false)
+}
+
+/// A single misspelled greeting/help word. The answer is plain text, so it may run directly.
+fn scan_small(t: &str, spans: &[Span]) -> Option<Suggestion> {
+    if spans.len() != 1 {
+        return None;
+    }
+    let (low, clen) = core_of(t, spans[0]);
+    if name_like(&low) || REAL_WORDS.contains(&low.as_str()) {
+        return None;
+    }
+    let v = closest(&low, &["hello", "thanks", "help"])?;
+    finish(t, 0, vec![(0, clen, t[..clen].to_string(), v.to_string())], true)
+}
+
+/// Suggest a corrected request, or None when nothing needs or may be corrected.
+/// Only the fixed head words are ever changed; every payload word (names, paths, quoted text, place, topic, query) stays byte for byte.
+pub fn suggest(input: &str) -> Option<Suggestion> {
+    let t = input.trim();
+    if t.is_empty() || t.starts_with('/') {
+        return None;
+    }
+    if recognised_cmd(t) {
+        return None; // already understood as a command: never touched
+    }
+    let spans = spans_of(t);
+    scan_files(t, &spans)
+        .or_else(|| scan_weather(t, &spans))
+        .or_else(|| scan_search(t, &spans))
+        .or_else(|| scan_question(t, &spans))
+        .or_else(|| scan_small(t, &spans))
+}
+
+/// Pawline's own command parsers (not questions): does any of them understand this sentence?
+pub fn recognised_cmd(s: &str) -> bool {
     // A parse that only produced a clarifying answer ("What should the file be called?") is not an understood command.
     crate::intent::parse(s).map(|ds| ds.iter().any(|d| !matches!(d, crate::plan::Directive::Answer { .. }))).unwrap_or(false)
+        || crate::weather::parse_place(&s.to_lowercase()).is_some()
         || crate::finder::parse(s).is_some()
         || crate::deck::parse_command(s).is_some()
         || crate::deck::parse_write_command(s).is_some()
@@ -233,11 +355,17 @@ pub fn recognised_by_parsers(s: &str) -> bool {
         || crate::organize::parse(s).is_some()
 }
 
+/// Commands, or a question the online-question path would take, or small talk.
+pub fn recognised_any(s: &str) -> bool {
+    recognised_cmd(s) || crate::intent::parse(s).is_ok() && !crate::intent::parse(s).map(|ds| ds.iter().all(|d| matches!(d, crate::plan::Directive::Answer { text } if text.starts_with("What should the file"))) ).unwrap_or(true)
+        || crate::textfallback::classify(s) != crate::textfallback::Class::No
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     fn sg(s: &str) -> Option<Suggestion> {
-        suggest(s, &recognised_by_parsers)
+        suggest(s)
     }
 
     #[test]
@@ -346,7 +474,7 @@ mod tests {
 
     #[test]
     fn quotes_paths_and_slash_commands_stop_correction() {
-        assert!(sg("delte \"my folder\"").is_none());
+        assert_eq!(sg("delte \"my folder\"").unwrap().corrected, "delete \"my folder\""); // the quoted payload is untouched
         assert_eq!(sg("delte ~/Documents/kp").unwrap().corrected, "delete ~/Documents/kp");
         assert!(sg("/delte x").is_none());
     }

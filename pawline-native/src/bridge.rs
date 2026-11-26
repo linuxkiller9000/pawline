@@ -340,7 +340,7 @@ pub fn remember_steps(path: &std::path::Path, request: &str, ops: &[Operation], 
 /// confirmation (a picked suggestion is also forced to a confirm card). Names are never touched. Only a dropped
 /// "please" lead-in runs directly. Typing never approves a card: this path produces no approval.
 fn typo_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
-    let s = pawline_core::typo::suggest(input, &pawline_core::typo::recognised_by_parsers)?;
+    let s = pawline_core::typo::suggest(input)?;
     if s.direct {
         return Some(handle_text_inner(state, &s.corrected));
     }
@@ -1200,6 +1200,28 @@ mod memory_tests {
         let r = handle_text(&mut st, "delete the folder flder");
         assert!(!r.text.contains("Did you mean"), "{}", r.text);
         cancel(&mut st);
+    }
+
+    #[test]
+    fn typo_suggestions_for_weather_search_and_questions_send_nothing() {
+        let mut st = new_state(org_root("typo2"));
+        for (typed, want) in [
+            ("wether in cario", "weather in cario"),
+            ("serach for cats", "search for cats"),
+            ("waht is gravity", "what is gravity"),
+            ("explian how tides work", "explain how tides work"),
+        ] {
+            let r = handle_text(&mut st, typed);
+            assert_eq!(r.kind, "message", "{typed}: {}", r.text);
+            assert!(r.text.contains("Did you mean") && r.text.contains(want), "{typed}: {}", r.text);
+            assert_eq!(r.plan.as_deref(), Some(format!("{want}\t{want}").as_str()));
+            assert!(st.pending.is_none(), "a suggestion opens no card and sends nothing: {typed}");
+        }
+        // a plain greeting typo is answered directly (text only)
+        assert!(handle_text(&mut st, "hlep").text.contains("What I can do"));
+        // the place the user typed is payload: only "weather" changes
+        let r = handle_text(&mut st, "wether in wheather");
+        assert!(r.text.contains("weather in wheather"), "{}", r.text);
     }
 
     #[test]
