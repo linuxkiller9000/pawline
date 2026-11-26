@@ -191,6 +191,16 @@ impl Xb {
         })
     }
 
+    /// The area panels leave free (_NET_WORKAREA, first desktop), so the card never covers a panel or its clock.
+    /// Falls back to the whole screen when the window manager publishes nothing sensible.
+    pub fn workarea(&self) -> (i32, i32, i32, i32) {
+        let full = (0, 0, self.sw as i32, self.sh as i32);
+        let Ok(atom) = self.conn.intern_atom(false, b"_NET_WORKAREA").map_err(|_| ()).and_then(|c| c.reply().map_err(|_| ())) else { return full };
+        let Ok(r) = self.conn.get_property(false, self.root, atom.atom, AtomEnum::CARDINAL, 0, 4).map_err(|_| ()).and_then(|c| c.reply().map_err(|_| ())) else { return full };
+        let v: Vec<u32> = r.value32().map(|i| i.collect()).unwrap_or_default();
+        pick_workarea(&v, full)
+    }
+
     pub fn place(&self, x: i32, y: i32, w: u32, h: u32) {
         let _ = self.conn.configure_window(self.win, &ConfigureWindowAux::new().x(x).y(y).width(w).height(h));
         let _ = self.conn.flush();
@@ -365,5 +375,30 @@ mod key_tests {
         // an empty slot falls back to the base symbol
         assert_eq!(pick_keysym(&[0x63, 0, 0, 0], 1), 0x63);
         assert_eq!(pick_keysym(&[], 0), 0);
+    }
+}
+
+/// First desktop's work area from _NET_WORKAREA values, if it is inside the screen and big enough; else `full`.
+pub fn pick_workarea(v: &[u32], full: (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
+    if v.len() < 4 {
+        return full;
+    }
+    let (x, y, w, h) = (v[0] as i32, v[1] as i32, v[2] as i32, v[3] as i32);
+    if w < 200 || h < 200 || x < 0 || y < 0 || x + w > full.2 || y + h > full.3 {
+        return full;
+    }
+    (x, y, w, h)
+}
+
+#[cfg(test)]
+mod workarea_tests {
+    use super::pick_workarea;
+    #[test]
+    fn workarea_is_used_only_when_sane() {
+        let full = (0, 0, 1366, 768);
+        assert_eq!(pick_workarea(&[0, 26, 1366, 742], full), (0, 26, 1366, 742), "top panel respected");
+        assert_eq!(pick_workarea(&[], full), full);
+        assert_eq!(pick_workarea(&[0, 0, 10, 10], full), full, "too small");
+        assert_eq!(pick_workarea(&[0, 0, 4000, 768], full), full, "outside the screen");
     }
 }

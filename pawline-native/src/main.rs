@@ -2092,7 +2092,8 @@ impl App {
     fn x_place(&self) {
         if let Some(x) = &self.xb {
             let m = if self.expanded { (12, 12) } else { self.margin };
-            x.place(x.sw as i32 - self.w as i32 - m.1, m.0, self.w, self.h);
+            let (wx, wy, ww, _wh) = x.workarea();
+            x.place(wx + ww - self.w as i32 - m.1, wy + m.0, self.w, self.h);
         }
     }
 
