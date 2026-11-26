@@ -52,6 +52,9 @@ fn run_cancellable<T: Send + 'static>(
 
 static LAST_CHAT_ANSWER: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+/// Longest the app waits for the local model. Not tuned against measured inference times; a timeout switches the assist off for the session.
+const ASSIST_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn chat_online(context: &[String], text: &str) -> Result<String, PawError> {
     let (c, q) = (context.to_vec(), text.to_string());
     let a = run_cancellable(pawline_core::imagegen::ImageProvider::Pollinations, move |cancelled, commit| {
@@ -241,7 +244,7 @@ pub struct UiState {
     /// Picture bytes for the deck card that is about to be shown (read through the confined reader). Per state, never global.
     /// Cleared by every new request, confirm and cancel. The window receives it only together with a "confirm" reply.
     pub confirm_preview: Vec<Vec<u8>>,
-    pub assist: Option<NeedleAssist>,
+    pub assist: Option<pawline_core::assist::TimedAssist>,
     pub assist_tried: bool,
     /// Journal recovery findings not yet shown to the user.
     pub notes: Vec<String>,
@@ -562,7 +565,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     if r.is_err() {
         if !state.assist_tried {
             state.assist_tried = true;
-            state.assist = NeedleAssist::embedded().ok();
+            state.assist = NeedleAssist::embedded().ok().map(|a| pawline_core::assist::TimedAssist::new(std::sync::Arc::new(a), ASSIST_LIMIT));
         }
         if let Some(a) = state.assist.as_ref() {
             r = state.engine.handle_with(input, &backend, false, Some(a as &dyn pawline_core::assist::Assist));
@@ -1535,6 +1538,29 @@ mod memory_tests {
         assert!(r.text.contains("tidy please"), "{}", r.text);
         cancel(&mut st);
         assert!(root.join("tidy please").exists());
+    }
+
+    /// Behavioural: restored conversation text (the optional history file, loaded the way the UI loads it) never appears in
+    /// an online chat card or in the online context. Only the exchange of this session's confirmed turns can.
+    #[test]
+    fn saved_history_never_reaches_the_online_chat_payload() {
+        let root = org_root("histiso");
+        let hist = root.join("history.txt");
+        crate::history::save(&hist, &[
+            crate::history::Line { user: true, text: "SAVEDSECRETMARK my earlier private line".into() },
+            crate::history::Line { user: false, text: "SAVEDREPLYMARK earlier reply".into() },
+        ]).unwrap();
+        let restored = crate::history::load(&hist);
+        assert_eq!(restored.len(), 2, "the file loaded the way the UI loads it");
+        let mut st = new_state(root.clone());
+        assert!(st.online_ctx.is_empty(), "a new session starts with no online context even when a history file exists");
+        handle_text(&mut st, "chat online");
+        let r = handle_text(&mut st, "I think clouds look like sheep");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(!r.text.contains("SAVEDSECRETMARK") && !r.text.contains("SAVEDREPLYMARK"), "{}", r.text);
+        assert!(st.online_ctx.is_empty());
+        cancel(&mut st);
+        assert!(st.online_ctx.iter().all(|c| !c.contains("MARK")));
     }
 
     #[test]

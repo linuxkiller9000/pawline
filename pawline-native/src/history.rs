@@ -182,7 +182,8 @@ mod tests {
     /// state; this module must stay out of it so restored text can never reach an online request.
     #[test]
     fn history_is_not_wired_into_the_online_chat_bridge() {
-        let b = include_str!("bridge.rs");
+        let src = include_str!("bridge.rs");
+        let b = src.split("#[cfg(test)]").next().unwrap(); // production code only; the behavioural test lives below it
         assert!(!b.contains("history::") && !b.contains("history.txt") && !b.contains("keep_history"));
     }
 

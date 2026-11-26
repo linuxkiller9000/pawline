@@ -297,3 +297,43 @@ fn model_error_empty_and_panic_fail_safe_and_the_engine_survives() {
     assert!(matches!(engine.handle("make a folder called after", &backend, false).unwrap(), Response::Executed(_)));
     assert!(root.join("after").is_dir());
 }
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+struct LateCreate {
+    calls: Arc<AtomicUsize>,
+    delay: Duration,
+}
+impl Assist for LateCreate {
+    fn propose(&self, _input: &str) -> Result<Vec<Directive>, PawError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        Ok(vec![Directive::Create { kind: CreateKind::Dir, names: vec!["late".into()], parent: LocationRef::CurrentDir }])
+    }
+}
+
+/// A model that answers after the deadline: the user already got the parser's plain explanation, the late (valid-looking)
+/// proposal is dropped, no confirm card appears now or later, nothing is created, and the stuck model is never asked again,
+/// so at most ONE abandoned call can exist per session.
+#[test]
+fn late_answer_after_timeout_cannot_show_a_card_or_execute_and_no_more_workers_start() {
+    let root = sandbox("late");
+    let mut engine = Engine::new(root.clone());
+    let backend = DirectFsBackend::new(&root).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let timed = pawline_core::assist::TimedAssist::new(Arc::new(LateCreate { calls: calls.clone(), delay: Duration::from_millis(500) }), Duration::from_millis(100));
+    let first = engine.handle_with("frobnicate the zorp", &backend, false, Some(&timed));
+    assert!(matches!(first, Err(_)), "timeout gives the parser's explanation, not a card");
+    assert!(timed.switched_off());
+    for _ in 0..20 {
+        assert!(engine.handle_with("frobnicate the zorp", &backend, false, Some(&timed)).is_err());
+    }
+    std::thread::sleep(Duration::from_millis(900)); // the abandoned call finishes now
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "21 requests, one model call: no worker per request");
+    assert!(!root.join("late").exists(), "the late proposal executed nothing");
+    // the engine holds no half-made plan: the next ordinary command behaves normally
+    assert!(matches!(engine.handle("make a folder called ok", &backend, false).unwrap(), Response::Executed(_)));
+    assert!(!root.join("late").exists() && root.join("ok").is_dir());
+}
