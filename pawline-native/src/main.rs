@@ -1535,7 +1535,7 @@ impl App {
         let saved_name = history::write_current_name(&dir, Some(name));
         self.hist_from = 1;
         self.msgs.clear();
-        self.msgs.push(Msg { user: false, kind: "welcome".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it. Right-click a message (or Ctrl+R) to reply to it.".into(), thumb: None, quote: None });
+        self.msgs.push(Msg { user: false, kind: "welcome".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Ctrl+, opens Settings, Ctrl+C copies my last reply (clicking a reply copies it), Ctrl+R replies to a message.".into(), thumb: None, quote: None });
         if let Some(n) = note {
             self.msgs.push(Msg { user: false, kind: "restored".into(), md: false, text: n, thumb: None, quote: None });
         }
@@ -1787,7 +1787,7 @@ impl App {
             let _ = history::write_current_name(&d, None);
         }
         self.msgs.clear();
-        self.msgs.push(Msg { user: false, kind: "welcome".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it. Right-click a message (or Ctrl+R) to reply to it.".into(), thumb: None, quote: None });
+        self.msgs.push(Msg { user: false, kind: "welcome".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Ctrl+, opens Settings, Ctrl+C copies my last reply (clicking a reply copies it), Ctrl+R replies to a message.".into(), thumb: None, quote: None });
         if let Some(n) = note {
             self.msgs.push(Msg { user: false, kind: "restored".into(), md: false, text: n, thumb: None, quote: None });
         }
@@ -2431,7 +2431,7 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
                             self.conv_name = Some(name.clone());
                             self.hist_from = 1;
                             self.msgs.clear();
-                            self.msgs.push(Msg { user: false, kind: "welcome".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it. Right-click a message (or Ctrl+R) to reply to it.".into(), thumb: None, quote: None });
+                            self.msgs.push(Msg { user: false, kind: "welcome".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Ctrl+, opens Settings, Ctrl+C copies my last reply (clicking a reply copies it), Ctrl+R replies to a message.".into(), thumb: None, quote: None });
                             let mut head = format!("Switched to conversation \"{name}\": {} saved lines loaded. None of them can trigger anything by themselves.", lines.len());
                             if let Some(n) = note {
                                 head.push(' ');
@@ -2598,6 +2598,7 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
             let n = self.settings_rows();
             match e.keysym {
                 Keysym::Escape => self.settings_open = false,
+                Keysym::comma if self.ctrl => self.settings_open = false,
                 Keysym::Up => {
                     self.settings_sel = (self.settings_sel + n - 1) % n;
                     self.settings_ensure_visible();
@@ -2613,6 +2614,11 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
             return;
         }
         match e.keysym {
+            Keysym::comma if self.ctrl && self.confirm.is_none() && !self.busy => {
+                self.settings_open = true;
+                self.settings_scroll = 0.0;
+                self.settings_sel = 0;
+            }
             Keysym::r | Keysym::R if self.ctrl && !self.busy => {
                 if let Some(t) = self.msgs.last().map(|m| m.text.clone()) {
                     self.set_reply(&t);
@@ -3667,7 +3673,7 @@ fn main() {
         toast: None,
         reply: None,
         msgs: {
-            let mut v = vec![Msg { user: false, kind: "welcome".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it. Right-click a message (or Ctrl+R) to reply to it.".into(), thumb: None, quote: None }];
+            let mut v = vec![Msg { user: false, kind: "welcome".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Ctrl+, opens Settings, Ctrl+C copies my last reply (clicking a reply copies it), Ctrl+R replies to a message.".into(), thumb: None, quote: None }];
             let keep = settings_path().map(|p| theme::load(&p).keep_history).unwrap_or(false);
             if keep {
                 let old = history_path().map(|p| history::load(&p)).unwrap_or_default();
