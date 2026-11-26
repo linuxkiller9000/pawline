@@ -18,3 +18,17 @@ Each entry: build + HEAD, environment, what ran, observed, evidence. Sandbox run
   no settings change -> no ui-settings.txt). Store: journal.jsonl present, trash empty after the undo.
 - Evidence: /downloads/a2_card2.png (delete card, Cancel focused), /downloads/a2_endc.png (undo + cancel trail).
 - All confirmations needed an explicit focus move to "Do it"; typing alone never approved.
+
+## 2026-11-26 B bad and ambiguous input (SANDBOX, terminal mode, debug build, piped stdin)
+- Gibberish: clean "I don't know how to ... yet", no action. Empty line and spaces-only: ignored, no action, no card.
+- "delete the file" (no referent): "I don't know what file refers to" - refuses, never guesses a target.
+- "open the folder" (no such app): refusal explaining it chose nothing; nothing opened.
+- Typo: "maek a folder called typo1" -> suggest-first ("I read maek as make"), nothing done, names never corrected.
+- "delete /": refused, "outside your home area". 'make a folder called "../escape"': refused, "looks like a path, not a name".
+- Shell-metachar name 'a;b$(touch PWNED)': created LITERALLY inside the root (create is non-destructive, no card by design);
+  no shell interpretation anywhere (no PWNED file), payload never rewritten. Undo of it correctly required confirmation (not approved in a pipe, nothing done).
+- Undo with empty journal, twice: "there is nothing to undo yet" both times, no state change.
+- FINDING (performance, item 18/16): a 10,000-character input went to the local AI assist, which timed out after ~30s
+  (total answer time 33.7s) and was then disabled until restart (designed degradation; the message honestly says the
+  stuck worker may still use CPU in the background). The plain parser then answered correctly and the app stayed responsive.
+  No crash, no file writes. Consider a length gate before the assist so huge inputs skip it.
