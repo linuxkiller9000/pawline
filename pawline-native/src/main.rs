@@ -558,7 +558,17 @@ impl App {
         pm.fill_path(&pb.finish().unwrap(), &p, FillRule::Winding, Transform::identity(), None);
     }
 
+    /// With PAWLINE_PERF=1 every redraw prints its wall time (render + present) to stderr, one line each. Off otherwise.
     fn draw(&mut self) {
+        if std::env::var_os("PAWLINE_PERF").is_none() {
+            return self.draw_inner();
+        }
+        let t = std::time::Instant::now();
+        self.draw_inner();
+        eprintln!("PERF draw_ms={:.1} expanded={} settings={}", t.elapsed().as_secs_f64() * 1000.0, self.expanded, self.settings_open);
+    }
+
+    fn draw_inner(&mut self) {
         let st = if self.hidden { "hidden" } else if self.busy { "busy" } else if self.confirm.is_some() { "confirm" } else if self.expanded { "open" } else { "idle" };
         if let Ok(mut g) = self.state.lock() {
             *g = st;
