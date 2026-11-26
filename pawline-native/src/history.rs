@@ -183,7 +183,9 @@ mod tests {
     #[test]
     fn history_is_not_wired_into_the_online_chat_bridge() {
         let src = include_str!("bridge.rs");
-        let b = src.split("#[cfg(test)]").next().unwrap(); // production code only; the behavioural test lives below it
+        const MARK: &str = "==== END OF PRODUCTION CODE";
+        assert!(src.matches(MARK).count() == 1, "the marker comment must stay in bridge.rs");
+        let b = src.split(MARK).next().unwrap(); // production code only; moves with edits, no line numbers
         assert!(!b.contains("history::") && !b.contains("history.txt") && !b.contains("keep_history"));
     }
 
