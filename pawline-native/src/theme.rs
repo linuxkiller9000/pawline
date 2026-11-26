@@ -76,6 +76,9 @@ pub struct Settings {
     /// Speech rate for spoken replies: index into SPEECH_RATES (item 20). Normal by default.
     /// A custom PAWLINE_TTS_CMD is not affected (its own flags are the user's).
     pub speech_rate: usize,
+    /// Reduced motion (item 13): the slow colour drift is paused while this is on, whatever the
+    /// drift switch says. Off by default (drift follows its own switch).
+    pub reduced_motion: bool,
 }
 
 /// (label, words per minute) choices for spoken replies. 175 is espeak's own default.
@@ -83,7 +86,7 @@ pub const SPEECH_RATES: [(&str, u32); 3] = [("slow", 120), ("normal", 175), ("fa
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { text_pct: 100, offline: false, theme: 0, drift: true, speak: false, mic_blocked: false, keep_history: false, assist: true, speech_rate: 1 }
+        Settings { text_pct: 100, offline: false, theme: 0, drift: true, speak: false, mic_blocked: false, keep_history: false, assist: true, speech_rate: 1, reduced_motion: false }
     }
 }
 
@@ -96,6 +99,7 @@ pub fn reset_look(s: &mut Settings) {
     s.drift = d.drift;
     s.speak = d.speak;
     s.speech_rate = d.speech_rate;
+    // Reduced motion is an accessibility choice, not a look preference: left as the user set it.
 }
 
 pub fn load(path: &Path) -> Settings {
@@ -115,6 +119,7 @@ pub fn load(path: &Path) -> Settings {
                 Some(("history", v)) => s.keep_history = v.trim() == "on",
                 Some(("assist", v)) => s.assist = v.trim() != "off",
                 Some(("speech_rate", v)) => s.speech_rate = SPEECH_RATES.iter().position(|(n, _)| n == &v.trim()).unwrap_or(1),
+                Some(("motion", v)) => s.reduced_motion = v.trim() == "reduced",
                 Some(("text", v)) => s.text_pct = v.trim().parse().ok().filter(|p| TEXT_SIZES.contains(p)).unwrap_or(100),
                 _ => {}
             }
@@ -127,7 +132,7 @@ pub fn save(path: &Path, s: &Settings) -> std::io::Result<()> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
-    std::fs::write(path, format!("theme={}\ndrift={}\nspeak={}\ntext={}\noffline={}\nmic={}\nhistory={}\nassist={}\nspeech_rate={}\n", THEMES[s.theme.min(THEMES.len() - 1)].name, if s.drift { "on" } else { "off" }, if s.speak { "on" } else { "off" }, s.text_pct, if s.offline { "on" } else { "off" }, if s.mic_blocked { "blocked" } else { "allowed" }, if s.keep_history { "on" } else { "off" }, if s.assist { "on" } else { "off" }, SPEECH_RATES[s.speech_rate.min(SPEECH_RATES.len() - 1)].0))
+    std::fs::write(path, format!("theme={}\ndrift={}\nspeak={}\ntext={}\noffline={}\nmic={}\nhistory={}\nassist={}\nspeech_rate={}\nmotion={}\n", THEMES[s.theme.min(THEMES.len() - 1)].name, if s.drift { "on" } else { "off" }, if s.speak { "on" } else { "off" }, s.text_pct, if s.offline { "on" } else { "off" }, if s.mic_blocked { "blocked" } else { "allowed" }, if s.keep_history { "on" } else { "off" }, if s.assist { "on" } else { "off" }, SPEECH_RATES[s.speech_rate.min(SPEECH_RATES.len() - 1)].0, if s.reduced_motion { "reduced" } else { "full" }))
 }
 
 /// Gradient offset along the diagonal for a moment in time: a slow back-and-forth, 0 when drift is off.
@@ -169,9 +174,9 @@ mod tests {
 
     #[test]
     fn reset_look_restores_look_and_keeps_every_privacy_switch() {
-        let mut s = Settings { text_pct: 150, offline: true, theme: 2, drift: false, speak: true, mic_blocked: true, keep_history: true, assist: false, speech_rate: 2 };
+        let mut s = Settings { text_pct: 150, offline: true, theme: 2, drift: false, speak: true, mic_blocked: true, keep_history: true, assist: false, speech_rate: 2, reduced_motion: true };
         reset_look(&mut s);
-        assert_eq!(s, Settings { offline: true, mic_blocked: true, keep_history: true, assist: false, speech_rate: 1, ..Settings::default() });
+        assert_eq!(s, Settings { offline: true, mic_blocked: true, keep_history: true, assist: false, speech_rate: 1, reduced_motion: true, ..Settings::default() }, "privacy switches and the reduced-motion choice survive a look reset");
     }
 
     #[test]
@@ -179,10 +184,10 @@ mod tests {
         let d = std::env::temp_dir().join(format!("pawline-theme-{}", std::process::id()));
         let f = d.join("ui-settings.txt");
         assert_eq!(load(&f), Settings::default());
-        save(&f, &Settings { text_pct: 100, offline: false, theme: 2, drift: false, speak: true, mic_blocked: false, keep_history: false, assist: false, speech_rate: 1 }).unwrap();
-        assert_eq!(load(&f), Settings { text_pct: 100, offline: false, theme: 2, drift: false, speak: true, mic_blocked: false, keep_history: false, assist: false, speech_rate: 1 });
+        save(&f, &Settings { text_pct: 100, offline: false, theme: 2, drift: false, speak: true, mic_blocked: false, keep_history: false, assist: false, speech_rate: 1, reduced_motion: false }).unwrap();
+        assert_eq!(load(&f), Settings { text_pct: 100, offline: false, theme: 2, drift: false, speak: true, mic_blocked: false, keep_history: false, assist: false, speech_rate: 1, reduced_motion: false });
         std::fs::write(&f, "theme=Nope\ndrift=maybe\nspeak=maybe\nassist=maybe\njunk").unwrap();
-        assert_eq!(load(&f), Settings { text_pct: 100, offline: false, theme: 0, drift: true, speak: false, mic_blocked: false, keep_history: false, assist: true, speech_rate: 1 });
+        assert_eq!(load(&f), Settings { text_pct: 100, offline: false, theme: 0, drift: true, speak: false, mic_blocked: false, keep_history: false, assist: true, speech_rate: 1, reduced_motion: false });
         let t = std::fs::read_to_string(&f).unwrap();
         assert!(!t.contains("request"));
         assert_eq!(drift_offset(5.0, 300.0, false), 0.0);
@@ -240,6 +245,37 @@ mod contrast_tests {
     fn contrast_function_matches_known_values() {
         assert!((contrast((0, 0, 0), (255, 255, 255)) - 21.0).abs() < 0.01);
         assert!((contrast((119, 119, 119), (255, 255, 255)) - 4.48).abs() < 0.02);
+    }
+}
+
+#[cfg(test)]
+mod reduced_motion_tests {
+    use super::*;
+
+    #[test]
+    fn reduced_motion_round_trips_and_bad_values_stay_full() {
+        let d = std::env::temp_dir().join(format!("pawline-rm-{}", std::process::id()));
+        let f = d.join("ui-settings.txt");
+        let on = Settings { reduced_motion: true, ..Settings::default() };
+        save(&f, &on).unwrap();
+        assert!(load(&f).reduced_motion, "motion=reduced survives a save/load round trip");
+        let off = Settings::default();
+        save(&f, &off).unwrap();
+        assert!(!load(&f).reduced_motion, "motion=full is the default state");
+        std::fs::write(&f, "motion=whatever\n").unwrap();
+        assert!(!load(&f).reduced_motion, "only the word reduced pauses drift; anything else keeps full motion");
+        std::fs::write(&f, "theme=Dusk\n").unwrap();
+        assert!(!load(&f).reduced_motion, "an old settings file with no motion line keeps full motion");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn reset_look_keeps_reduced_motion() {
+        let mut s = Settings { reduced_motion: true, theme: 2, drift: false, ..Settings::default() };
+        reset_look(&mut s);
+        assert!(s.reduced_motion, "reset settings does not touch the reduced-motion choice");
+        assert_eq!(s.theme, 0);
+        assert!(s.drift);
     }
 }
 

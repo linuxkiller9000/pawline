@@ -729,7 +729,7 @@ impl App {
     /// Panel background: a three-colour diagonal gradient whose colours fade into each other, drifting slowly.
     fn fill_bg(&self, pm: &mut Pixmap, w: f32, h: f32) {
         let th = self.th();
-        let off = theme::drift_offset(self.t0.elapsed().as_secs_f32(), w, self.settings.drift);
+        let off = theme::drift_offset(self.t0.elapsed().as_secs_f32(), w, self.drift_on());
         let c = |k: usize| Color::from_rgba8(th.bg[k].0, th.bg[k].1, th.bg[k].2, 245);
         let g = LinearGradient::new(
             Point::from_xy(off, 0.0),
@@ -748,7 +748,12 @@ impl App {
     }
 
     fn settings_rows(&self) -> usize {
-        THEME_ROWS + 8
+        THEME_ROWS + 9
+    }
+
+    /// The drift animation runs only when its own switch is on and reduced motion is off (item 13).
+    fn drift_on(&self) -> bool {
+        self.settings.drift && !self.settings.reduced_motion
     }
 
     fn apply_setting(&mut self, row: usize) {
@@ -757,18 +762,20 @@ impl App {
         } else if row == THEME_ROWS {
             self.settings.drift = !self.settings.drift;
         } else if row == THEME_ROWS + 1 {
+            self.settings.reduced_motion = !self.settings.reduced_motion;
+        } else if row == THEME_ROWS + 2 {
             self.settings.speak = !self.settings.speak;
             if !self.settings.speak {
                 self.stop_speaking();
             }
-        } else if row == THEME_ROWS + 6 {
+        } else if row == THEME_ROWS + 7 {
             self.settings.assist = !self.settings.assist;
             bridge::set_assist_enabled(self.settings.assist);
-        } else if row == THEME_ROWS + 7 {
+        } else if row == THEME_ROWS + 8 {
             self.settings.speech_rate = (self.settings.speech_rate + 1) % theme::SPEECH_RATES.len();
-        } else if row == THEME_ROWS + 5 {
+        } else if row == THEME_ROWS + 6 {
             self.toggle_history();
-        } else if row == THEME_ROWS + 4 {
+        } else if row == THEME_ROWS + 5 {
             self.settings.mic_blocked = !self.settings.mic_blocked;
             if self.settings.mic_blocked {
                 match self.vstate {
@@ -777,7 +784,7 @@ impl App {
                     VState::Idle => {}
                 }
             }
-        } else if row == THEME_ROWS + 3 {
+        } else if row == THEME_ROWS + 4 {
             self.settings.offline = !self.settings.offline;
             pawline_core::netgate::set_offline(self.settings.offline);
         } else {
@@ -874,29 +881,36 @@ impl App {
                 self.settings_fill(pm, PAD + 66.0, y + 4.0, 18.0, 18.0, 9.0, (t.accent.0, t.accent.1, t.accent.2, 255));
                 let label = format!("Theme: {} (Enter for next)", t.name);
                 self.text(pm, &label, PAD + 96.0, y + 18.0, 14.0, (255, 255, 255), clip);
-            } else if k == THEME_ROWS + 7 {
+            } else if k == THEME_ROWS + 8 {
                 let label = format!("Speech rate: {} (Enter to change)", theme::SPEECH_RATES[self.settings.speech_rate.min(theme::SPEECH_RATES.len() - 1)].0);
                 self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
-            } else if k == THEME_ROWS + 6 {
+            } else if k == THEME_ROWS + 7 {
                 let label = format!("AI suggestions (local model): {}", if self.settings.assist { "on" } else { "off" });
                 self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
-            } else if k == THEME_ROWS + 5 {
+            } else if k == THEME_ROWS + 6 {
                 let label = format!("Keep conversation on this computer: {}", if self.settings.keep_history { "ON" } else { "off" });
                 self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
-            } else if k == THEME_ROWS + 4 {
+            } else if k == THEME_ROWS + 5 {
                 let label = format!("Microphone: {}", if self.settings.mic_blocked { "BLOCKED (voice input off)" } else { "allowed when you press the mic button" });
                 self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
-            } else if k == THEME_ROWS + 3 {
+            } else if k == THEME_ROWS + 4 {
                 let label = format!("Offline mode (Pawline's own online features): {}", if self.settings.offline { "ON" } else { "off" });
                 self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
-            } else if k == THEME_ROWS + 2 {
+            } else if k == THEME_ROWS + 3 {
                 let label = format!("Text size: {}% (Enter to change)", self.settings.text_pct);
                 self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
-            } else if k == THEME_ROWS + 1 {
+            } else if k == THEME_ROWS + 2 {
                 let label = format!("Speak replies aloud (local engine): {}", if self.settings.speak { "on" } else { "off" });
                 self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
+            } else if k == THEME_ROWS + 1 {
+                let label = format!("Reduced motion (pauses colour drift): {}", if self.settings.reduced_motion { "ON" } else { "off" });
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
             } else {
-                let label = format!("Colours drift slowly: {}", if self.settings.drift { "on" } else { "off" });
+                let label = if self.settings.reduced_motion && self.settings.drift {
+                    "Colours drift slowly: paused (reduced motion is on)".to_string()
+                } else {
+                    format!("Colours drift slowly: {}", if self.settings.drift { "on" } else { "off" })
+                };
                 self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
             }
         }
@@ -3812,7 +3826,7 @@ fn main() {
         .insert_source(
             calloop::timer::Timer::from_duration(std::time::Duration::from_millis(1000)),
             |_, _, app: &mut App| {
-                if app.settings.drift && app.expanded && !app.hidden && app.confirm.is_none() {
+                if app.drift_on() && app.expanded && !app.hidden && app.confirm.is_none() {
                     app.draw();
                 }
                 app.voice_tick();
