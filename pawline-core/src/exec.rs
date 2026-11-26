@@ -722,6 +722,13 @@ impl NewFile {
 }
 
 fn copy_file(dir: &Dir, from: &Path, to: &Path, after_create: &dyn Fn() -> std::io::Result<()>) -> Result<(), PawError> {
+    // Refuse special files before opening: opening a FIFO for reading blocks until a writer appears.
+    // Follows links within the root (a link to a regular file copies fine). A swap between this check
+    // and the open below is still possible; closing that needs a non-blocking open (tracked gap).
+    let meta = dir.metadata(from)?;
+    if !meta.is_file() {
+        return Err(PawError::Validation(format!("{} is not a regular file, so I did not copy it. Nothing was changed.", from.display())));
+    }
     let mut src = dir.open(from)?;
     let mut dst = dir.open_with(to, cap_std::fs::OpenOptions::new().write(true).create_new(true))?;
     let mine = dst.metadata().ok().and_then(|m| crate::platform::id_cap(&m));
@@ -988,5 +995,30 @@ mod copy_failure_tests {
         // 3: success
         copy_file(&root, Path::new("src"), Path::new("dst3"), &|| Ok(())).unwrap();
         assert_eq!(std::fs::read_to_string(d.join("dst3")).unwrap(), "SRC");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copying_a_fifo_is_refused_without_hanging() {
+        let d = std::env::temp_dir().join(format!("pawline-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let d = std::fs::canonicalize(&d).unwrap();
+        let c = std::ffi::CString::new(d.join("pipe").to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let root = Dir::open_ambient_dir(&d, cap_std::ambient_authority()).unwrap();
+        let t0 = std::time::Instant::now();
+        // direct copy of the pipe
+        let r = copy_file(&root, Path::new("pipe"), Path::new("dst"), &|| Ok(()));
+        assert!(r.is_err() && !d.join("dst").exists(), "refused, no destination left");
+        // a folder tree containing the pipe: the pipe is refused, not hung on
+        std::fs::create_dir(d.join("tree")).unwrap();
+        std::fs::write(d.join("tree/ok.txt"), "OK").unwrap();
+        let c2 = std::ffi::CString::new(d.join("tree/pipe").to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c2.as_ptr(), 0o600) }, 0);
+        let r2 = copy_tree(&root, Path::new("tree"), Path::new("tree2"));
+        assert!(r2.is_err(), "tree copy stops at the pipe");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(2), "no blocking on the pipe: {:?}", t0.elapsed());
+        // moving (rename) a pipe stays allowed: it never opens the content
     }
 }

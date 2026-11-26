@@ -91,7 +91,7 @@ plans go through the same validator and confirmation; "Did you mean" and folder 
 - Test duplicate filenames and overwrite conflicts.
 - Ensure it cannot accidentally escape its allowed directories.
 - Test undo after files have been externally modified.
-Status: OPEN. Existing: home confinement through handle-relative operations, no-replace publish, undo fingerprint checks; part of this is covered by tests, no full matrix yet.
+Status: OPEN. Existing: home confinement through handle-relative operations, no-replace publish, undo fingerprint checks; part of this is covered by tests, no full matrix yet. 2026-11-26: special-file handling for copy closed - copying a FIFO is refused at plan time (validator: only files and folders) and again at exec time before opening (a blocking open would hang; a swap between check and open is still possible, tracked as the TOCTOU gap); a FIFO inside a copied folder tree stops the copy with an error; moving a FIFO stays allowed (rename never opens content). Tests: validate::fifo_copy_tests, exec::copy_failure_tests::copying_a_fifo_is_refused_without_hanging (both unix-only; Windows special-file behaviour untested). Search/list/delete already skipped or handled FIFOs (finder and home tests).
 
 ## 18. Performance and resource management (user section 21)
 - Measure RAM, CPU, startup time, idle usage, and response time.

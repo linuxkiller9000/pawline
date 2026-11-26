@@ -483,6 +483,15 @@ impl Validator {
                     if matches!(d, Directive::Move { .. }) {
                         ops.push(Operation::Move { from, to });
                     } else {
+                        // Copying reads the content; special files (FIFOs, sockets, devices) can block or
+                        // misbehave, so refuse them up front. Moving only renames the entry and stays allowed.
+                        let m = std::fs::metadata(&from).map_err(|_| PawError::Validation(format!("{} doesn't exist", from.display())))?;
+                        if !m.is_file() && !m.is_dir() {
+                            return Err(PawError::Validation(format!(
+                                "I can only copy files and folders, not {} (it is a special file). Nothing was changed.",
+                                from.display()
+                            )));
+                        }
                         ops.push(Operation::Copy { from, to });
                     }
                 }
@@ -582,5 +591,42 @@ impl Validator {
             confirmation_reasons: reasons,
             ops,
         })
+    }
+}
+
+
+#[cfg(all(test, unix))]
+mod fifo_copy_tests {
+    use super::*;
+
+    #[test]
+    fn copy_of_a_fifo_is_refused_at_plan_time() {
+        let d = std::env::temp_dir().join(format!("pawline-vfifo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("dest")).unwrap();
+        let c = std::ffi::CString::new(d.join("pipe").to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let v = Validator::new(d.clone());
+        let ctx = ContextManager::new();
+        let plan = v.build_plan(
+            &[Directive::Copy {
+                target: LocationRef::Explicit(d.join("pipe").to_string_lossy().into()),
+                dest: LocationRef::Explicit(d.join("dest").to_string_lossy().into()),
+            }],
+            &ctx,
+        );
+        match plan {
+            Err(PawError::Validation(m)) => assert!(m.contains("special file"), "{m}"),
+            other => panic!("expected a validation refusal, got {other:?}"),
+        }
+        // moving the same pipe is fine: it never opens the content
+        let plan = v.build_plan(
+            &[Directive::Move {
+                target: LocationRef::Explicit(d.join("pipe").to_string_lossy().into()),
+                dest: LocationRef::Explicit(d.join("dest").to_string_lossy().into()),
+            }],
+            &ctx,
+        );
+        assert!(plan.is_ok(), "move of a pipe stays allowed: {plan:?}");
     }
 }
