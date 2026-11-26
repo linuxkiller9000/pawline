@@ -216,6 +216,12 @@ pub fn mic_gate(blocked: bool) -> Result<(), String> {
     }
 }
 
+/// Whether a finished transcript may reach the input box: it must belong to the current job, the
+/// app must still be waiting for it, and the microphone must not have been blocked meanwhile.
+pub fn accept_transcript(job: u64, current_job: u64, waiting: bool, mic_blocked: bool) -> bool {
+    job == current_job && waiting && !mic_blocked
+}
+
 /// A private temp WAV path (not created yet): runtime dir if present, else temp dir.
 pub fn temp_wav() -> PathBuf {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -430,6 +436,14 @@ pub fn speak(cmd: &Cmd, text: &str) -> Result<Child, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_cancelled_or_revoked_transcripts_never_reach_the_input() {
+        assert!(accept_transcript(3, 3, true, false));
+        assert!(!accept_transcript(2, 3, true, false), "older job");
+        assert!(!accept_transcript(3, 3, false, false), "cancelled (no longer waiting)");
+        assert!(!accept_transcript(3, 3, true, true), "mic blocked while transcribing");
+    }
 
     #[test]
     fn microphone_block_refuses_before_any_recorder_starts() {

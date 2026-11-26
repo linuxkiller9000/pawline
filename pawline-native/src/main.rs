@@ -656,8 +656,12 @@ impl App {
             }
         } else if row == theme::THEMES.len() + 4 {
             self.settings.mic_blocked = !self.settings.mic_blocked;
-            if self.settings.mic_blocked && matches!(self.vstate, VState::Listening { .. }) {
-                self.cancel_listening();
+            if self.settings.mic_blocked {
+                match self.vstate {
+                    VState::Listening { .. } => self.cancel_listening(),
+                    VState::Working => self.cancel_working(),
+                    VState::Idle => {}
+                }
             }
         } else if row == theme::THEMES.len() + 3 {
             self.settings.offline = !self.settings.offline;
@@ -836,7 +840,8 @@ impl App {
         let hint_top = self.chat_max > 0.0 && self.scroll < self.chat_max - 1.0;
         let hint_bot = self.scroll > 1.0;
         let top0 = CHAT_TOP;
-        let bot0 = h - BOTTOM - self.input_extra + 4.0 - if self.reply.is_some() { REPLY_H } else { 0.0 };
+        let voice_bar = !matches!(self.vstate, VState::Idle) || self.speaking.is_some() || self.vnote;
+        let bot0 = h - BOTTOM - self.input_extra + 4.0 - if self.reply.is_some() { REPLY_H } else { 0.0 } - if voice_bar { 34.0 } else { 0.0 };
         let top = top0 + if hint_top { 20.0 } else { 0.0 };
         let bot = bot0 - if hint_bot { 20.0 } else { 0.0 };
         // layout all messages
@@ -1245,7 +1250,7 @@ impl App {
 
     fn on_voice(&mut self, ev: VEv) {
         let VEv::Text(job, _) = &ev;
-        if *job != self.vjob || !matches!(self.vstate, VState::Working) {
+        if !voice::accept_transcript(*job, self.vjob, matches!(self.vstate, VState::Working), self.settings.mic_blocked) {
             return; // cancelled or stale: drop it
         }
         self.vstate = VState::Idle;
