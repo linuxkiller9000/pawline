@@ -77,3 +77,12 @@ Each entry: build + HEAD, environment, what ran, observed, evidence. Sandbox run
   retracted. "please would you tidy things up a bit" is a plain parser reject in 1.7s (weak NL understanding,
   honest message, no hang). Conclusion: no model hang exists on this input; propose() returns in ~0.2s so the
   30s TimedAssist path is not engaged here. Item 16 "real model hang" concern: not reproducible on this evidence.
+
+## 2026-11-26 item 15 real kill -9 loop (SANDBOX, terminal mode via pty, debug build) - PARTIAL
+- Script: tools/kill9_loop.py DELAY... (creates folders "make a folder called kN" one per ~20ms, SIGKILL after DELAY seconds, relaunch, read journal.jsonl).
+- 15 real SIGKILLs at delays 0.11-1.5s (6 to 68 folders in flight). Every run: journal intents == commits == folders on disk,
+  0 unsettled intents, 0 corrupt journal lines, relaunch clean, no recovery messages needed.
+- LIMIT (honest): in every run the kill landed BETWEEN operations (folders created == lines sent), because each create finishes in
+  well under the 20ms pacing. No kill landed inside the intent->commit window, so recovery of a real mid-operation kill is NOT
+  proven by this run; the seeded-journal recovery (item 26 E3) remains the only proof of that branch. A wider window needs a
+  slow operation (large copy) - queued next. Earlier 500-line unpaced attempts deadlocked my harness (undrained pty), not Pawline.
