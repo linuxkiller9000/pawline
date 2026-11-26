@@ -95,7 +95,9 @@ pub fn geocode(http: &dyn Http, place: &str) -> Result<Found, PawError> {
     let mut parts = place.split(',').map(|p| p.trim()).filter(|p| !p.is_empty());
     let name = parts.next().unwrap_or(place).to_string();
     let hints: Vec<String> = parts.map(|p| p.to_lowercase()).collect();
-    let g = get(http, &format!("https://{GEO_HOST}/v1/search?name={}&count=10&language=en&format=json", enc(&name)))?;
+    // The geocoder finds nothing for an Arabic name when asked in English (checked live 2026-11-26), so an Arabic name is looked up with language=ar.
+    let lang = if crate::arabic::has_arabic(&name) { "ar" } else { "en" };
+    let g = get(http, &format!("https://{GEO_HOST}/v1/search?name={}&count=10&language={lang}&format=json", enc(&name)))?;
     let all = g.get("results").and_then(|r| r.as_array()).cloned().unwrap_or_default();
     let mut hits: Vec<&serde_json::Value> = all
         .iter()
@@ -261,7 +263,7 @@ mod tests {
         assert!(!r.contains("Observed"));
         assert!(r.contains("Source: Open-Meteo.com, https://open-meteo.com/"));
         let u = f.urls.borrow();
-        assert!(u[0].starts_with("https://geocoding-api.open-meteo.com/") && u[0].contains("name=Cairo"));
+        assert!(u[0].starts_with("https://geocoding-api.open-meteo.com/") && u[0].contains("name=Cairo") && u[0].contains("language=en"));
         assert!(u[1].starts_with("https://api.open-meteo.com/") && u[1].contains("latitude=30.0626") && !u[1].contains("Cairo"));
     }
 
@@ -279,6 +281,23 @@ mod tests {
         let r = forecast(&f2, &opts[1]).unwrap();
         assert!(r.contains("Weather for Cairo, Illinois, United States"));
         assert!(f2.urls.borrow()[0].contains("latitude=37.0000") && f2.urls.borrow()[0].contains("longitude=-89.1000"));
+    }
+
+    #[test]
+    fn an_arabic_place_is_looked_up_in_arabic_and_never_rewritten() {
+        let geo = r#"{"results":[{"name":"القاهرة","latitude":30.06263,"longitude":31.24967,"country":"مصر","admin1":"محافظة القاهرة"}]}"#;
+        let f = fake(vec![ok(geo)]);
+        match geocode(&f, "القاهرة").unwrap() {
+            Found::One(p) => assert!(p.label.contains("القاهرة")),
+            Found::Many(_) => panic!("one result"),
+        }
+        let u = f.urls.borrow();
+        assert!(u[0].contains("language=ar") && u[0].contains("name=%D8%A7%D9%84%D9%82%D8%A7%D9%87%D8%B1%D8%A9"), "{}", u[0]);
+        // a different spelling is NOT silently swapped for the one the geocoder knows
+        let f = fake(vec![ok(r#"{"generationtime_ms":0.1}"#)]);
+        let e = geocode(&f, "القاهره").unwrap_err().to_string();
+        assert!(e.contains("could not find"), "{e}");
+        assert!(f.urls.borrow().len() == 1);
     }
 
     #[test]

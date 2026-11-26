@@ -7,6 +7,7 @@
 //! bypass it.
 
 pub mod apps;
+pub mod arabic;
 pub mod weather;
 pub mod assist;
 pub mod chat;

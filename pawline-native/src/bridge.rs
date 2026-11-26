@@ -384,6 +384,23 @@ pub static ONLINE_CHAT_UI: std::sync::atomic::AtomicBool = std::sync::atomic::At
 
 fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     state.online_pending = None;
+    // Arabic requests (item 11a): a fixed set of command shapes becomes the English command the normal path already
+    // understands, shown to the user. Names stay byte for byte. The normal path then applies its own rules (confirm card where it asks for one).
+    match pawline_core::arabic::translate(input) {
+        pawline_core::arabic::Outcome::Pass => {}
+        pawline_core::arabic::Outcome::Reply(t) => return reply("message", t),
+        pawline_core::arabic::Outcome::Command(e) => {
+            let mut r = handle_text_inner(state, &e);
+            r.text = format!("فهمت طلبك هكذا / Understood from your Arabic request as: {e}\n{}", r.text);
+            return r;
+        }
+        pawline_core::arabic::Outcome::Suggest { english, said, meant } => {
+            let mut out = reply("message", format!("قرأت \"{said}\" على أنها \"{meant}\". هل تقصد هذا الأمر؟ / I read \"{said}\" as \"{meant}\". Did you mean:\n{english}\nPick it (click, or Up/Down then Tab), then press Enter. Nothing was done yet. You will still see the full path and confirm before anything changes. Names are never corrected."));
+            state.picks = vec![english.clone()];
+            out.plan = Some(format!("{english}\t{english}"));
+            return out;
+        }
+    }
     if let Some(r) = weather_pick(input) {
         return r;
     }
@@ -1904,6 +1921,31 @@ mod memory_tests {
             assert!(r.kind == "failed" && r.text.contains("picture"), "{name}: {}", r.text);
             assert!(!dl.join(format!("{name}.pptx")).exists());
         }
+    }
+
+    #[test]
+    fn arabic_requests_become_visible_english_commands_and_still_need_the_card() {
+        let root = org_root("arabic11");
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "اعمل مجلد اسمه مشاريع");
+        // creating a plain folder in the home area needs no card in the English path either; the same rule applies here
+        assert_eq!(r.kind, "executed", "{}", r.text);
+        assert!(r.text.contains("Understood from your Arabic request as: make a folder called مشاريع"), "{}", r.text);
+        assert!(root.join("مشاريع").is_dir());
+        // a question and a negation run nothing and plan nothing
+        for q in ["كيف احذف مجلد مشاريع؟", "لا تحذف مجلد مشاريع"] {
+            let r = handle_text(&mut st, q);
+            assert!(r.kind == "message" && st.pending.is_none() && root.join("مشاريع").is_dir(), "{q}: {}", r.text);
+        }
+        // a misspelled command word is only suggested; the pick still goes through the card
+        let r = handle_text(&mut st, "احزف المجلد مشاريع");
+        assert!(r.kind == "message" && r.text.contains("Did you mean") && r.text.contains("delete the folder مشاريع") && st.pending.is_none(), "{}", r.text);
+        assert!(root.join("مشاريع").is_dir());
+        let r = handle_text(&mut st, "احذف المجلد مشاريع");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(cancel(&mut st).text.contains("Nothing was done") && root.join("مشاريع").is_dir());
+        // help is static Arabic
+        assert!(handle_text(&mut st, "مساعدة").text.contains("اعمل مجلد"));
     }
 
     #[test]
