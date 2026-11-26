@@ -83,7 +83,7 @@ disclosure of what is stored where, a delete control, and the draft/private text
 - Never let AI bypass the safety validator.
 - Handle model failures, timeouts, and corrupted model data gracefully.
 Status: OPEN. Existing: model/online text is labelled and shown as data; generated text cannot choose a save path or run a tool (tested); assist-derived
-plans go through the same validator and confirmation; "Did you mean" and folder choosers for ambiguity; online failures give plain messages.
+plans go through the same validator and confirmation; "Did you mean" and folder choosers for ambiguity; online failures give plain messages. 16a (2026-11-26): pre-AVX survival of the embedded assist PROVEN under CPU emulation. The prebuilt cactus runtime carries AVX/AVX2/AVX-512/BMI instructions, but they sit behind CPU dispatch: qemu-x86_64 7.2.0 (multiarch/qemu-user-static, harness validated - an unconditional AVX2 test program SIGILLs under it) running -cpu Westmere (the Dell i3-370M's class) completed a full embedded_proof inference (load + init + 64-token proposal, valid create_folder JSON, prefill 3.1 tok/s, decode 1.6 tok/s, peak RSS 107.2 MB, exit 0 in 54 s). So no cpuid guard was added (one would disable a working feature) and the earlier "may SIGILL, turn AI suggestions off first" warning is downgraded. Caveats: qemu is not silicon (one prompt, one session; the Dell run is still the confirmation test); emulation speed says nothing about the Dell's native speed (native Westmere should be faster than emulated); rebuilding cactus from source is off the table (engine repo licence is restricted, see NOTICE) and now unneeded.
 
 ## 17. Filesystem safety stress testing (user section 20)
 - Test paths containing Arabic, spaces, emojis, and unusual characters.

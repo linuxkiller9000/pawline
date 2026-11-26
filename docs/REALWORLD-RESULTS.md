@@ -95,3 +95,10 @@ Each entry: build + HEAD, environment, what ran, observed, evidence. Sandbox run
 - Kill at 2.0s landed after completion: journal shows commit with fingerprint, full 3GB copy intact, no recovery note. Consistent.
 - Combined with the 15 fast-create kills (bundle 114, between-ops) and the seeded-journal E3 test, the real kill -9 crash
   window is now covered for both fast and slow operations in the sandbox. Real-hardware crash stays with the N5010 gate.
+
+## 2026-11-26 item 16a pre-AVX assist survival (SANDBOX, qemu-x86_64 7.2.0 CPU emulation, release build of 34d5beb) - PASS
+- Question: the prebuilt cactus runtime contains AVX/AVX2/AVX-512/BMI instructions; the Dell target (i3-370M, Westmere) has none. Does the assist SIGILL there?
+- Harness validation first: an unconditional-AVX2 test program SIGILLs (signal 4) under `qemu-x86_64-static -cpu Westmere` and exits 0 natively, so the harness does enforce the CPU model.
+- Run: pawline-needle example `embedded_proof` under `-cpu Westmere`: cactus_load + cactus_init + a 64-token proposal for "make a folder called kitten paws" COMPLETED with valid create_folder JSON (confidence 0.7128), prefill 3.1 tok/s, decode 1.6 tok/s, peak RSS 107.2 MB, exit 0 in 54 s.
+- Conclusion: the runtime dispatches on CPU features (6 cpuid sites) and the assist works on a Westmere-class CPU. No cpuid guard added - a guard would have disabled a working feature. The earlier "may SIGILL, turn AI suggestions OFF first" warning is downgraded.
+- Caveats: qemu is not silicon (one prompt, one session; the Dell run remains the confirmation test); emulated speed says nothing about native Dell speed; other prompts exercise the same kernels. Rebuilding cactus from source stays off the table (restricted engine licence, see NOTICE) and is unneeded.
