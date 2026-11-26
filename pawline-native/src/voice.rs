@@ -458,9 +458,9 @@ mod tests {
     #[test]
     fn status_labels_claim_local_only_for_the_built_in_route() {
         assert!(listening_label(61, false).contains("1:01") && listening_label(61, false).contains("not uploaded"));
-        assert!(!listening_label(5, true).contains("not uploaded") && listening_label(5, true).contains("not checked"));
+        assert!(!listening_label(5, true).contains("not uploaded") && listening_label(5, true).contains("unchecked"));
         assert!(working_label(false).contains("on this computer"));
-        assert!(!working_label(true).contains("on this computer") && working_label(true).contains("not checked"));
+        assert!(!working_label(true).contains("on this computer") && working_label(true).contains("unchecked"));
     }
 
     #[test]
