@@ -158,7 +158,7 @@ really creates; user-created documents are kept by default.
 - Test with internet disconnected.
 - Test after reboot.
 - Test on your actual N5010, not just virtual machines.
-Status: OPEN. Sandbox and virtual-machine runs are labelled as such and do not count as the N5010 test. Runtime gate.
+Status: OPEN. Sandbox and virtual-machine runs are labelled as such and do not count as the N5010 test. Runtime gate. 2026-11-26: scenarios A1 (cold start) and A2 (mixed session with confirms, undo, cancel path) ran in the sandbox (Xvfb, debug build) and passed; results and evidence in docs/REALWORLD-RESULTS.md. B (bad input), C (long sessions), D (offline), E (reboot) and the whole N5010 section remain open.
 
 ## 27. Final integration, 28. Packaging, 29. Approval before release
 OPEN. Integration also reconciles the diverged main branch (not merged without checking the repo authority for that operation). Packaging makes no installer,
