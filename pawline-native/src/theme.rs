@@ -94,7 +94,8 @@ impl Default for Settings {
 }
 
 /// "reset settings": text size, theme, drift and spoken replies go back to their defaults.
-/// The privacy switches (offline, mic block, saved conversation) are deliberately left as they are.
+/// The privacy and permission switches (offline, mic block, saved conversation, file changes block)
+/// and the reduced-motion choice are deliberately left as they are.
 pub fn reset_look(s: &mut Settings) {
     let d = Settings::default();
     s.text_pct = d.text_pct;

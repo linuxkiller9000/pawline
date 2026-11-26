@@ -2337,7 +2337,7 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
             if let Some(p) = settings_path() {
                 let _ = theme::save(&p, &self.settings);
             }
-            self.push(false, "message", "Text size, theme, drifting colours and spoken replies are back to their defaults. Offline mode, the microphone block and the saved-conversation switch were not changed, and no file or conversation was deleted.".into(), None);
+            self.push(false, "message", "Text size, theme, drifting colours and spoken replies are back to their defaults. Offline mode, the microphone block, the saved-conversation switch, reduced motion and the file-changes block were not changed, and no file or conversation was deleted.".into(), None);
             self.draw();
             return;
         }
