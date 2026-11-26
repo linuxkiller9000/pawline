@@ -621,8 +621,16 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     let too_long_for_assist = r.is_err() && !assist_len_ok(input);
     if r.is_err() && !too_long_for_assist && assist_enabled() {
         if !state.assist_tried {
-            state.assist_tried = true;
-            state.assist = NeedleAssist::embedded().ok().map(|a| pawline_core::assist::TimedAssist::new(std::sync::Arc::new(a), ASSIST_LIMIT));
+            // A busy error is transient (an earlier abandoned inference still holds the native
+            // session) and cheap, so it does not burn the one lazy-load attempt; other failures
+            // (e.g. weights refused) do, so a broken load is not retried on every parser gap.
+            match NeedleAssist::embedded() {
+                Ok(a) => {
+                    state.assist = Some(pawline_core::assist::TimedAssist::new(std::sync::Arc::new(a), ASSIST_LIMIT));
+                    state.assist_tried = true;
+                }
+                Err(e) => state.assist_tried = !e.0.contains("busy"),
+            }
         }
         if let Some(a) = state.assist.as_ref() {
             r = state.engine.handle_with(input, &backend, false, Some(a as &dyn pawline_core::assist::Assist));

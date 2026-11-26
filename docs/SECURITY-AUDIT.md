@@ -83,6 +83,36 @@ Accepted by main on sway-only regression evidence. Successor line = baseline 97b
   the separator's bytes. Result: 4k tokens 9.42s -> 8.3ms; 80KB 77s -> 24ms; linear scaling verified by probe.
 - The fuzz test now passes in 0.22s and guards the regression. Probe kept at pawline-core/examples/probe.rs.
 
+### 2026-11-26: cactus runtime is a process-global session -> SIGSEGV under concurrent use, FIXED
+- Found via `cargo test -p pawline-native -- --test-threads 4` SIGSEGVing (2/2 runs) right after the bridge
+  model-touching tests. Evidence chain: strace showed one thread munmapping the 35,336,192-byte weights arena
+  while another faulted INSIDE that range (SEGV_MAPERR); a scratch probe proved a second cactus_load in one
+  process munmaps the first session's arena and remaps; a concurrent probe showed one thread's complete()
+  failing with "cactus_init not called" after another thread's load replaced the global session; a third run
+  aborted with "Rust cannot catch foreign exceptions" (a C++ exception escaping the FFI boundary under corruption).
+- Root cause: the cactus C API is a single global session (cactus_complete/cactus_reset take no handle; a second
+  cactus_load frees the previous arena). Three bridge tests (editing_the_draft, every_online_ask,
+  typo_suggestion_never) lazy-load the embedded model concurrently under parallel test threads.
+- App-level exposure, not just tests: TimedAssist abandons a hung worker after its deadline (by design the app
+  never waits on the stuck call), and a later fresh assist (e.g. after a new conversation) would have called
+  cactus_load again, freeing the arena under the abandoned worker's in-flight inference.
+- Fix (pawline-needle/src/lib.rs): every FFI call is serialized on a process-wide mutex held via TRY_LOCK
+  (busy is a graceful "the local model is busy with another request" error, never a wait, so a hung model still
+  cannot wedge the app), the weights load at most once per process (no more arena free), and a reused session is
+  reset first so no earlier conversation leaks into a new one. bridge.rs: a transient busy no longer burns the
+  one lazy-load attempt; a genuinely failed load still does (no 1.4s retry on every parser gap).
+- Regression tests (pawline-needle/tests/concurrent_sessions.rs, real model, behavioural):
+  concurrent_sessions_are_serialized_and_neither_sees_an_uninitialized_model (3 threads load+complete, retrying
+  transient busy like a later request would; pre-fix this produced "cactus_init not called" failures) and
+  a_second_session_reuses_the_weights_and_starts_clean (strace-verified: no munmap of the arena on the second
+  session start).
+- Verification: `cargo test -p pawline-native -- --test-threads 4` green 4/4 after the fix (was 2/2 SIGSEGV
+  before, same invocation); needle concurrent tests green; full suite green at default and single thread counts.
+  The crash was timing-dependent, so absence over 4 runs is evidence, not proof; the mutex removes the mechanism.
+- Residual: cactus could still throw a foreign exception across the FFI boundary on an internal error (Rust
+  cannot catch those; the process would abort). Not observed on any non-corrupted path; corrupt weights are
+  refused at load (item 16 subprocess tests) and the embedded weights are sha256-checked at build time.
+
 ### Caveats carried
 - This review is by the author side, not an independent reviewer; an independent security review is still owed.
 - License compatibility wording in docs/LICENSE-AUDIT.md is a developer reading, not legal advice.
