@@ -1179,6 +1179,17 @@ Nothing is sent from your machine, and after setup Laya works fully offline. You
                 if path.is_empty() {
                     return reply("message", "Which image? Say for example: \"look at this picture ./cat.png\". Nothing was sent.".into());
                 }
+                // Only an image file belongs on this path. "look at ~/notes.txt"
+                // is a text file: an image card would promise to send a document
+                // to a vision model and then fail, so it falls through to the
+                // ordinary handling instead of becoming a card.
+                let lower = path.to_lowercase();
+                let is_image = [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+                    .iter()
+                    .any(|e| lower.ends_with(e));
+                if !is_image {
+                    continue;
+                }
                 let provider = current_chat_provider();
                 let op = Operation::LookAtImage { provider: provider.spec(), path, prompt: "Describe this image honestly and briefly.".into() };
                 let summary = format!("1. {}", op.describe());
@@ -3232,6 +3243,21 @@ mod memory_tests {
         let r = wait_ticks(rx, std::time::Duration::from_secs(60), &|| true);
         assert!(r.is_none(), "cancelled wait must give up, got {r:?}");
         assert!(t.elapsed() < std::time::Duration::from_secs(2), "cancel must be prompt");
+    }
+
+    #[test]
+
+    #[test]
+    fn only_image_files_get_an_image_card() {
+        let root = org_root("imgcard1");
+        let mut st = new_state(root);
+        let r = handle_text(&mut st, "look at ~/notes.txt for me");
+        assert_ne!(r.kind, "confirm", "{}", r.text);
+        assert!(st.pending.is_none(), "no image card for a text file: {}", r.text);
+        let r = handle_text(&mut st, "look at ./cat.png");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(r.text.contains("cat.png"), "{}", r.text);
+        cancel(&mut st);
     }
 
     #[test]

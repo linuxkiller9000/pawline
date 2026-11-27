@@ -735,11 +735,17 @@ not from the window.
   card names the text and the service.
 
 Tests: `cargo test -p pawline-core --lib screencap` 17 passed;
-`cargo test -p pawline-native --bin pawline` 168 passed, 1 failed -
-`memory_tests::online_chat_is_off_by_default_and_only_shows_a_card`, which fails
-on the image path ("look at ~/notes.txt for me") and is unrelated to this work;
-that test binary did not compile before this change (a stale `ChatOnline`
-initializer missing `provider`), which is how it went unnoticed.
+`cargo test -p pawline-native --bin pawline` 171 passed, 0 failed.
+
+That last run found a real bug, not a stale expectation. The failing case was
+`"look at ~/notes.txt for me"`: the "look at <path>" prefix sent every path to
+the image route, so a text file produced a card promising to send the document to
+a vision model, which then failed on the format. The route now takes the image
+path only for `.png/.jpg/.jpeg/.gif/.webp` and falls through otherwise, and
+`only_image_files_get_an_image_card` covers both sides (a text file gets no card,
+a real image still does). It had gone unnoticed because that test binary did not
+compile before this work: a stale `ChatOnline` initializer was missing its
+`provider` field, so none of the 168 tests in it had been running.
 
 Not verified here: the niri and slurp argv shapes are covered by unit tests but
 have not been run against a live niri or slurp, because this sandbox has neither.
