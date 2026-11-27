@@ -170,9 +170,16 @@ ocr_screen.py): 2x upscale + grayscale + autocontrast, tesseract (Apache-2.0)
 | 500M, full 1920px (from 4d) | 56.7 s | 622 | partial, hallucinated credentials |
 | OCR hybrid | ~10 s (1 s OCR + 8.9 s text) | 160 | correct window list (terminal, firefox), correct content (repo URL, "208 passed", Downloads files), no hallucination |
 
-OCR extraction quality: after 2x upscale + autocontrast, tesseract reads
-nearly all UI text including small terminal lines; raw tesseract on the
-untreated image reads almost nothing - the preprocessing is load-bearing.
+OCR extraction quality: raw tesseract on the untreated image reads almost
+nothing; the load-bearing step is the 2x upscale, and the interpolator
+matters: Lanczos3 reads small terminal text, bilinear garbles it
+(measured side by side). Autocontrast turned out to be a NO-OP in the
+winning Python pipeline (the resample already spans 0-255) and a real
+stretch reads slightly worse, so the shipped Rust pipeline
+(pawline-core/src/screencap.rs prepare_for_ocr) is grayscale + Lanczos3
+2x -> PGM, verified to match the Python reference line for line except
+one low-contrast green prompt line. Rust preprocess takes 10.6 s in
+release for 1920x1080 on the 1-thread sandbox (PIL's C path takes ~1 s).
 
 Boundary test (honest limit): asked "what color is the terminal
 background, which window is on top?", the hybrid answered "blue / firefox"

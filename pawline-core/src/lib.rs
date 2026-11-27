@@ -35,6 +35,7 @@ pub mod planmem;
 pub mod providers;
 pub mod search;
 pub mod shrink;
+pub mod screencap;
 pub mod searchmem;
 pub mod textfallback;
 pub mod typo;

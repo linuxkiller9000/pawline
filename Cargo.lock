@@ -1303,6 +1303,7 @@ dependencies = [
  "grep-searcher",
  "ignore",
  "libc",
+ "png",
  "serde_json",
  "sha2",
  "ureq",
