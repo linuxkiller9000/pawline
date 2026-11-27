@@ -163,6 +163,8 @@ def main():
     ap.add_argument("--variant", default="crop+cand+gram",
                     choices=["full", "crop", "crop+cand", "crop+cand+gram"])
     ap.add_argument("--results", default=None)
+    ap.add_argument("--families", default=None,
+                    help="comma-separated families to run (default: all)")
     ap.add_argument("--report", action="store_true")
     args = ap.parse_args()
     results_path = args.results or os.path.join(args.dir, "results_infer.json")
@@ -184,6 +186,9 @@ def main():
         return
 
     qa = [json.loads(l) for l in open(os.path.join(args.dir, "qa.jsonl"))]
+    if args.families:
+        only = {f.strip() for f in args.families.split(",")}
+        qa = [r for r in qa if r["family"] in only]
     images = sorted({r["image"] for r in qa})
     res = json.load(open(results_path)) if os.path.exists(results_path) else {}
     key = args.variant

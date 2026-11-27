@@ -317,3 +317,75 @@ a "say no" bias, not color vision (it also answers "no" to 5/8 presence
 questions where the app IS there). The fork column and the stock-500M
 column (86 questions x ~57 s sandbox) run next; the fork ships only if
 it beats BOTH baselines including on absent and color.
+
+## 4g. No-training paths: what actually beats stock (2026-11-27)
+
+The user has no GPU and will not train, so the question stopped being "how do
+we fine-tune SmolVLM" and became "what can be made better without touching a
+single weight". Three pieces were built and measured on the 4f strict battery
+(86 questions, 8 held-out 1920x1080 scenes, eval-only corpora/colours/phrasings),
+plus a new set that adds genuinely visual questions (eval3, 12 families, 100
+questions).
+
+What was built:
+
+- `fork_router.py` - no model at all. Answers from the compositor's window list
+  (the same fields niri IPC reports: app_id, title, is_focused, layout
+  column/row), a border-pixel sample, and per-window tesseract OCR.
+- `fork_infer.py` - stock SmolVLM-256M Q8 with inference-side changes only:
+  crop the named window to native size, inject the closed answer set (window
+  titles, app names, palette) into the prompt, constrain generation with a GBNF
+  grammar. Weights untouched.
+- `scene_meta.py` - dumps the scene graph for the eval scenes, so the router can
+  be measured with the metadata a real niri session provides. It refuses to
+  write a sidecar when the regenerated PNG differs from the file on disk, so a
+  mismatched graph cannot be used silently.
+
+eval2, 86 questions:
+
+| method | total | avg s/q | peak MiB |
+|--------|-------|---------|----------|
+| router (no model) | 84/86 | 0.5 | 81 |
+| OCR hybrid | 29/86 | 1.4 | 793 |
+| stock 256M @960px | 13/86 | 9.7 | 534 |
+| stock 256M + crop + candidates + grammar | 36/86 | 16.2 | 539 |
+| stock 500M @960px | see note | - | - |
+
+| family | stock 256M | +crop+cand+gram | router |
+|--------|-----------|-----------------|--------|
+| absent (refusal) | 0/8 | 0/8 | 8/8 |
+| app | 0/8 | 4/8 | 8/8 |
+| clock | 1/8 | 1/8 | 8/8 |
+| color | 0/8 | 3/8 | 8/8 |
+| color_neg | 7/8 | 8/8 | 8/8 |
+| count | 1/8 | 2/8 | 8/8 |
+| focus | 0/8 | 4/8 | 8/8 |
+| presence | 3/8 | 3/8 | 8/8 |
+| spatial | 0/8 | 6/8 | 8/8 |
+| text | 1/14 | 5/14 | 12/14 |
+
+Four findings:
+
+1. The inference-only fork is a real 2.8x on the model path (13 -> 36 of 86),
+   and it fixes exactly the families that need looking: spatial 0 -> 6/8,
+   focus 0 -> 4/8, app 0 -> 4/8, color 0 -> 3/8. Cost: 16.2 s/question against
+   9.7 s, because grammar validation and a longer prompt add per-token work.
+   On a 2010 i3 M370 that matters more than the accuracy does.
+2. It still cannot refuse. 0/8 on absent even with a grammar that offers "not
+   visible on the screen" as an option; the model emits a colour or a number
+   instead ("1.", "23.3.", "Nothing to Commend."). Counting stays at 2/8, the
+   clock at 1/8. Refusal and counting are what training buys; no prompt or
+   grammar bought them here.
+3. The router wins outright on this battery: 84/86, 20x faster than the tuned
+   model, 6.5x smaller, and it fails only on two browser URLs where tesseract
+   read `linuxkiller9000` as `lLinuxkiller9000`.
+4. eval3 makes the split explicit: the router answers 84/84 of the state, text
+   and refusal questions and 0/16 of the two visual families (a top-bar status
+   dot and a window progress bar), because those ask for colour in pixels that
+   neither metadata nor OCR carries. It says so instead of guessing. OCR hybrid
+   on eval3: 24/100.
+
+Caveats: every timing here is this sandbox (1 vCPU, 2 GB), not the N5010. The
+router's window metadata comes from `scene_meta.py`, which supplies the same
+fields niri IPC supplies in production, so these are "perfect metadata on
+synthetic scenes". fork_infer uses that metadata too, for crops and candidates.
