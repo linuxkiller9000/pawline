@@ -378,11 +378,18 @@ pub fn chat_with_image(http: &dyn Http, provider: &crate::providers::ChatProvide
     if let Some(why) = chat_block_reason(text) {
         return Err(PawError::Validation(format!("I did not send that: it {why}. Nothing was sent.")));
     }
+    // Image first, question second, on purpose. Measured 2026-11-28 against a
+    // warm llama-server (stock SmolVLM-256M Q8, sandbox 1 vCPU): the vision
+    // tower costs ~7.0 s per screenshot and runs again on every request whose
+    // prompt prefix differs. With the image first, the [image] prefix is shared,
+    // so a second question about the same screenshot costs 0.15-0.35 s instead
+    // of 7.0 s (cache_n=138). Text first shares nothing and pays the full
+    // encode every time. See docs/EXPERIMENTS.md 4k.
     let msgs = serde_json::json!([
         {"role": "system", "content": CHAT_SYSTEM},
         {"role": "user", "content": [
-            {"type": "text", "text": text.trim()},
-            image.content_part()
+            image.content_part(),
+            {"type": "text", "text": text.trim()}
         ]}
     ]);
     let body = serde_json::json!({"model": provider.model, "messages": msgs}).to_string();
@@ -745,6 +752,11 @@ mod tests {
         assert!(s[0].contains(r#""model":"smolvlm-500m""#), "{}", s[0]);
         assert!(s[0].contains(r#""type":"image_url""#) && s[0].contains("data:image/png;base64,"), "{}", s[0]);
         assert!(s[0].contains("what is in this picture"), "{}", s[0]);
+        // Image part before the text part: the vision prefix is then shared by
+        // every later question about the same screenshot (see chat_with_image).
+        let img_at = s[0].find(r#""type":"image_url""#).unwrap();
+        let txt_at = s[0].find(r#""type":"text""#).unwrap();
+        assert!(img_at < txt_at, "image part must come first: {}", s[0]);
         drop(s);
         assert!(chat_with_image(&P(&seen), &prov, &img, "my password is hunter2", &|| false, &|| true).is_err());
         assert_eq!(seen.borrow().len(), 1, "private text: nothing sent");
