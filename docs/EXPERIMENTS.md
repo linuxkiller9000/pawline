@@ -755,7 +755,21 @@ a real image still does). It had gone unnoticed because that test binary did not
 compile before this work: a stale `ChatOnline` initializer was missing its
 `provider` field, so none of the 168 tests in it had been running.
 
-Not verified here: the niri and slurp argv shapes are covered by unit tests but
-have not been run against a live niri or slurp, because this sandbox has neither.
-The first live check on the Dell should be one window question and one region
-question.
+What the niri command shape was checked against: niri's own IPC client
+(`src/ipc/client.rs`) handles `Screenshot`, `ScreenshotScreen` and
+`ScreenshotWindow` with a `path`, makes that path absolute, and sends the action
+over the socket; a published scripting note shows the working form
+`niri msg action screenshot-screen --show-pointer false --path /tmp/out.png` (or
+`screenshot-window`). Two consequences found there and now handled in code:
+
+- niri writes the file *after* the command returns. Pawline used to check
+  `exists()` once and could call a good capture a failure; it now removes the
+  target first and polls for a non-empty file for up to 5 s
+  (`wait_for_capture`, tested with a file that appears late and with an empty
+  one).
+- niri copies the capture to the clipboard as well as writing it. The window
+  card now says so, because that is a real side effect on the user's machine.
+
+Still not run against a live niri or slurp: this sandbox has neither, so the argv
+is covered by unit tests only. The first live check on the Dell should be one
+window question, one drawn-region question, and a glance at the clipboard.

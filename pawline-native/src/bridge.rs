@@ -244,24 +244,24 @@ fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str, share
     // captured is exactly what the card named: one window, the region the user
     // drew, or the whole screen.
     let dest = std::env::temp_dir().join(format!("pawline-screen-{}.png", std::process::id()));
-    let (cmd, whole_frame) = match share {
+    let cmd = match share {
         sc::ShareTarget::Window { id, .. } => match sc::window_capture_command(&sc::binary_on_path, &dest, *id) {
-            Some(c) => (c, false),
-            None => (sc::screen_capture_command(&sc::binary_on_path, &dest)?, true),
+            Some(c) => c,
+            None => sc::screen_capture_command(&sc::binary_on_path, &dest)?,
         },
         sc::ShareTarget::Region { x, y, w, h } => match sc::region_capture_command(&sc::binary_on_path, &dest, (*x, *y, *w, *h)) {
-            Some(c) => (c, false),
-            None => (sc::screen_capture_command(&sc::binary_on_path, &dest)?, true),
+            Some(c) => c,
+            None => sc::screen_capture_command(&sc::binary_on_path, &dest)?,
         },
-        sc::ShareTarget::WholeScreen => (sc::screen_capture_command(&sc::binary_on_path, &dest)?, true),
+        sc::ShareTarget::WholeScreen => sc::screen_capture_command(&sc::binary_on_path, &dest)?,
     };
-    if whole_frame && cmd[0] == "niri" {
-        return Err(PawError::Exec(
-            "niri's own screenshot action writes to its own folder and Pawline cannot find the file yet; install grim (`sudo pacman -S grim`) and ask again. Nothing was captured.".into()));
-    }
+    let _ = std::fs::remove_file(&dest);
     let status = std::process::Command::new(&cmd[0]).args(&cmd[1..]).status()
         .map_err(|e| PawError::Exec(format!("Could not run {}: {e}. Nothing was captured.", cmd[0])))?;
-    if !status.success() || !dest.exists() {
+    // niri writes the file after its command returns, so wait for it rather
+    // than checking once and calling a good capture a failure.
+    let arrived = status.success() && sc::wait_for_capture(&dest, std::time::Duration::from_secs(5));
+    if !arrived {
         return Err(PawError::Exec(format!("{} did not produce a screenshot. Nothing was captured.", cmd[0])));
     }
     // The only copy of the pixels; deleted when this guard drops.

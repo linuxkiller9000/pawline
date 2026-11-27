@@ -65,12 +65,40 @@ pub fn screen_capture_command(has: &dyn Fn(&str) -> bool, dest: &Path) -> Result
         return Ok(vec!["wayshot".into(), "--file".into(), d]);
     }
     if has("niri") {
-        // niri writes its own file; the caller moves it to `dest`.
-        return Ok(vec!["niri".into(), "msg".into(), "action".into(), "screenshot-screen".into()]);
+        // `--path` writes straight to `dest`; niri does it asynchronously after
+        // the command returns, so the caller waits for a non-empty file.
+        return Ok(vec![
+            "niri".into(),
+            "msg".into(),
+            "action".into(),
+            "screenshot-screen".into(),
+            "--show-pointer".into(),
+            "false".into(),
+            "--path".into(),
+            d,
+        ]);
     }
     Err(PawError::Exec(
         "I could not find a way to take a screenshot: none of grim, wayshot or niri are installed. On Arch, `sudo pacman -S grim` is the simple one. Nothing was captured.".into(),
     ))
+}
+
+
+/// niri writes a screenshot file *after* its command returns, so an immediate
+/// `exists()` check races it. Poll for a non-empty file instead of failing.
+pub fn wait_for_capture(path: &Path, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(m) = std::fs::metadata(path) {
+            if m.len() > 0 {
+                return true;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 /// A captured screenshot that deletes itself. The only copy of the pixels.
@@ -788,7 +816,7 @@ impl ShareTarget {
                 let what = if *strip_top { "the top edge (the border) of the" } else { "only the" };
                 let name = if title.is_empty() { app.clone() } else { format!("\"{title}\" window ({app})") };
                 let name = if title.is_empty() { format!("{app} window") } else { name };
-                format!("It captures {what} {name}, not the whole screen, then deletes the capture.")
+                format!("It captures {what} {name}, not the whole screen, then deletes the capture. niri also puts a copy on your clipboard.")
             }
             ShareTarget::Region { x, y, w, h } => format!(
                 "It captures only the region you drew ({w}x{h} at {x},{y}), not the whole screen, then deletes the capture."
@@ -1173,6 +1201,27 @@ mod tests {
             Some(PickRequest::UnknownWindow("nosuchapp".into()))
         );
         assert_eq!(share_target_from_phrase("what is on my screen", q, &wins), None);
+    }
+
+
+    #[test]
+    fn capture_wait_covers_niris_async_write() {
+        let dir = std::env::temp_dir().join(format!("pawline-wait-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("late.png");
+        let _ = std::fs::remove_file(&p);
+        assert!(!wait_for_capture(&p, std::time::Duration::from_millis(60)));
+        let p2 = p.clone();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            std::fs::write(&p2, b"png").unwrap();
+        });
+        assert!(wait_for_capture(&p, std::time::Duration::from_millis(2000)));
+        t.join().unwrap();
+        let e = dir.join("empty.png");
+        std::fs::write(&e, b"").unwrap();
+        assert!(!wait_for_capture(&e, std::time::Duration::from_millis(40)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
 }
