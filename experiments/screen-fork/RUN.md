@@ -91,3 +91,17 @@ now runs a light config: 448px images (`_small()` in the data cell), ~3000 rows
   mismatched image feature type breaks the concat.
 - the fp16 GradScaler crash: trainable LoRA params are cast to fp32 after the
   trainer is built, while the frozen base stays fp16.
+
+## Evaluating a fork GGUF (one command)
+
+`./fork_eval.sh /path/fork.gguf /path/mmproj-fork.gguf` runs the three
+measurements that decide the gate: eval2 (86 state/text/refusal questions),
+eval3's two visual families, and those families again at the training scale
+(the light config trained on 448px images, so SCALE=0.23 matches training while
+the default 0.5 matches how the app feeds stock models). It prints the
+reference points next to the results.
+
+Before trusting any of it, run leakage_check.py against whatever training set
+the run actually used:
+
+  python3 leakage_check.py --train <train dir 1> --train <train dir 2> --eval /tmp/synth/eval3
