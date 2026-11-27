@@ -210,6 +210,20 @@ fn screen_vision_provider() -> Result<pawline_core::providers::ChatProvider, Paw
 
 fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str) -> Result<String, PawError> {
     use pawline_core::screencap as sc;
+    // Route 0, ahead of any capture: window state (count, focus, layout order,
+    // which app is where, is X open) is exact in the compositor's own window
+    // list, so answer it locally with no screenshot and no model. Measured on
+    // the fork's strict battery (docs/EXPERIMENTS.md 4g): 84/86 for the
+    // metadata route against 36/86 for the best prompt/grammar-tuned SmolVLM
+    // and 29/86 for the OCR hybrid, at a fraction of the time. Questions this
+    // cannot settle fall through to the OCR/vision path unchanged.
+    if let Some(wins) = sc::niri_windows() {
+        if let Some((answer, label)) = sc::answer_from_metadata(question, &wins) {
+            return Ok(format!(
+                "From your open windows ({label}, read locally, no screenshot):\n{answer}"
+            ));
+        }
+    }
     // Same rule as chat and images: the confirmed card named a provider.
     let provider = screen_vision_provider()?;
     let now = provider.spec();
@@ -1046,12 +1060,22 @@ Nothing is sent from your machine, and after setup Laya works fully offline. You
                     Ok(p) => p,
                     Err(e) => return reply("message", e.to_string()),
                 };
+                // The card tells the truth about what will happen: window
+                // questions are answered from the compositor's window list
+                // with no capture, so say that instead of promising pixels.
+                let metadata_first = pawline_core::screencap::classify_metadata_question(&question)
+                    .is_some()
+                    && pawline_core::screencap::binary_on_path("niri");
                 let op = Operation::ScreenQA { provider: provider.spec(), question };
                 let summary = format!("1. {}", op.describe());
                 state.pending = Some(Plan {
                     ops: vec![op],
                     needs_confirmation: true,
-                    confirmation_reasons: vec!["This would capture your whole screen, answer from it, then delete the capture.".into()],
+                    confirmation_reasons: vec![if metadata_first {
+                        "This reads your open window titles and positions locally to answer, and takes no screenshot. It only falls back to capturing the screen if the question needs pixels.".into()
+                    } else {
+                        "This would capture your whole screen, answer from it, then delete the capture.".into()
+                    }],
                     assist_derived: false,
                     notes: vec![],
                 });

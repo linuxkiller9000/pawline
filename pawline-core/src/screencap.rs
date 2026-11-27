@@ -132,6 +132,203 @@ pub fn route_question(kind: ScreenQuestionKind, ocr_chars: usize, vision_availab
     }
 }
 
+// ---------- compositor metadata route: no capture, no model ----------
+
+/// One window as the compositor reports it (`niri msg --json windows`).
+///
+/// This is the same information the synthetic eval harness in
+/// experiments/screen-fork derives from its scene graph, and it is exact:
+/// app, title, focus and the window's place in the layout, with no pixels
+/// read and nothing sent anywhere. On the fork's strict battery
+/// (docs/EXPERIMENTS.md 4g) metadata answers scored 84/86 against 36/86 for
+/// a prompt- and grammar-tuned SmolVLM-256M, at a fraction of the time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowInfo {
+    pub app_id: String,
+    pub title: String,
+    pub focused: bool,
+    /// niri's scrolling-layout position: column is left-to-right, row is
+    /// top-to-bottom. Stacked windows share a column and differ by row.
+    pub column: i64,
+    pub row: i64,
+}
+
+impl WindowInfo {
+    /// "org.gnome.Nautilus" -> "Nautilus", "kitty" -> "Kitty".
+    pub fn app_name(&self) -> String { app_name_from_id(&self.app_id) }
+}
+
+pub fn app_name_from_id(app_id: &str) -> String {
+    let last = app_id.rsplit(['.', '/']).next().unwrap_or(app_id);
+    let mut c = last.chars();
+    match c.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+        None => app_id.to_string(),
+    }
+}
+
+/// Parse `niri msg --json windows`. Unknown fields are ignored and missing
+/// ones degrade to empty/zero, so a niri version change costs one answer
+/// instead of the whole feature.
+pub fn parse_niri_windows(json: &str) -> Result<Vec<WindowInfo>, PawError> {
+    let v: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| PawError::Validation(format!("Could not read the window list from niri ({e}).")))?;
+    let arr = v.as_array().ok_or_else(|| {
+        PawError::Validation("The window list from niri was not a list.".into())
+    })?;
+    Ok(arr
+        .iter()
+        .map(|w| {
+            let pos = w.get("layout").and_then(|l| l.get("pos_in_scrolling_layout"));
+            WindowInfo {
+                app_id: w.get("app_id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                title: w.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                focused: w.get("is_focused").and_then(|x| x.as_bool()).unwrap_or(false),
+                column: pos.and_then(|p| p.get(0)).and_then(|x| x.as_i64()).unwrap_or(0),
+                row: pos.and_then(|p| p.get(1)).and_then(|x| x.as_i64()).unwrap_or(0),
+            }
+        })
+        .collect())
+}
+
+/// The window list from niri's IPC. `None` means "niri is not installed, not
+/// running, or its output did not parse" and the caller falls back to the
+/// pixel path; it never means "no windows are open".
+pub fn niri_windows() -> Option<Vec<WindowInfo>> {
+    if !binary_on_path("niri") {
+        return None;
+    }
+    let out = std::process::Command::new("niri")
+        .args(["msg", "--json", "windows"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    parse_niri_windows(&text).ok().filter(|w| !w.is_empty())
+}
+
+/// A question the compositor answers exactly, with no pixels read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetadataQuestion {
+    Count,
+    Focus,
+    Leftmost,
+    Rightmost,
+    LeftmostApp,
+    RightmostApp,
+    /// Is a window of this app open? Carries the lowercased name as asked.
+    Presence(String),
+}
+
+/// App names people say, mapped to the app_ids they mean. A name outside
+/// this table only ever produces a "yes" (when it matches a real window);
+/// it never produces a confident "no", because a wrong "no" is worse than
+/// falling through to the pixel path.
+const APP_ALIASES: &[(&str, &[&str])] = &[
+    ("terminal", &["kitty", "alacritty", "foot", "wezterm", "terminal", "konsole", "xterm"]),
+    ("browser", &["firefox", "chromium", "chrome", "brave", "epiphany", "librewolf"]),
+    ("editor", &["neovim", "vim", "code", "code-oss", "helix", "emacs", "zed"]),
+    ("files", &["nautilus", "dolphin", "thunar", "nemo", "pcmanfm"]),
+    ("mail", &["thunderbird", "evolution", "geary"]),
+    ("chat", &["signal", "telegram", "discord", "element", "fractal"]),
+];
+
+fn presence_target(q: &str) -> Option<String> {
+    let rest = ["is there a ", "is there an ", "do i have a ", "do i have "]
+        .iter()
+        .find_map(|p| q.strip_prefix(p))?;
+    let rest = rest.trim().trim_end_matches('?').trim();
+    let name = ["window open", "window", "open"]
+        .iter()
+        .find_map(|s| rest.strip_suffix(s))
+        .unwrap_or(rest)
+        .trim();
+    if name.is_empty() { None } else { Some(name.to_string()) }
+}
+
+pub fn classify_metadata_question(question: &str) -> Option<MetadataQuestion> {
+    let q = question.to_lowercase();
+    let q = q.trim().trim_end_matches(['?', '.', '!']);
+    if q.contains("how many windows") || q.contains("how many app windows")
+        || q.contains("count the windows") || q.contains("count the open windows")
+    {
+        return Some(MetadataQuestion::Count);
+    }
+    if (q.contains("which window") || q.contains("what window") || q.contains("name the window"))
+        && (q.contains("focused") || q.contains("active"))
+    {
+        return Some(MetadataQuestion::Focus);
+    }
+    if q.contains("focused window") && q.contains("title") {
+        return Some(MetadataQuestion::Focus);
+    }
+    let wants_app = q.contains("app") || q.contains("program") || q.contains("application");
+    if q.contains("leftmost") || q.contains("far left") || q.contains("on the left") {
+        return Some(if wants_app { MetadataQuestion::LeftmostApp } else { MetadataQuestion::Leftmost });
+    }
+    if q.contains("rightmost") || q.contains("far right") || q.contains("on the right") {
+        return Some(if wants_app { MetadataQuestion::RightmostApp } else { MetadataQuestion::Rightmost });
+    }
+    presence_target(q).map(MetadataQuestion::Presence)
+}
+
+fn windows_in_layout_order(wins: &[WindowInfo]) -> Vec<&WindowInfo> {
+    let mut v: Vec<&WindowInfo> = wins.iter().collect();
+    v.sort_by_key(|w| (w.column, w.row));
+    v
+}
+
+/// Answer from the window list, or `None` when the question needs pixels or
+/// the list cannot settle it. `None` is a fall-through, not a failure: the
+/// caller then runs the OCR/vision path and refuses if neither is possible.
+pub fn answer_from_metadata(question: &str, wins: &[WindowInfo]) -> Option<(String, &'static str)> {
+    let kind = classify_metadata_question(question)?;
+    if wins.is_empty() {
+        return None;
+    }
+    match kind {
+        MetadataQuestion::Count => Some((wins.len().to_string(), "open windows")),
+        MetadataQuestion::Focus => wins
+            .iter()
+            .find(|w| w.focused)
+            .map(|w| (w.title.clone(), "focused window")),
+        MetadataQuestion::Leftmost => {
+            let v = windows_in_layout_order(wins);
+            Some((v.first()?.title.clone(), "leftmost window"))
+        }
+        MetadataQuestion::Rightmost => {
+            let v = windows_in_layout_order(wins);
+            Some((v.last()?.title.clone(), "rightmost window"))
+        }
+        MetadataQuestion::LeftmostApp => {
+            let v = windows_in_layout_order(wins);
+            Some((v.first()?.app_name(), "leftmost app"))
+        }
+        MetadataQuestion::RightmostApp => {
+            let v = windows_in_layout_order(wins);
+            Some((v.last()?.app_name(), "rightmost app"))
+        }
+        MetadataQuestion::Presence(name) => {
+            let alias = APP_ALIASES.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+            let hit = wins.iter().any(|w| {
+                let id = w.app_id.to_lowercase();
+                let title = w.title.to_lowercase();
+                match alias {
+                    Some(names) => names.iter().any(|n| id.contains(n) || title.contains(n)),
+                    None => id.contains(&name) || title.contains(&name),
+                }
+            });
+            if hit || alias.is_some() {
+                Some((if hit { "yes".into() } else { "no".into() }, "open windows"))
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// Decode a PNG to 8-bit RGB(A)/gray pixels. Palette and 16-bit inputs are
 /// expanded/stripped by the decoder.
 fn decode_png(png: &[u8]) -> Result<(Vec<u8>, u32, u32, png::ColorType), PawError> {
@@ -391,6 +588,49 @@ mod tests {
         assert!(card.contains("llama.cpp on this computer"));
         assert!(card.contains("deleted"));
         assert!(card.contains("before you confirm"));
+    }
+
+    const SAMPLE_WINDOWS: &str = r#"[
+      {"id":1,"title":"Home - Nautilus","app_id":"org.gnome.Nautilus","is_focused":false,"layout":{"pos_in_scrolling_layout":[0,1],"tile_size":[600,900],"window_size":[598,898]}},
+      {"id":2,"title":"Inbox - Thunderbird","app_id":"thunderbird","is_focused":true,"layout":{"pos_in_scrolling_layout":[1,1]}},
+      {"id":3,"title":"~","app_id":"kitty","is_focused":false,"layout":{"pos_in_scrolling_layout":[2,1]}}
+    ]"#;
+
+    #[test]
+    fn parses_niri_window_list() {
+        let w = parse_niri_windows(SAMPLE_WINDOWS).unwrap();
+        assert_eq!(w.len(), 3);
+        assert_eq!(w[0].app_id, "org.gnome.Nautilus");
+        assert_eq!(w[0].app_name(), "Nautilus");
+        assert_eq!(w[2].column, 2);
+        assert!(w[1].focused);
+        assert_eq!(w[1].app_name(), "Thunderbird");
+        // a niri that answers with something else is an error, not an empty screen
+        assert!(parse_niri_windows("not json").is_err());
+        assert!(parse_niri_windows("{}").is_err());
+        // missing fields degrade instead of failing the whole list
+        let w = parse_niri_windows(r#"[{"title":"x"}]"#).unwrap();
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].app_id, "");
+    }
+
+    #[test]
+    fn metadata_answers_window_questions_exactly() {
+        let wins = parse_niri_windows(SAMPLE_WINDOWS).unwrap();
+        let ask = |q: &str| answer_from_metadata(q, &wins);
+        assert_eq!(ask("How many windows are open?").unwrap().0, "3");
+        assert_eq!(ask("Which window is focused?").unwrap().0, "Inbox - Thunderbird");
+        assert_eq!(ask("Which window is on the far left?").unwrap().0, "Home - Nautilus");
+        assert_eq!(ask("What app is open in the far right window?").unwrap().0, "Kitty");
+        assert_eq!(ask("Is there a Nautilus window open?").unwrap().0, "yes");
+        assert_eq!(ask("Is there a browser window open?").unwrap().0, "no");
+        // an app name outside the alias table must never produce a confident "no"
+        assert_eq!(ask("Is there a Spotify window open?"), None);
+        // questions the compositor cannot answer fall through to pixels/OCR
+        assert_eq!(ask("What color is the border of the focused window?"), None);
+        assert_eq!(ask("Read the top email subject."), None);
+        // no windows at all is not an answer to "how many"
+        assert_eq!(answer_from_metadata("How many windows are open?", &[]), None);
     }
 
     #[test]
