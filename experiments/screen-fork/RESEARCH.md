@@ -78,3 +78,21 @@ free desktop-screenshot QA set that I could find.
 | OCR hybrid (tesseract + qwen2.5-0.5b) | ~10 s | correct windows + content, no hallucination on text questions; blind to visual questions |
 
 Details and the boundary test in docs/EXPERIMENTS.md section 4e.
+
+## Update 2026-11-27: the synthetic desktop dataset + fixed eval battery exist
+
+- `synth_desktop.py` renders niri-style desktop scenes (tiled columns,
+  waybar, focus border, five app types with controlled text corpora) from
+  a scene graph, so every QA label is exact - no annotation noise.
+  Families: count, focus, color, clock, spatial, app, text, presence.
+  Deterministic per seed; train seeds 0+, eval seeds 10000+ (no overlap).
+  ~78 ms/scene in the sandbox, so 700 scenes is minutes on Colab.
+  Code MIT; generated data CC BY 4.0 "Pawline synthetic desktop dataset".
+- `finetune_colab.ipynb` now mixes this set 1:1 with the ScreenQA subset
+  (ScreenQA alone is Android; there is no public desktop dataset).
+- `eval_battery.py` is the fixed comparison: same held-out scenes and
+  questions for stock 256M, stock 500M, the OCR hybrid, and the fork
+  (`--method fork --model ... --mmproj ...`), scored by normalized
+  containment against the exact labels, with per-family breakdown.
+- `RUN.md` is the one-page how-to-run (Colab T4 -> GGUF -> battery ->
+  adopt only if it beats both baselines).
