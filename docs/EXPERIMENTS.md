@@ -118,9 +118,25 @@ Findings:
   quadrant-level attribution is unreliable.
 - Sandbox timings are a 1-thread VM floor, not Dell numbers.
 
-Recommendation: keep SmolVLM-256M as the default (free, tiny, correct on
-simple asks). Quality headroom candidate for a later experiment:
-ggml-org SmolVLM-500M-Instruct-GGUF, same drop-in path.
+## 4c. SmolVLM-500M comparison (live, same harness, temperature 0.0)
+
+Same probes re-run on ggml-org SmolVLM-500M-Instruct Q8_0 (model 437 MB,
+mmproj 109 MB vs 175 MB / 104 MB for the 256M). Identical token counts
+(same tiling), ~25% slower wall on the 1-thread sandbox:
+
+| probe | 256M answer | 500M answer |
+|-------|-------------|-------------|
+| 256px simple description (9.4s / 11.2s) | "a blue square" (background missed) | "a single blue square as its background" (also imperfect) |
+| 1024px quadrant colors (24.2s / 30.4s) | 3/4 colors (yellow read as black), 1/3 shapes | 4/4 colors, all 3 shapes found and placed (square read as "rectangle"); one repeated-triangle slip |
+| 1024px multi-part spatial question (24.4s / 5.0s cached) | vague, wrong | 4/4 colors, 3/4 quadrants fully correct, one hallucinated extra triangle |
+| 2048px colors (80.8s / 95.2s) | colors + 1 hallucinated detail | quadrants described correctly up to the 60-token cutoff |
+
+Verdict: the 500M is a straight quality upgrade on spatial/multi-object
+questions (the 256M failure mode from 4b) for +370 MB on disk and ~25%
+latency on a 1-thread floor. Same llama.cpp drop-in path, same provider
+code, free download. The default-model choice (256M named as "the default
+only one") is a product call: the measured recommendation is 500M for
+machines that can hold it, 256M for the tightest installs.
 
 ## 5. Laya
 
