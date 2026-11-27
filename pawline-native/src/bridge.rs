@@ -1195,12 +1195,30 @@ Nothing is sent from your machine, and after setup Laya works fully offline. You
                 // question is about when it points at one; otherwise the card
                 // offers the whole screen and names the window option.
                 use pawline_core::screencap::{CropChoice, ShareTarget};
+                // Which crop wins depends on the route and the screen size
+                // (docs/EXPERIMENTS.md 4j). At 1366x768 a window crop loses to
+                // the native frame on visual questions (5/16 against 11/16),
+                // while a window crop is what makes the OCR text route better
+                // (8/16 against 7/16, and faster). So the window is narrowed for
+                // text questions only; a visual question keeps the frame unless
+                // it asks about a border, where the magnified strip is the only
+                // thing that works.
+                let visual = matches!(
+                    pawline_core::screencap::classify_screen_question(&question),
+                    pawline_core::screencap::ScreenQuestionKind::Visual
+                );
                 let share = match pawline_core::screencap::niri_windows() {
-                    Some(wins) if pawline_core::screencap::names_a_window(&question, &wins) => {
+                    Some(wins) if !visual && pawline_core::screencap::names_a_window(&question, &wins) => {
                         match pawline_core::screencap::crop_for_question(&question, &wins) {
                             CropChoice::Window { id, title, app } => ShareTarget::Window { id, title, app, strip_top: false },
                             CropChoice::BorderStrip { id, title, app } => ShareTarget::Window { id, title, app, strip_top: true },
                             CropChoice::FullFrame => ShareTarget::WholeScreen,
+                        }
+                    }
+                    Some(wins) if visual => {
+                        match pawline_core::screencap::crop_for_question(&question, &wins) {
+                            CropChoice::BorderStrip { id, title, app } => ShareTarget::Window { id, title, app, strip_top: true },
+                            _ => ShareTarget::WholeScreen,
                         }
                     }
                     _ => ShareTarget::WholeScreen,

@@ -736,6 +736,43 @@ This is why the share picker pays twice: a window capture is what OCR sees, so
 picking the window improves the text route at the same time as the visual one,
 with no extra work.
 
+### At his resolution: 1366x768 changes the answer
+
+Every number above was measured on 1920x1080 scenes. The N5010 is 1366x768, so
+the same 16 visual questions were re-asked on resampled copies of the same scenes
+(`rescale_set.py`; caveat: text is resampled, not re-rendered, so it is slightly
+softer than a real 1366x768 desktop - the indicator and progress elements are
+solid shapes and are not affected).
+
+| crop source at 1366x768 | indicator | progress | total | s/q |
+|---|---|---|---|---|
+| full frame at native size | 5/8 | 6/8 | 11/16 | 23.8 |
+| window crop | 1/8 | 4/8 | 5/16 | 8.0 |
+| tight 500px box on the thing | 5/8 | 7/8 | 12/16 | 7.2 |
+
+This reverses the 1920 conclusion, and the reason is instructive: at 1920 the
+"full frame" baseline was downscaled to 960px, which destroyed the small
+elements, so any crop looked like a win. At 1366 the frame goes in at native
+size, the elements survive, and the window crop becomes the *worst* option
+because a window on a 1366 screen is only about 600x400 - less detail on the
+thing than a 500px box aimed at it, and less context than the frame.
+
+What survives at both resolutions: a tight box on the thing is the best and
+fastest crop (12/16 at 7.2 s/q), and the frame at native size is accurate but
+expensive (23.8 s/q, 3.3x slower). So on his machine:
+
+- text questions: narrow to the window (8/16 against 7/16, and faster, because
+  the text model gets less to ignore);
+- border colour: the magnified strip, not the window;
+- everything else visual: the native frame, unless he draws a tight region,
+  which is the best of both.
+
+The shipped route now follows that: the window is narrowed for text questions
+only, a visual question keeps the frame unless it asks about a border, and the
+card offers "pick a region" for the tight case. Note that the frame is still
+capped at 1280px wide, so a 1366x768 capture is sent at 1280 - close to native,
+not identical, and worth re-measuring on the Dell itself.
+
 ### What shipped (branch work/llm-vision-experiments)
 
 - `screencap::ShareTarget` (whole screen, one window with an optional top strip,
