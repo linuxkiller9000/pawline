@@ -67,3 +67,15 @@ Rico screenshots behind it: Rico research terms
 (interactionmining.org/archive/rico/copyright.txt). Synthetic desktop
 set: CC BY 4.0 "Pawline synthetic desktop dataset". WebSight if added:
 CC-BY-4.0 + disclose its use when releasing a model.
+
+## Colab gotchas (measured on a free T4, 2026-11-27)
+
+Three fixes the notebook needed that the sandbox did not surface:
+
+- `apt-get install -y fonts-dejavu-core` before `synth_desktop.py`. Colab ships
+  no DejaVu and the generator renders every scene with it (first cell of the
+  data section does this).
+- transformers 5.x removed `AutoModelForVision2Seq`. Use
+  `AutoModelForImageTextToText` - same class, new name.
+- The free T4 has no bf16. Load the base in fp16 (`dtype=torch.float16`) and
+  set `fp16=True` in `SFTConfig`. bf16 errors or falls back to fp32 and OOMs.
