@@ -587,6 +587,55 @@ pub fn window_for_question<'a>(question: &str, wins: &'a [WindowInfo]) -> Option
 }
 
 
+
+/// What a picker phrase asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickRequest {
+    /// Draw a rectangle (the caller runs slurp and then knows the rect).
+    Region,
+    /// A target that is already known from the window list.
+    Target(ShareTarget),
+    /// The user named a window that is not open; nothing is captured.
+    UnknownWindow(String),
+}
+
+/// Parse a picker phrase into what to share. `None` means the input is not a
+/// picker phrase at all, so the caller keeps its normal handling. The phrases
+/// are the ones the confirm card offers, so what the card promises is what the
+/// user can actually say.
+pub fn share_target_from_phrase(low: &str, question: &str, wins: &[WindowInfo]) -> Option<PickRequest> {
+    let low = low.trim().trim_end_matches(['.', '!']).trim();
+    if matches!(low, "pick a region" | "share a region" | "draw a region" | "pick region" | "share region") {
+        return Some(PickRequest::Region);
+    }
+    if matches!(low, "share the whole screen" | "share my whole screen" | "share the screen" | "share my screen") {
+        return Some(PickRequest::Target(ShareTarget::WholeScreen));
+    }
+    if matches!(low, "share that window" | "share this window" | "share the focused window") {
+        return Some(PickRequest::Target(match window_for_question(question, wins) {
+            Some(w) => ShareTarget::Window { id: w.id, title: w.title.clone(), app: w.app_name(), strip_top: false },
+            None => ShareTarget::WholeScreen,
+        }));
+    }
+    let named = low
+        .strip_prefix("share only the ")
+        .or_else(|| low.strip_prefix("share the "))
+        .and_then(|rest| rest.strip_suffix(" window"))
+        .map(|app| app.trim().to_string())?;
+    Some(match wins
+        .iter()
+        .find(|w| w.app_name().to_lowercase() == named || w.title.to_lowercase().contains(&named))
+    {
+        Some(w) => PickRequest::Target(ShareTarget::Window {
+            id: w.id,
+            title: w.title.clone(),
+            app: w.app_name(),
+            strip_top: false,
+        }),
+        None => PickRequest::UnknownWindow(named),
+    })
+}
+
 /// True when the question itself points at one window: it names a window's app
 /// or title, or says "focused window" / "this window". Only then does the route
 /// narrow the capture to that window on its own; otherwise the card offers the
@@ -1095,6 +1144,35 @@ mod tests {
         assert!(!q.contains("inbox"), "a title must not leave the machine: {q}");
         assert!(fallback_search_query("what is this", &[]).is_none());
         assert!(fallback_search_query("", &[]).is_none());
+    }
+
+
+    #[test]
+    fn picker_phrases_match_what_the_card_offers() {
+        let wins = parse_niri_windows(SAMPLE_WINDOWS).unwrap();
+        let q = "what colour is that button";
+        assert_eq!(share_target_from_phrase("pick a region", q, &wins), Some(PickRequest::Region));
+        assert_eq!(
+            share_target_from_phrase("share the whole screen", q, &wins),
+            Some(PickRequest::Target(ShareTarget::WholeScreen))
+        );
+        assert_eq!(
+            share_target_from_phrase("share only the kitty window", q, &wins),
+            Some(PickRequest::Target(ShareTarget::Window {
+                id: Some(3), title: "~".into(), app: "Kitty".into(), strip_top: false
+            }))
+        );
+        assert_eq!(
+            share_target_from_phrase("share that window", q, &wins),
+            Some(PickRequest::Target(ShareTarget::Window {
+                id: Some(2), title: "Inbox - Thunderbird".into(), app: "Thunderbird".into(), strip_top: false
+            }))
+        );
+        assert_eq!(
+            share_target_from_phrase("share only the nosuchapp window", q, &wins),
+            Some(PickRequest::UnknownWindow("nosuchapp".into()))
+        );
+        assert_eq!(share_target_from_phrase("what is on my screen", q, &wins), None);
     }
 
 }

@@ -726,6 +726,14 @@ not from the window.
 - `crop_png_top` for the border strip, and `crop_for_question` /
   `names_a_window` for choosing between window, strip and frame from the window
   list alone (no pointer needed).
+- The picker's second half: `share_target_from_phrase` (core, tested) turns the
+  phrases the card offers into a target - "share the whole screen", "share that
+  window", "share only the kitty window", "pick a region" - and the bridge
+  re-plans the same question with that target behind the ordinary confirm card.
+  "pick a region" runs slurp and captures exactly the rectangle the user draws;
+  a named window that is not open is named back and nothing is captured. The
+  region is drawn only after a screen question exists, because the phrase
+  re-plans that question rather than starting a new one.
 - Unsure-answer fallback: `answer_is_unsure` and `fallback_search_query` build a
   short query from the question's own words plus the app name (never screen text,
   never a window title), and the reply offers "search it". That builds a card

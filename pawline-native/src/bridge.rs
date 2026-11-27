@@ -89,6 +89,9 @@ static LAST_CHAT_ANSWER: std::sync::Mutex<Option<String>> = std::sync::Mutex::ne
 /// The short lookup text offered when a screen answer was unsure. Memory only:
 /// it is never written anywhere, and it is cleared by the next screen question.
 static LAST_SCREEN_SEARCH: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// The last screen question, so "pick a region" or "share only the X window"
+/// can re-plan the same question with a different share target. Memory only.
+static LAST_SCREEN_QUESTION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// Longest the app waits for the local model. Not tuned against measured inference times; a timeout switches the assist off for the session.
 const ASSIST_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -340,6 +343,57 @@ static WEATHER_PICK: std::sync::Mutex<Option<Vec<pawline_core::weather::Place>>>
 /// "search it" after an unsure screen answer: build the lookup card. Nothing is
 /// sent until that card is approved, and the card names the exact text that
 /// would leave the machine (a short query, never pixels, never screen text).
+
+/// The picker's second half: after a screen question, "pick a region",
+/// "share only the X window" or "share the whole screen" re-plans that same
+/// question with the chosen target. Every path ends in the ordinary confirm
+/// card, so nothing is captured before the user sees what it will be.
+pub fn screen_share_repick(input: &str, state: &mut UiState) -> Option<UiReply> {
+    use pawline_core::screencap as sc;
+    let question = LAST_SCREEN_QUESTION.lock().unwrap().clone()?;
+    let wins = sc::niri_windows().unwrap_or_default();
+    let req = sc::share_target_from_phrase(input, &question, &wins)?;
+    if let sc::PickRequest::UnknownWindow(app) = &req {
+        return Some(reply(
+            "message",
+            format!("I do not see a window called \"{app}\". Nothing was captured. Say \"share the whole screen\" to send the frame instead."),
+        ));
+    }
+    let provider = match screen_vision_provider() {
+        Ok(p) => p,
+        Err(e) => return Some(reply("message", e.to_string())),
+    };
+    let share = match req {
+        sc::PickRequest::Target(t) => t,
+        sc::PickRequest::UnknownWindow(_) => unreachable!("handled above"),
+        sc::PickRequest::Region => {
+            let Some(cmd) = sc::slurp_command(&sc::binary_on_path) else {
+                return Some(reply("message", "Drawing a region needs slurp, which is not installed. On Arch: `sudo pacman -S slurp`. Nothing was captured.".into()));
+            };
+            let out = match std::process::Command::new(&cmd[0]).args(&cmd[1..]).output() {
+                Ok(o) => o,
+                Err(e) => return Some(reply("message", format!("Could not start slurp ({e}). Nothing was captured."))),
+            };
+            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            let Some((x, y, w, h)) = sc::parse_slurp_geometry(&text) else {
+                return Some(reply("message", "No region was drawn, so nothing was captured and nothing was sent.".into()));
+            };
+            sc::ShareTarget::Region { x, y, w, h }
+        }
+    };
+    let op = Operation::ScreenQA { provider: provider.spec(), question, share: share.clone() };
+    let summary = format!("1. {}", op.describe());
+    state.pending = Some(Plan {
+        ops: vec![op],
+        needs_confirmation: true,
+        confirmation_reasons: vec![share.describe()],
+        assist_derived: false,
+        notes: vec![],
+    });
+    state.pending_request = None;
+    Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) })
+}
+
 pub fn screen_search_offer(input: &str, state: &mut UiState) -> Option<UiReply> {
     let low = input.trim().to_lowercase();
     let low = low.trim_end_matches(['.', '!']).trim();
@@ -943,6 +997,9 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     if let Some(r) = weather_pick(input) {
         return r;
     }
+    if let Some(r) = screen_share_repick(input, state) {
+        return r;
+    }
     if let Some(r) = screen_search_offer(input, state) {
         return r;
     }
@@ -1153,6 +1210,7 @@ Nothing is sent from your machine, and after setup Laya works fully offline. You
                         .map(|w| format!(" To send only one window instead, say \"share only the {} window\" and the card will name it.", w.app_name())),
                     _ => None,
                 };
+                *LAST_SCREEN_QUESTION.lock().unwrap() = Some(question.clone());
                 let op = Operation::ScreenQA { provider: provider.spec(), question, share: share.clone() };
                 let summary = format!("1. {}", op.describe());
                 state.pending = Some(Plan {
@@ -3246,6 +3304,26 @@ mod memory_tests {
     }
 
     #[test]
+
+    #[test]
+
+    #[test]
+    fn share_picker_repicks_the_same_question_behind_a_card() {
+        let root = org_root("sharepick1");
+        let mut st = new_state(root);
+        *LAST_SCREEN_QUESTION.lock().unwrap() = None;
+        assert!(screen_share_repick("share the whole screen", &mut st).is_none());
+
+        *LAST_SCREEN_QUESTION.lock().unwrap() = Some("what colour is that button".into());
+        let r = screen_share_repick("share only the nosuchapp window", &mut st).unwrap();
+        assert_eq!(r.kind, "message", "{}", r.text);
+        assert!(r.text.contains("nosuchapp") && st.pending.is_none(), "{}", r.text);
+
+        let r = screen_share_repick("share the whole screen", &mut st).unwrap();
+        assert_eq!(r.kind, "message", "{}", r.text);
+        assert!(r.text.contains("runner on this computer") && st.pending.is_none(), "{}", r.text);
+        *LAST_SCREEN_QUESTION.lock().unwrap() = None;
+    }
 
     #[test]
     fn only_image_files_get_an_image_card() {
