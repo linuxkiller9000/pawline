@@ -58,11 +58,17 @@ else
     echo "server: $VISION_URL"
     curl -fsS -m 2 "$VISION_URL/props" 2>/dev/null | grep -o '"model_path":"[^"]*"' | sed 's/^/  /'
     } >> "$OUT" || true
+    echo "  nproc: $(nproc)" >> "$OUT"
     vision_probe() {
-        name="$1"; png="$2"; prompt="$3"
+        name="$1"; png="$2"; prompt="$3"; order="${4:-image}"
         b64=$(base64 -w0 "$png")
-        printf '{"messages":[{"role":"user","content":[{"type":"text","text":"%s"},{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}]}],"max_tokens":60,"temperature":0}' \
-            "$prompt" "$b64" > "$TMPV/body.json"
+        if [ "$order" = "text" ]; then
+            parts=$(printf '{"type":"text","text":"%s"},{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}' "$prompt" "$b64")
+        else
+            parts=$(printf '{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}},{"type":"text","text":"%s"}' "$b64" "$prompt")
+        fi
+        printf '{"messages":[{"role":"user","content":[%s]}],"max_tokens":60,"temperature":0,"cache_prompt":true}' \
+            "$parts" > "$TMPV/body.json"
         secs=$(curl -fsS -m 600 -o "$TMPV/resp.json" -w '%{time_total}' \
             -H 'Content-Type: application/json' -d @"$TMPV/body.json" \
             "$VISION_URL/v1/chat/completions" 2>/dev/null) || secs="FAILED"
@@ -75,6 +81,15 @@ else
     if [ -s "$TMPV/small.png" ] && [ -s "$TMPV/big.png" ]; then
         vision_probe "256px simple-description" "$TMPV/small.png" "Describe this image in one sentence."
         vision_probe "1024px quadrant-colors" "$TMPV/big.png" "What are the four background colors in this image? Answer as a short list."
+        # Cache reuse: four questions about ONE screenshot. The first pays the
+        # vision tower; the rest should be well under a second if the server
+        # keeps the [image] prefix (docs/EXPERIMENTS.md 4k). A slow repeat means
+        # the tower is being run again, which is what we want to see on the Dell.
+        echo "-- repeat questions on one screenshot, image first:" >> "$OUT"
+        vision_probe "repeat 1" "$TMPV/small.png" "Name the main colour in one word."
+        vision_probe "repeat 2" "$TMPV/small.png" "Is there any text in it?"
+        vision_probe "repeat 3" "$TMPV/small.png" "How many colours can you see?"
+        vision_probe "repeat 4" "$TMPV/small.png" "Describe it in one short sentence."
     else
         echo "skipped: could not decode embedded test images" >> "$OUT"
     fi
