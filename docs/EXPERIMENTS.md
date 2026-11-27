@@ -648,3 +648,100 @@ Sources:
 - "LoRA Learns Less and Forgets Less" - https://arxiv.org/abs/2405.09673
 - "Scaling Laws for Forgetting When Fine-Tuning Large Language Models" -
   https://arxiv.org/abs/2401.05605
+
+## 4j. Colab outcome, and what a manual pick is worth (2026-11-27)
+
+### Colab training: closed without an artifact
+
+The free Colab T4 run trained, and its loss curve fell from 15.05 to 0.075. The
+adapter was then lost when the runtime disconnected: no checkpoint was kept, so
+there is no fork to evaluate. Colab is closed at the user's request. Kaggle's
+free GPU tier was considered as the alternative and not used. Nothing in 4g/4i
+depends on that artifact: every shipped number is stock SmolVLM-256M.
+
+The 15.05 -> 0.075 curve is consistent with 4g's explanation of the earlier
+15 -> 0.23 run: 4564 training rows over 373 distinct answers, with the ten most
+common answers covering 52.6% of them, is a distribution a 256M model fits fast.
+It says nothing about generalisation, which only the held-out battery measures.
+
+### Manual selection vs metadata selection
+
+The question was whether a pick made by hand raises accuracy a lot. Measured with
+stock SmolVLM-256M, temperature 0, same questions, sandbox 1 vCPU / 2 GB. "Tight
+box" is a 500px crop centred on the thing being asked about; "strip" is the
+400x120 band on the focused window's top edge; "user-picked window" is the window
+that actually contains the thing.
+
+eval3, the 16 genuinely visual questions:
+
+| crop source | indicator | progress | total | s/q | peak |
+|---|---|---|---|---|---|
+| full frame | 1/8 | 4/8 | 5/16 | 9.7 | 534 MiB |
+| metadata-chosen window | 1/8* | 7/8 | 8/16 | 14.7 | 560 MiB |
+| user-picked window | 2/8 | 7/8 | 9/16 | 15.1 | 559 MiB |
+| tight box on the thing | 5/8 | 6/8 | 11/16 | 7.2 | 530 MiB |
+| random box, same size | 0/8 | 1/8 | 1/16 | 7.0 | 530 MiB |
+
+*the metadata route has no window for a top-bar dot, so it keeps the full frame.
+
+eval2, the 40 window-scoped questions:
+
+| crop source | focus | border colour | "is it yellow" | text | s/q |
+|---|---|---|---|---|---|
+| full frame | 0/8 | 0/8 | 7/8 | 1/16 | 9.7 |
+| metadata-chosen window | 2/8 | 0/8 | 6/8 | 7/16 | 15.2 |
+| user-picked tight box | 1/8 | 0/8 | 8/8 | - | 10.3 |
+| border strip (400x120) | - | 5/8 | 8/8 | - | 7.1 |
+
+What this says:
+
+- A hand-made pick is worth a lot only when it is tight. Picking a whole window
+  gains 1 question over the metadata pick on eval3 (8/16 -> 9/16) and gains
+  nothing on border colour (0/8 either way, because the border is a 4px frame at
+  the window's edge and a window-sized crop leaves it at the margin).
+- A tight box is the best source measured: 11/16 against 5/16 for the full frame,
+  and it is also the fastest (7.2 s/q) because a 500px crop is fewer image tokens
+  than a 960px frame.
+- Magnification matters more than centring. A 500px box centred on the border
+  still answers "Black" 8/8; the 400x120 strip, which the model's own resize
+  magnifies about 4x more, answers 5/8. Same content, different scale.
+- Window picks are the right choice for text (1/16 -> 7/16) and progress bars
+  (4/8 -> 7/8), where the thing is a normal-sized element inside the window.
+
+So the picker in Pawline offers both, and the card says which it will capture:
+the route narrows to the window when the question names one, offers the window
+option on the card when it does not, and the tight region is what `slurp` gives
+when the user draws it. A colour question on a border is answered from the strip,
+not from the window.
+
+### What shipped (branch work/llm-vision-experiments)
+
+- `screencap::ShareTarget` (whole screen, one window with an optional top strip,
+  or a drawn region) with `describe()`, so the confirm card names exactly what
+  will be captured: "It captures only the \"Inbox - Thunderbird\" window
+  (Thunderbird), not the whole screen, then deletes the capture."
+- `window_capture_command` (`niri msg action screenshot-window --path ... --id N`)
+  and `region_capture_command` (`grim -g "x,y wxh"`) with `slurp_command` and
+  `parse_slurp_geometry` for the picker's drawn region.
+- `crop_png_top` for the border strip, and `crop_for_question` /
+  `names_a_window` for choosing between window, strip and frame from the window
+  list alone (no pointer needed).
+- Unsure-answer fallback: `answer_is_unsure` and `fallback_search_query` build a
+  short query from the question's own words plus the app name (never screen text,
+  never a window title), and the reply offers "search it". That builds a card
+  naming the exact text and the free DuckDuckGo endpoint; nothing is sent until
+  the user confirms, and there is no automatic search. A unit test drives the
+  card with a mock pending query and asserts the plan is unexecuted and that the
+  card names the text and the service.
+
+Tests: `cargo test -p pawline-core --lib screencap` 17 passed;
+`cargo test -p pawline-native --bin pawline` 168 passed, 1 failed -
+`memory_tests::online_chat_is_off_by_default_and_only_shows_a_card`, which fails
+on the image path ("look at ~/notes.txt for me") and is unrelated to this work;
+that test binary did not compile before this change (a stale `ChatOnline`
+initializer missing `provider`), which is how it went unnoticed.
+
+Not verified here: the niri and slurp argv shapes are covered by unit tests but
+have not been run against a live niri or slurp, because this sandbox has neither.
+The first live check on the Dell should be one window question and one region
+question.
