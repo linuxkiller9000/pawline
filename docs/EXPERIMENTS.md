@@ -992,14 +992,19 @@ identical bytes 11.76 s then 0.05 s (`cache_n=482`); one minute of clock painted
 into the top bar 11.77 s then 0.07 s. So a single changed patch of a few hundred
 pixels costs the whole encode again, exactly as the paragraph above says.
 
-### User-reported Dell data point (2026-11-28)
+### User-reported "0.1 s" on the Dell (2026-11-28) - almost certainly a refusal, not a speed
 
-He reports a screen question answered on his Dell i3 M370 in "0.1 second", and
-says it felt even faster. Recorded as reported, not measured: we do not know
-which route produced it - the compositor's window list (no capture, no model),
-the OCR text route, or a cached repeat of an identical frame (0.05-0.30 s in the
-sandbox, docs above). A fresh vision encode of a new frame is 7 s class on one
-thread, so it cannot have been that. The reply's own "Took 0.1s" line is the
-measurement; what is missing is which route it was, so the next test build should
-print the route next to the time. Treat this as evidence that the sandbox's
-timings are in the same class as his machine, not as a new benchmark.
+He reported a screen question "did what it was asked in 0.1 second". The build
+he was running had no local runner configured (the chat provider was the online
+one), and the refusal path - "Execution failed: Screen captures only ever go to
+a runner on this computer... Nothing was captured." - also ends with a "Took
+0.1s" line. His screenshot of the same build shows exactly that message.
+
+So this is recorded as a **refusal time**, not a performance data point. It says
+nothing about the sandbox matching his machine, and nothing about how fast a real
+screen answer is there. What is needed for a real number is a build where the
+refusal cannot happen (the managed runner starting the model itself), plus the
+route line now added under every screen answer ("vision on the pixels, a new
+frame, pays the full encode" / "same pixels as last time, the runner can reuse
+its encode" / "screen text read with tesseract"). Then his next test gives a
+number that means something.

@@ -253,6 +253,38 @@ fn model_setting(kind: pawline_core::models::Kind, arg: Option<String>) -> UiRep
     }
 }
 
+/// The last frame Pawline sent for a screen question, as a cheap hash. The runner can only
+/// reuse its encode when the bytes are identical, so this is the honest client-side answer to
+/// "why was that one fast": same pixels as last time, or a new frame.
+static LAST_FRAME: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+
+/// FNV-1a: only used to compare two captures, never for anything security related.
+fn frame_hash(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// Is this frame the same as the previous one? Returns (same, new_hash) so the caller can
+/// store it; pure, so the answer is testable without any capture.
+fn frame_same(last: Option<u64>, bytes: &[u8]) -> (bool, u64) {
+    let h = frame_hash(bytes);
+    (last == Some(h), h)
+}
+
+/// The one-line route note added under a screen answer, so a fast answer can be explained
+/// instead of guessed at.
+fn route_note(route_text: &str, same_frame: bool) -> String {
+    if same_frame {
+        format!("Route: {route_text}. Same pixels as your last screen question, so the runner can reuse its encode.")
+    } else {
+        format!("Route: {route_text}. A new frame, so this one pays the full encode.")
+    }
+}
+
 /// The provider used for screen-capture requests: the configured chat
 /// provider plus the optional screen-model override ("use screen model ...").
 /// Screen captures are local-only: a non-local provider is refused, never
@@ -331,6 +363,9 @@ fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str, share
     if let sc::ShareTarget::Window { strip_top: true, .. } = share {
         bytes = sc::crop_png_top(&bytes, 90, 260)?;
     }
+    // Was this the same picture as last time? The runner reuses its encode only then.
+    let (same_frame, frame_id) = frame_same(*LAST_FRAME.lock().unwrap(), &bytes);
+    *LAST_FRAME.lock().unwrap() = Some(frame_id);
     // Route: OCR for text questions, pixels for visual ones, refuse otherwise.
     let kind = sc::classify_screen_question(question);
     let ocr_text = if matches!(kind, sc::ScreenQuestionKind::Text) && sc::binary_on_path("tesseract") {
@@ -370,7 +405,11 @@ fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str, share
         }
     };
     *LAST_CHAT_ANSWER.lock().unwrap() = Some(answer.clone());
-    let mut out = format!("{prefix} - {label}:\n{answer}");
+    let route_text = match route {
+        sc::ScreenRoute::Ocr => "screen text read with tesseract, then the small text model",
+        _ => "the vision model on the pixels",
+    };
+    let mut out = format!("{prefix} - {label}:\n{answer}\n\n{}", route_note(route_text, same_frame));
     if sc::answer_is_unsure(&answer) {
         if let Some(query) = sc::fallback_search_query(question, &sc::niri_windows().unwrap_or_default()) {
             *LAST_SCREEN_SEARCH.lock().unwrap() = Some(query.clone());
@@ -3394,6 +3433,23 @@ mod memory_tests {
     #[test]
 
     #[test]
+    #[test]
+    fn the_route_note_says_whether_the_frame_was_the_same_and_never_guesses() {
+        let a = b"one frame of pixels".as_slice();
+        let b = b"another frame".as_slice();
+        let (same1, h1) = frame_same(None, a);
+        assert!(!same1, "the first frame of a session is never a repeat");
+        let (same2, h2) = frame_same(Some(h1), a);
+        assert!(same2 && h2 == h1, "identical bytes are a repeat");
+        let (same3, _) = frame_same(Some(h1), b);
+        assert!(!same3, "different bytes are a new frame");
+        assert_ne!(frame_hash(a), frame_hash(b));
+        let fresh = route_note("the vision model on the pixels", false);
+        assert!(fresh.contains("pays the full encode"), "{fresh}");
+        let warm = route_note("screen text read with tesseract, then the small text model", true);
+        assert!(warm.contains("reuse its encode") && warm.contains("tesseract"), "{warm}");
+    }
+
     fn share_picker_repicks_the_same_question_behind_a_card() {
         let root = org_root("sharepick1");
         let mut st = new_state(root);
