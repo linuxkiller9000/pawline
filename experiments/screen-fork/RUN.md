@@ -19,6 +19,9 @@ machine. Nothing here costs money.
 4. Download the merged folder (Files panel, or
    `from google.colab import files; files.download(...)` after zipping).
 
+The notebook renders 450 scenes at 1920x1080 and 250 at 1366x768 (the
+N5010's native panel), mixed 1:1 with ScreenQA.
+
 ## 2. Convert to GGUF (your machine, CPU, ~5 min)
 
     git clone https://github.com/ggml-org/llama.cpp; cd llama.cpp
@@ -32,13 +35,19 @@ The battery compares stock 256M, stock 500M, the OCR hybrid and the fork
 on the SAME held-out synthetic scenes (seeds 10000+, never trained on):
 
     cd experiments/screen-fork
-    python3 synth_desktop.py --out data/eval --count 8 --seed-base 10000
+    python3 synth_desktop.py --out data/eval --count 8 --eval   # held-out labels, seeds 10000+
     python3 eval_battery.py --dir data/eval --method ocr        # needs tesseract
     python3 eval_battery.py --dir data/eval --method smol256
     python3 eval_battery.py --dir data/eval --method smol500
     python3 eval_battery.py --dir data/eval --method fork --model /path/to/fork.gguf \
         --mmproj /path/to/mmproj-SmolVLM-256M-Instruct-Q8_0.gguf
     python3 eval_battery.py --dir data/eval --report            # table per question family
+
+The eval set uses held-out content, colors and question phrasings the
+training run never saw, so a memorizing fork scores no better than a
+generalizing one deserves. The battery reports accuracy per question
+family plus average seconds and peak RAM per method - on the Dell N5010
+(i3 M370, 6 GB) those two rows decide whether the fork is usable at all.
 
 Set `PAWLINE_VLM_DIR` if your llama.cpp build and GGUFs are not in
 /downloads/vlm. On the Dell, point it at the real llama.cpp build.

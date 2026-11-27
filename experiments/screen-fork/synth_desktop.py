@@ -10,26 +10,42 @@ labels are exact - no human annotation, no label noise.
 Renders a fake niri (scrollable-tiling Wayland compositor) desktop:
 top bar with workspaces + clock + tray, windows tiled in columns with
 gaps, one focused window with a colored border. Window content is drawn
-from small controlled text corpora (terminal, browser, editor, files,
-chat), so questions like "what is the last command in the terminal" have
+from controlled text corpora (terminal, browser, editor, files, chat,
+mail), so questions like "what is the last command in the terminal" have
 a known-exact answer.
 
 Output per scene: <seed>.png + one line in qa.jsonl:
   {"image": "<seed>.png", "question": ..., "answer": ..., "family": ...}
-Families: count, title, app, focus, color, clock, text, spatial, presence.
+Families: count, focus, color, color_neg, clock, spatial, app, text,
+presence, absent. The absent family asks about UI that does NOT exist
+(battery percentage, weather widget, wifi name) with the fixed answer
+"not visible on the screen" - this is the refusal training that teaches
+the fork to say it can't see something instead of guessing.
 
-Seeds: training scenes from --seed-base upward; the eval battery uses
-seed base 10000 by default so train/eval never overlap.
+ANTI-LEAKAGE (the eval must test generalization, not memorization):
+- Seeds: training scenes from --seed-base upward; --eval defaults to
+  seed base 10000 and never overlaps.
+- Held-out corpus items: the last ~25% of every text corpus (commands,
+  URLs, code lines, chat messages, mail subjects, page titles) is used
+  ONLY in --eval scenes. Training scenes never contain them.
+- Held-out colors: two accent colors (teal, pink) are eval-only; the
+  focused-border color question then tests the color CONCEPT, not a
+  memorized mapping.
+- Held-out phrasings: per question family some templates are eval-only.
 
-Deterministic: same seed -> same PNG bytes and same QA rows.
+Resolutions: 1920x1080 and 1366x768 (the Dell N5010's native panel);
+train on both so the fork is not resolution-specialized.
+
+Deterministic: same seed (+same flags) -> same PNG bytes and same QA rows.
 
 License: MIT (code). Generated images/QA are dedicated CC BY 4.0,
 "Pawline synthetic desktop dataset" - attribution appreciated so the
 provenance of the labels stays traceable. Free-only: uses Pillow only.
 
 Usage:
-  synth_desktop.py --out data/train --count 200 --seed-base 0
-  synth_desktop.py --out data/eval  --count 8   --seed-base 10000
+  synth_desktop.py --out data/train --count 400 --seed-base 0 --res 1920x1080
+  synth_desktop.py --out data/train2 --count 300 --seed-base 2000 --res 1366x768
+  synth_desktop.py --out data/eval --count 8 --eval --res 1920x1080
 """
 import argparse
 import json
@@ -38,7 +54,6 @@ import random
 
 from PIL import Image, ImageDraw, ImageFont
 
-W, H = 1920, 1080
 BAR_H = 28
 GAP = 8
 BORDER = 3
@@ -53,17 +68,27 @@ def font(size, bold=False, mono=False):
     return ImageFont.truetype(os.path.join(FONT_DIR, name), size)
 
 
-# Named colors (answers to color questions come from these names).
-ACCENTS = [
+# Split helper: deterministic shuffle, then last `holdout` fraction is
+# eval-only. Train draws from pool(..., False), eval from the held-out
+# slice, so eval content is content the fork never trained on.
+def split_corpus(items, holdout=0.25, seed=99):
+    items = list(items)
+    random.Random(seed).shuffle(items)
+    n_hold = max(1, int(len(items) * holdout))
+    return items[n_hold:], items[:n_hold]   # (train_pool, eval_pool)
+
+
+ACCENTS_ALL = [
     ("blue", (66, 133, 244)),
     ("red", (234, 67, 53)),
     ("green", (52, 168, 83)),
     ("yellow", (251, 188, 5)),
     ("purple", (149, 117, 205)),
     ("orange", (255, 112, 67)),
-    ("teal", (0, 150, 136)),
-    ("pink", (236, 64, 122)),
+    ("teal", (0, 150, 136)),      # eval-only
+    ("pink", (236, 64, 122)),     # eval-only
 ]
+ACCENTS_TRAIN = ACCENTS_ALL[:6]
 BGS = [(24, 24, 32), (18, 28, 38), (30, 24, 20), (16, 32, 24), (28, 20, 36)]
 BAR_BG = (12, 12, 18)
 WIN_BG = (250, 250, 250)
@@ -76,76 +101,126 @@ TERMINAL_CMDS = [
     "sudo pacman -Syu", "htop", "cd ~/projects/pawline", "nvim main.rs",
     "systemctl --user status pipewire", "ping 1.1.1.1", "df -h",
     "grep -r TODO src/", "python3 synth_desktop.py", "ssh dell@192.168.1.5",
-    "journalctl -b -p err", "make -j8",
+    "journalctl -b -p err", "make -j8", "pacman -Qs tesseract",
+    "free -h", "cat /proc/cpuinfo", "git log --oneline -5", "lsblk",
 ]
 TERMINAL_OUTS = [
     "total 128", "nothing to commit, working tree clean", "Compiling pawline-core v0.1.0",
     "Packages (12) linux-6.17  firefox-133", "Tasks: 142 total, 1 running",
     "64 bytes from 1.1.1.1: time=12.3 ms", "Filesystem  Size  Used Avail",
     "Finished release profile in 42s", "No errors found", "drwxr-xr-x 5 user user",
+    "Mem: 5.7Gi total, 1.2Gi used", "MODEL NAME: Intel i3 M370",
+    "5 files changed, 45 insertions", "sda 232G, sdb 465G",
 ]
 URLS = [
     "https://github.com/linuxkiller9000/pawline", "https://en.wikipedia.org/wiki/Wayland",
-    "https://huggingface.co/HuggingFaceTB/SmolVLM-500M-Instruct", "https://doc.rust-lang.org/book/",
+    "https://huggingface.co/HuggingFaceTB/SmolVLM-256M-Instruct", "https://doc.rust-lang.org/book/",
     "https://news.ycombinator.com", "https://github.com/YaLTeR/niri",
+    "https://crates.io/crates/serde", "https://archlinux.org/packages/",
 ]
 PAGE_TITLES = [
     "Wayland (protocol) - Wikipedia", "The Rust Programming Language",
-    "SmolVLM-500M-Instruct - Hugging Face", "niri: A scrollable-tiling Wayland compositor",
-    "Hacker News", "pawline: local-first assistant",
+    "SmolVLM-256M-Instruct - Hugging Face", "niri: A scrollable-tiling Wayland compositor",
+    "Hacker News", "pawline: local-first assistant", "serde - crates.io",
+    "Arch Linux package search",
 ]
 PAGE_LINES = [
     "Wayland is a communication protocol that specifies", "Welcome! This book will teach you about",
     "SmolVLM is a compact multimodal model for", "niri arranges windows in columns on an",
     "1. Show HN: A tiling compositor", "A local-first assistant for Linux",
     "the display server and its clients.", "the Rust programming language.",
+    "Serde is a framework for serializing", "Search the official package repositories",
 ]
 CODE_LINES = [
     "fn main() {", "    let state = AppState::new();", "    loop {",
     "        state.poll_events();", "    }", "}", "use pawline_core::router;",
     "struct Window {", "    title: String,", "    focused: bool,", "}",
     "impl Router {", "    fn route(&self, msg: &str) {", "}", "#[cfg(test)]",
+    "mod tests {", "    assert_eq!(2 + 2, 4);", "const MAX: usize = 512;",
 ]
 FILES_LISTS = [
     ["Documents", "Downloads", "Pictures", "Projects", "notes.txt"],
     ["report.pdf", "budget.ods", "screenshot.png", "archive.tar.zst", "todo.md"],
     ["pawline", "niri", "dotfiles", "music", "backups"],
+    ["thesis.docx", "slides.odp", "data.csv", "run.sh", "readme.md"],
 ]
 CHAT_MSGS = [
     ("mama", "call me when you wake up"), ("kareem", "match at 8 tonight?"),
     ("sara", "did you push the branch?"), ("ahmed", "the build works!"),
     ("nour", "send me the notes please"), ("omar", "niri update broke my config"),
+    ("laila", "dinner is at 7"), ("hassan", "check your email"),
 ]
+MAIL_SUBJECTS = [
+    "Your receipt from the bookstore", "Team standup moved to 10:30",
+    "Weekend trip photos", "Invoice #4021 attached",
+    "Reminder: dentist on Tuesday", "New comment on your issue",
+    "Lab results are ready", "Meeting notes from today",
+]
+MAIL_SENDERS = ["bookstore@shop.example", "asmaa@work.example", "karim@photos.example",
+                "billing@isp.example", "clinic@health.example", "github@notifications.example"]
 APP_NAMES = {
     "terminal": "Terminal", "browser": "Firefox", "editor": "Neovim",
-    "files": "Nautilus", "chat": "Signal",
+    "files": "Nautilus", "chat": "Signal", "mail": "Thunderbird",
+}
+
+# Question phrasings: (train templates, eval-only extra templates).
+Q_TEMPLATES = {
+    "count": (["How many windows are open on the desktop?", "How many windows are visible?"],
+              ["Count the open windows.", "How many app windows can you see?"]),
+    "focus": (["Which window is focused?", "What is the title of the focused window?"],
+              ["Which window is currently active?", "Name the active window."]),
+    "color": (["What color is the border of the focused window?"],
+              ["What colour is the active window border?", "Tell me the focused border color."]),
+    "clock": (["What time is shown in the top bar?", "What does the clock in the panel say?"],
+              ["What time is it on the screen?", "Read the clock in the status bar."]),
+    "spatial": (["What is the title of the leftmost window?"],
+                ["Which window is on the far left?", "Name the leftmost window's title."]),
+    "app": (["Which application is in the rightmost window?"],
+            ["What app is open in the far right window?", "Name the program in the rightmost window."]),
 }
 
 
+def pick_template(family, rng, eval_mode):
+    train, eval_only = Q_TEMPLATES[family]
+    pool = train + (eval_only if eval_mode else [])
+    return rng.choice(pool)
+
+
 def draw_text_fit(draw, xy, text, fnt, fill, max_w):
-    """Draw text truncated with ellipsis to fit max_w."""
     while text and draw.textlength(text, font=fnt) > max_w:
         text = text[:-1]
     if text:
         draw.text(xy, text, font=fnt, fill=fill)
 
 
-def make_scene(rng):
-    """Build the scene graph. Returns dict with everything the renderer
-    and the QA generator need."""
-    n_cols = rng.choice([1, 2, 2, 3, 3, 4])
-    accent_names = [a[0] for a in ACCENTS]
-    focus_accent = rng.choice(ACCENTS)
+def make_scene(rng, eval_mode, W, H):
+    accents = ACCENTS_ALL if eval_mode else ACCENTS_TRAIN
+    focus_accent = rng.choice(accents)
     bg = rng.choice(BGS)
     clock = f"{rng.randint(0, 23):02d}:{rng.randint(0, 59):02d}"
     n_workspaces = rng.randint(2, 6)
     active_ws = rng.randint(1, n_workspaces)
 
-    # Column layout: each column gets 1 or 2 stacked windows.
+    def pool(items, seed):
+        tr, ev = split_corpus(items, seed=seed)
+        return ev if eval_mode else tr
+
+    cmds_pool = pool(TERMINAL_CMDS, 11)
+    outs_pool = pool(TERMINAL_OUTS, 12)
+    urls_pool = pool(URLS, 13)
+    titles_pool = pool(PAGE_TITLES, 14)
+    plines_pool = pool(PAGE_LINES, 15)
+    code_pool = pool(CODE_LINES, 16)
+    files_pool = pool(FILES_LISTS, 17)
+    chat_pool = pool(CHAT_MSGS, 18)
+    subj_pool = pool(MAIL_SUBJECTS, 19)
+    send_pool = pool(MAIL_SENDERS, 20)
+
+    n_cols = rng.choice([1, 2, 2, 3, 3, 4])
     avail_w = W - GAP * (n_cols + 1)
     col_w = avail_w // n_cols
     avail_h = H - BAR_H - GAP * 2
-    apps = ["terminal", "browser", "editor", "files", "chat"]
+    apps = ["terminal", "browser", "editor", "files", "chat", "mail"]
     rng.shuffle(apps)
     windows = []
     wi = 0
@@ -159,52 +234,53 @@ def make_scene(rng):
             y = BAR_H + GAP + s * ((avail_h - GAP) // stack + GAP)
             h = (avail_h - GAP * (stack - 1)) // stack
             windows.append({
-                "app": app,
-                "app_name": APP_NAMES[app],
-                "title": "",
+                "app": app, "app_name": APP_NAMES[app], "title": "",
                 "x": x, "y": y, "w": col_w, "h": h,
-                "focused": False,
-                "dark": app in ("terminal", "editor"),
+                "focused": False, "dark": app in ("terminal", "editor"),
                 "content": {},
             })
     focused_idx = rng.randrange(len(windows))
     windows[focused_idx]["focused"] = True
 
-    # Fill content + titles per app.
     for w in windows:
         app = w["app"]
         if app == "terminal":
-            cmds = rng.sample(TERMINAL_CMDS, 3)
-            outs = rng.sample(TERMINAL_OUTS, 2)
+            cmds = rng.sample(cmds_pool, min(3, len(cmds_pool)))
+            outs = rng.sample(outs_pool, min(2, len(outs_pool)))
             w["content"] = {"cmds": cmds, "outs": outs, "last_cmd": cmds[-1]}
-            w["title"] = f"user@pawline: ~"
+            w["title"] = "user@pawline: ~"
         elif app == "browser":
-            i = rng.randrange(len(URLS))
-            lines = rng.sample(PAGE_LINES, 4)
-            w["content"] = {"url": URLS[i], "page_title": PAGE_TITLES[i], "lines": lines}
-            w["title"] = f"{PAGE_TITLES[i]} - Firefox"
+            i = rng.randrange(len(urls_pool))
+            t = rng.choice(titles_pool)
+            lines = rng.sample(plines_pool, min(4, len(plines_pool)))
+            w["content"] = {"url": urls_pool[i], "page_title": t, "lines": lines}
+            w["title"] = f"{t} - Firefox"
         elif app == "editor":
-            lines = rng.sample(CODE_LINES, min(8, len(CODE_LINES)))
+            lines = rng.sample(code_pool, min(8, len(code_pool)))
             fname = rng.choice(["main.rs", "router.rs", "laya.rs", "bridge.rs"])
             w["content"] = {"lines": lines, "file": fname, "first_line": lines[0]}
             w["title"] = f"{fname} - Neovim"
         elif app == "files":
-            items = rng.choice(FILES_LISTS)
+            items = rng.choice(files_pool)
             w["content"] = {"items": items, "first_item": items[0], "count": len(items)}
             w["title"] = "Home - Nautilus"
         elif app == "chat":
-            msgs = rng.sample(CHAT_MSGS, 3)
+            msgs = rng.sample(chat_pool, min(3, len(chat_pool)))
             w["content"] = {"msgs": msgs, "last_sender": msgs[-1][0], "last_msg": msgs[-1][1]}
             w["title"] = "Signal"
+        elif app == "mail":
+            subs = rng.sample(subj_pool, min(4, len(subj_pool)))
+            sends = rng.sample(send_pool, min(4, len(send_pool)))
+            w["content"] = {"subs": subs, "senders": sends, "first_sub": subs[0]}
+            w["title"] = "Inbox - Thunderbird"
     return {
         "windows": windows, "clock": clock, "bg": bg,
         "focus_accent": focus_accent, "focus_accent_name": focus_accent[0],
         "n_workspaces": n_workspaces, "active_ws": active_ws,
-        "accent_names": accent_names,
     }
 
 
-def render(scene):
+def render(scene, W, H):
     img = Image.new("RGB", (W, H), scene["bg"])
     d = ImageDraw.Draw(img)
     f_bar = font(16, bold=True)
@@ -212,7 +288,6 @@ def render(scene):
     f_body = font(15)
     f_mono = font(15, mono=True)
 
-    # Top bar (waybar style).
     d.rectangle([0, 0, W, BAR_H], fill=BAR_BG)
     x = 12
     for i in range(1, scene["n_workspaces"] + 1):
@@ -225,7 +300,6 @@ def render(scene):
     d.text(((W - tw) / 2, 5), clk, font=f_bar, fill=(235, 235, 240))
     d.text((W - 150, 6), "net  vol  bat", font=font(13), fill=(150, 150, 160))
 
-    # Windows.
     for w in scene["windows"]:
         x0, y0, ww, hh = w["x"], w["y"], w["w"], w["h"]
         bcol = scene["focus_accent"][1] if w["focused"] else UNFOCUSED_BORDER
@@ -233,7 +307,6 @@ def render(scene):
         body_bg = WIN_BG_DARK if w["dark"] else WIN_BG
         d.rectangle([x0, y0, x0 + ww, y0 + 30], fill=(44, 46, 54))
         d.text((x0 + 10, y0 + 6), w["title"], font=f_title, fill=TITLE_FG)
-        # window controls (right): minimize, maximize, close dots
         for i, c in enumerate([(251, 188, 5), (52, 168, 83), (234, 67, 53)]):
             cx = x0 + ww - 24 - i * 22
             d.ellipse([cx, y0 + 10, cx + 12, y0 + 22], fill=c)
@@ -271,54 +344,45 @@ def render(scene):
                 draw_text_fit(d, (tx, ty), f"{sender}:", f_body, (30, 90, 160), ww - 24)
                 draw_text_fit(d, (tx + 90, ty), msg, f_body, fg, ww - 120)
                 ty += 28
+        elif w["app"] == "mail":
+            for subj, snd in zip(c["subs"], c["senders"]):
+                draw_text_fit(d, (tx, ty), subj, f_body, (20, 20, 120), ww - 24)
+                draw_text_fit(d, (tx, ty + 18), snd, font(12), (100, 100, 110), ww - 24)
+                ty += 46
     return img
 
 
-def gen_qa(scene, rng):
+ABSENT_QUESTIONS = [
+    ("What battery percentage is shown in the top bar?", "not visible on the screen"),
+    ("What does the weather widget say?", "not visible on the screen"),
+    ("What is the name of the wifi network shown?", "not visible on the screen"),
+    ("What song is playing in the music player?", "not visible on the screen"),
+    ("How many unread notifications are shown?", "not visible on the screen"),
+]
+
+
+def gen_qa(scene, rng, eval_mode):
     wins = scene["windows"]
     qa = []
 
     def add(family, q, a):
         qa.append({"family": family, "question": q, "answer": str(a)})
 
-    # count
-    add("count", rng.choice([
-        "How many windows are open on the desktop?",
-        "How many windows are visible?",
-        "Count the open windows.",
-    ]), len(wins))
-
-    # focus
+    add("count", pick_template("count", rng, eval_mode), len(wins))
     fw = next(w for w in wins if w["focused"])
-    add("focus", rng.choice([
-        "Which window is focused?",
-        "What is the title of the focused window?",
-        "Which window is currently active?",
-    ]), fw["title"])
-    add("color", rng.choice([
-        "What color is the border of the focused window?",
-        "What colour is the active window border?",
-    ]), scene["focus_accent_name"])
+    add("focus", pick_template("focus", rng, eval_mode), fw["title"])
+    add("color", pick_template("color", rng, eval_mode), scene["focus_accent_name"])
 
-    # clock
-    add("clock", rng.choice([
-        "What time is shown in the top bar?",
-        "What does the clock in the panel say?",
-        "What time is it on the screen?",
-    ]), scene["clock"])
+    # Negative color probe: hallucination check on the same pixels.
+    wrong = rng.choice([a[0] for a in ACCENTS_ALL if a[0] != scene["focus_accent_name"]])
+    add("color_neg", f"Is the focused window's border {wrong}?", "no")
 
-    # spatial: leftmost / rightmost
+    add("clock", pick_template("clock", rng, eval_mode), scene["clock"])
+
     order = sorted(wins, key=lambda w: w["x"])
-    add("spatial", rng.choice([
-        "What is the title of the leftmost window?",
-        "Which window is on the far left?",
-    ]), order[0]["title"])
-    add("app", rng.choice([
-        "Which application is in the rightmost window?",
-        "What app is open in the far right window?",
-    ]), order[-1]["app_name"])
+    add("spatial", pick_template("spatial", rng, eval_mode), order[0]["title"])
+    add("app", pick_template("app", rng, eval_mode), order[-1]["app_name"])
 
-    # text-reading questions (exact strings we drew)
     for w in wins:
         c, app = w["content"], w["app"]
         if app == "terminal":
@@ -341,38 +405,56 @@ def gen_qa(scene, rng):
                 "What is the last message in the chat window?",
                 "What does the most recent chat message say?",
             ]), c["last_msg"])
+        elif app == "mail":
+            add("text", rng.choice([
+                "What is the first email subject in the inbox?",
+                "Read the top email subject in the mail window.",
+            ]), c["first_sub"])
 
-    # presence (yes/no) - pick one present app and one absent app
     present = {w["app"] for w in wins}
-    absent = [a for a in APP_NAMES if a not in present]
+    absent_apps = [a for a in APP_NAMES if a not in present]
     pick_yes = rng.choice(sorted(present))
     add("presence", f"Is there a {APP_NAMES[pick_yes]} window open?", "yes")
-    if absent:
-        pick_no = rng.choice(absent)
+    if absent_apps:
+        pick_no = rng.choice(absent_apps)
         add("presence", f"Is there a {APP_NAMES[pick_no]} window open?", "no")
+
+    # Refusal training: ask about UI that does not exist anywhere.
+    q, a = rng.choice(ABSENT_QUESTIONS)
+    add("absent", q, a)
     return qa
+
+
+def parse_res(s):
+    w, h = s.lower().split("x")
+    return int(w), int(h)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--count", type=int, default=200)
-    ap.add_argument("--seed-base", type=int, default=0)
+    ap.add_argument("--seed-base", type=int, default=None)
+    ap.add_argument("--res", default="1920x1080", choices=["1920x1080", "1366x768"])
+    ap.add_argument("--eval", action="store_true",
+                    help="use held-out corpora/colors/phrasings; default seed base 10000")
     args = ap.parse_args()
+    W, H = parse_res(args.res)
+    seed_base = args.seed_base if args.seed_base is not None else (10000 if args.eval else 0)
     os.makedirs(args.out, exist_ok=True)
     qa_path = os.path.join(args.out, "qa.jsonl")
     with open(qa_path, "w") as f:
         for i in range(args.count):
-            seed = args.seed_base + i
+            seed = seed_base + i
             rng = random.Random(seed)
-            scene = make_scene(rng)
-            img = render(scene)
+            scene = make_scene(rng, args.eval, W, H)
+            img = render(scene, W, H)
             name = f"{seed:05d}.png"
             img.save(os.path.join(args.out, name))
-            for row in gen_qa(scene, random.Random(seed + 500000)):
+            for row in gen_qa(scene, random.Random(seed + 500000), args.eval):
                 row["image"] = name
                 f.write(json.dumps(row) + "\n")
-    print(f"wrote {args.count} scenes to {args.out} (qa.jsonl)")
+    print(f"wrote {args.count} scenes ({W}x{H}, eval={args.eval}) to {args.out}")
 
 
 if __name__ == "__main__":

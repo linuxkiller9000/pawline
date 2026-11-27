@@ -33,6 +33,7 @@ import argparse
 import json
 import os
 import re
+import resource
 import subprocess
 import sys
 import tempfile
@@ -41,7 +42,8 @@ import urllib.request
 
 VLM_DIR = os.environ.get("PAWLINE_VLM_DIR", "/downloads/vlm")
 LLAMA = os.path.join(VLM_DIR, "llama-b12811")
-FAMILY_ORDER = ["count", "focus", "color", "clock", "spatial", "app", "text", "presence"]
+FAMILY_ORDER = ["count", "focus", "color", "color_neg", "clock", "spatial", "app",
+                "text", "presence", "absent"]
 
 
 def norm(s):
@@ -83,9 +85,13 @@ def run_mtmd(model, mmproj, image, question, scale):
              "--temp", "0", "-n", "48"],
             capture_output=True, text=True, timeout=600)
         dt = time.time() - t0
+        # Peak RSS across child processes so far (KiB on Linux) - this is a
+        # cumulative max, so it reports the largest run to date; per-method
+        # peaks are what the comparison table prints.
+        peak_kib = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
         out = p.stdout.strip()
         # mtmd-cli echoes nothing extra at tail; keep last non-empty line(s).
-        return out.splitlines()[-1].strip() if out else "", dt
+        return (out.splitlines()[-1].strip() if out else ""), dt, peak_kib
     finally:
         if tmp:
             os.unlink(tmp.name)
@@ -133,7 +139,8 @@ def run_ocr_hybrid(image, question, port, ocr_cache):
                                  headers={"Content-Type": "application/json"})
     r = json.load(urllib.request.urlopen(req, timeout=300))
     dt = time.time() - t0
-    return r["choices"][0]["message"]["content"].strip(), dt + ocr_dt
+    peak_kib = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    return r["choices"][0]["message"]["content"].strip(), dt + ocr_dt, peak_kib
 
 
 def main():
@@ -160,6 +167,12 @@ def main():
             print(f"{fam:10s} " + " ".join(cells))
         print(f"{'TOTAL':10s} " + " ".join(
             f"{sum(v['ok'] for v in res[m].values())}/{len(res[m])}".rjust(10)
+            for m in sorted(res)))
+        print(f"{'avg sec':10s} " + " ".join(
+            f"{sum(v['seconds'] for v in res[m].values())/max(1,len(res[m])):>10.1f}"
+            for m in sorted(res)))
+        print(f"{'peak MiB':10s} " + " ".join(
+            f"{max((v.get('peak_kib',0) for v in res[m].values()), default=0)/1024:>10.0f}"
             for m in sorted(res)))
         return
 
@@ -208,12 +221,13 @@ def main():
                     continue  # resume support
                 path = os.path.join(args.dir, img)
                 if args.method == "ocr":
-                    got, dt = run_ocr_hybrid(path, r["question"], port, ocr_cache)
+                    got, dt, peak = run_ocr_hybrid(path, r["question"], port, ocr_cache)
                 else:
-                    got, dt = run_mtmd(model, mmproj, path, r["question"], scale)
+                    got, dt, peak = run_mtmd(model, mmproj, path, r["question"], scale)
                 ok = norm(r["answer"]) in norm(got) and norm(r["answer"]) != ""
                 res[args.method][qid] = {"ok": ok, "expected": r["answer"],
-                                         "got": got, "seconds": round(dt, 1)}
+                                         "got": got, "seconds": round(dt, 1),
+                                         "peak_kib": peak}
                 print(f"{'OK ' if ok else 'MISS'} [{args.method}] {img} {r['family']:9s} "
                       f"want={r['answer']!r} got={got!r} ({dt:.1f}s)", flush=True)
                 json.dump(res, open(results_path, "w"), indent=1)
