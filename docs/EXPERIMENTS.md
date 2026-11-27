@@ -504,6 +504,13 @@ hand with no pointer involved. `cursor_crop.py --cursor window` reproduces that:
 it picks the focused window for colour/focus questions and the named app's
 window for text questions, pads by 6px and crops at native resolution.
 
+No geometry maths is needed even for the crop itself: niri's IPC `Action` enum
+carries `ScreenshotWindow` (and `ScreenshotScreen`), both with a `path` and
+`show_pointer` argument, so `niri msg action screenshot-window --path ... --show-pointer false`
+writes a window-sized PNG directly. The window rectangle is then only needed for
+the confirm card, and `tile_size` / `window_size` from the same window list
+supply its size.
+
 The confirm step the user asked for ("is this it?" -> else let him pick) is the
 same rectangle shown back to him as a card before any pixels are sent anywhere,
 and `slurp` is the fallback when the answer is no: it is a rectangle picker, so
