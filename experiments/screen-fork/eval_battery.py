@@ -120,7 +120,18 @@ def server_up(port):
         return False
 
 
-def run_ocr_hybrid(image, question, port, ocr_cache):
+def proc_rss_kib(pid):
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    return 0
+
+
+def run_ocr_hybrid(image, question, port, ocr_cache, server_pid):
     if image not in ocr_cache:
         t0 = time.time()
         ocr_cache[image] = (ocr_text(image), time.time() - t0)
@@ -139,7 +150,10 @@ def run_ocr_hybrid(image, question, port, ocr_cache):
                                  headers={"Content-Type": "application/json"})
     r = json.load(urllib.request.urlopen(req, timeout=300))
     dt = time.time() - t0
-    peak_kib = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    # tesseract children + the persistent llama-server (still alive, so not
+    # in RUSAGE_CHILDREN) - sample its live RSS explicitly.
+    peak_kib = max(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss,
+                   proc_rss_kib(server_pid))
     return r["choices"][0]["message"]["content"].strip(), dt + ocr_dt, peak_kib
 
 
@@ -221,7 +235,7 @@ def main():
                     continue  # resume support
                 path = os.path.join(args.dir, img)
                 if args.method == "ocr":
-                    got, dt, peak = run_ocr_hybrid(path, r["question"], port, ocr_cache)
+                    got, dt, peak = run_ocr_hybrid(path, r["question"], port, ocr_cache, server_proc.pid)
                 else:
                     got, dt, peak = run_mtmd(model, mmproj, path, r["question"], scale)
                 ok = norm(r["answer"]) in norm(got) and norm(r["answer"]) != ""

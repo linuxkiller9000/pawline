@@ -272,3 +272,48 @@ result says keep it opt-in.
 
 All numbers above are sandbox numbers (a 2026 cloud VM, AVX2, 2 GB RAM) unless a row says otherwise. Nothing here was measured on the Dell;
 `tools/dell_bench.sh` exists to produce those numbers.
+
+## 4f. Screen-fork infrastructure + strict baselines (synthetic desktop set, live, sandbox)
+
+The fork now has all four pieces (experiments/screen-fork/): a niri-style
+synthetic desktop generator with exact labels (synth_desktop.py: 6 app
+types, 1920x1080 + 1366x768, 10 question families), the Colab notebook
+mixing it 1:1 with ScreenQA, a fixed eval battery (eval_battery.py:
+stock 256M / stock 500M / OCR hybrid / fork, same scenes + questions),
+and RUN.md (one-page how-to). Anti-leakage is structural, not just
+disjoint seeds: the eval set uses held-out corpus items (25% of every
+text corpus), held-out accent colors (teal/pink), and held-out question
+phrasings, so a memorizing fork cannot score by recall. Refusal is
+trained AND tested: the "absent" family asks about UI that does not
+exist with the fixed answer "not visible on the screen", and "color_neg"
+probes border-color hallucination.
+
+Strict-set baselines so far (86 questions over 8 held-out 1920x1080
+scenes, normalized containment scoring, sandbox 1-core VM):
+
+| family | ocr hybrid | stock 256M @960px |
+|--------|-----------|-------------------|
+| absent (refusal) | 0/8 | 0/8 |
+| app | 3/8 | 0/8 |
+| clock | 3/8 | 1/8 |
+| color | 0/8 | 0/8 |
+| color_neg | 5/8 | 7/8 |
+| count | 2/8 | 1/8 |
+| focus | 1/8 | 0/8 |
+| presence | 8/8 | 3/8 |
+| spatial | 1/8 | 0/8 |
+| text | 6/14 | 1/14 |
+| TOTAL | 29/86 | 13/86 |
+| avg sec | 1.4 | 9.7 |
+| peak MiB | 793 (server+tesseract) | 534 |
+
+Three findings: (1) the OCR hybrid beats stock 256M overall and is 7x
+faster, matching 4e - but on a 2010 i3 M370 the 256M's per-question cost
+is the binding constraint, not RAM (both fit 6 GB). (2) BOTH baselines
+score 0/8 on absent - system prompts do not produce refusal, measured
+again; the fork's refusal training data is the only fix in the pipeline.
+(3) Both score 0/8 on true color naming - the 256M's 7/8 on color_neg is
+a "say no" bias, not color vision (it also answers "no" to 5/8 presence
+questions where the app IS there). The fork column and the stock-500M
+column (86 questions x ~57 s sandbox) run next; the fork ships only if
+it beats BOTH baselines including on absent and color.
