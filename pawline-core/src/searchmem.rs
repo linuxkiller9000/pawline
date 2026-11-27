@@ -49,13 +49,7 @@ pub fn normalize(q: &str) -> String {
 
 /// Where the file lives: $PAWLINE_DATA, else $XDG_DATA_HOME/pawline, else ~/.local/share/pawline.
 pub fn default_path() -> Option<PathBuf> {
-    let dir = if let Some(d) = std::env::var_os("PAWLINE_DATA") {
-        PathBuf::from(d)
-    } else if let Some(d) = std::env::var_os("XDG_DATA_HOME") {
-        PathBuf::from(d).join("pawline")
-    } else {
-        PathBuf::from(std::env::var_os("HOME")?).join(".local/share/pawline")
-    };
+    let dir = crate::platform::data_dir_from(&|k| std::env::var_os(k), cfg!(windows))?;
     Some(dir.join("search-memory.json"))
 }
 

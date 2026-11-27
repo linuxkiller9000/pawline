@@ -18,6 +18,15 @@ pub fn load(path: &Path, box_w: u32, box_h: u32) -> Option<Pixmap> {
     shrink(w, h, &rgba, box_w, box_h)
 }
 
+/// Same as `load`, for bytes already read through a confined handle. None for anything unusable.
+pub fn from_bytes(bytes: &[u8], box_w: u32, box_h: u32) -> Option<Pixmap> {
+    if bytes.len() as u64 > MAX_FILE {
+        return None;
+    }
+    let (w, h, rgba) = decode(bytes)?;
+    shrink(w, h, &rgba, box_w, box_h)
+}
+
 fn decode(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         let mut dec = png::Decoder::new(std::io::Cursor::new(bytes));
@@ -161,5 +170,32 @@ mod tests {
         assert!(!dims_ok(5000, 10));
         assert!(!dims_ok(4096, 4096) || 4096u64 * 4096 <= MAX_PIXELS);
         assert!(decode(&png_bytes(8, 8, [1, 2, 3])[..20]).is_none(), "truncated png");
+    }
+}
+
+#[cfg(test)]
+mod from_bytes_tests {
+    use super::*;
+
+    fn png_bytes(w: u32, h: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut e = png::Encoder::new(&mut out, w, h);
+            e.set_color(png::ColorType::Rgba);
+            e.set_depth(png::BitDepth::Eight);
+            let mut wr = e.write_header().unwrap();
+            wr.write_image_data(&vec![200u8; (w * h * 4) as usize]).unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn bytes_are_shrunk_never_enlarged_and_junk_is_refused() {
+        let big = from_bytes(&png_bytes(800, 300), 220, 150).unwrap();
+        assert_eq!((big.width(), big.height()), (220, 83));
+        let small = from_bytes(&png_bytes(20, 10), 220, 150).unwrap();
+        assert_eq!((small.width(), small.height()), (20, 10));
+        assert!(from_bytes(b"not a picture", 220, 150).is_none());
+        assert!(from_bytes(&[], 220, 150).is_none());
     }
 }

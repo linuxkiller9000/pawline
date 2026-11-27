@@ -2,11 +2,13 @@
 //! buffers on a Wayland layer-shell surface (xdg-toplevel fallback). No
 //! OpenGL, EGL, GTK or WebKit is loaded.
 mod bridge;
+mod dropin;
 mod edit;
 mod shape;
 mod theme;
 mod fsearch;
 mod voice;
+mod history;
 mod md;
 mod thumb;
 
@@ -21,14 +23,14 @@ use bridge::UiReply;
 #[cfg(unix)]
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,
+    delegate_dispatch2,
     data_device_manager::{
         data_device::{DataDevice, DataDeviceHandler},
         data_offer::{DataOfferHandler, DragOffer},
         data_source::{CopyPasteSource, DataSourceHandler},
         DataDeviceManagerState, WritePipe,
     },
-    delegate_data_device, delegate_registry, delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_window,
+    delegate_registry,
     output::{OutputHandler, OutputState},
     reexports::{
         calloop_wayland_source::WaylandSource,
@@ -54,6 +56,8 @@ use smithay_client_toolkit::{
 use calloop::{channel, EventLoop};
 #[cfg(windows)]
 mod keys;
+#[cfg(all(feature = "laya", not(windows)))]
+mod laya;
 #[cfg(windows)]
 mod winb;
 #[cfg(windows)]
@@ -91,6 +95,73 @@ fn menu_filter(t: &str) -> Vec<usize> {
 }
 
 #[cfg(test)]
+mod copy_conversation_tests {
+    use super::copy_conversation_count;
+
+    #[test]
+    fn whole_conversation_and_last_n_phrases() {
+        assert_eq!(copy_conversation_count("copy the conversation"), Some(None));
+        assert_eq!(copy_conversation_count("copy our chat"), Some(None));
+        assert_eq!(copy_conversation_count("copy everything."), Some(None));
+        assert_eq!(copy_conversation_count("copy the last 5 messages"), Some(Some(5)));
+        assert_eq!(copy_conversation_count("copy last 1 message"), Some(Some(1)));
+        // a file copy is never intercepted
+        assert_eq!(copy_conversation_count("copy the conversation file to Documents"), None);
+        assert_eq!(copy_conversation_count("copy the last slice of cake"), None);
+        assert_eq!(copy_conversation_count("copy pics to Documents"), None);
+    }
+}
+
+#[cfg(test)]
+mod view_cap_tests {
+    use super::*;
+
+    fn msg(kind: &str, text: &str) -> Msg {
+        Msg { user: kind == "user", kind: kind.into(), text: text.into(), md: false, thumb: None, quote: None }
+    }
+
+    #[test]
+    fn under_the_cap_nothing_changes() {
+        let mut v = vec![msg("welcome", "w"), msg("user", "a"), msg("message", "b")];
+        let mut h = 1usize;
+        App::cap_view(&mut v, &mut h);
+        assert_eq!(v.len(), 3);
+        assert_eq!(h, 1);
+    }
+
+    #[test]
+    fn over_the_cap_drops_oldest_keeps_welcome_marks_and_adjusts_the_watermark() {
+        let mut v: Vec<Msg> = std::iter::once(msg("welcome", "w"))
+            .chain((0..App::MAX_VIEW + 10).map(|i| msg("user", &format!("line {i}"))))
+            .collect();
+        let mut h = 30usize;
+        App::cap_view(&mut v, &mut h);
+        assert_eq!(v[0].kind, "welcome");
+        // drop = 11 (welcome line is extra), plus one marker inserted
+        assert_eq!(v.len(), App::MAX_VIEW + 1);
+        assert_eq!(v[1].kind, "restored", "a marker explains the drop");
+        assert!(v[1].text.contains("Dropped 11 older bubbles"), "{}", v[1].text);
+        assert_eq!(v[2].text, "line 11", "the eleven oldest went");
+        // watermark: 30 - 11 drained + 1 marker inserted
+        assert_eq!(h, 20);
+        // The newest lines survive
+        assert_eq!(v.last().unwrap().text, format!("line {}", App::MAX_VIEW + 9));
+        // The marker itself is never saved to the history file
+        assert!(!crate::history::keep_kind(v[1].user, &v[1].kind));
+    }
+
+    #[test]
+    fn a_zero_watermark_stays_zero() {
+        let mut v: Vec<Msg> = std::iter::once(msg("welcome", "w"))
+            .chain((0..App::MAX_VIEW + 3).map(|i| msg("user", &format!("x{i}"))))
+            .collect();
+        let mut h = 0usize;
+        App::cap_view(&mut v, &mut h);
+        assert_eq!(h, 0);
+    }
+}
+
+#[cfg(test)]
 mod menu_tests {
     use super::*;
     #[test]
@@ -120,11 +191,33 @@ const H: u32 = 470;
 const COMPACT: u32 = 68;
 const BAR_W: u32 = 300;
 const BAR_H: u32 = 40;
-const PX: f32 = 15.0;
-const LH: f32 = 20.0;
+fn px() -> f32 {
+    15.0 * theme::text_scale()
+}
+fn lh() -> f32 {
+    20.0 * theme::text_scale()
+}
+/// The settings screen shows one theme row (Enter cycles), so the notes below it stay readable at the fixed window height.
+const THEME_ROWS: usize = 1;
 const PAD: f32 = 14.0;
 const CHAT_TOP: f32 = 64.0;
 const BOTTOM: f32 = 64.0;
+
+/// Clamp a scroll offset to the scrollable range (settings panel; unit-tested).
+fn scroll_clamp(scroll: f32, content: f32, viewport: f32) -> f32 {
+    scroll.clamp(0.0, (content - viewport).max(0.0))
+}
+
+/// Smallest scroll change that brings [item_top, item_bot] fully into a viewport this tall (settings panel; unit-tested).
+fn scroll_to_visible(scroll: f32, item_top: f32, item_bot: f32, viewport: f32) -> f32 {
+    if item_top < scroll {
+        item_top
+    } else if item_bot > scroll + viewport {
+        item_bot - viewport
+    } else {
+        scroll
+    }
+}
 const MAX_IN_LINES: usize = 4;
 const REPLY_H: f32 = 22.0;
 const THUMB_W: u32 = 220;
@@ -201,6 +294,31 @@ impl Rgba for (u8, u8, u8) {
     }
 }
 
+/// "copy the conversation" / "copy the last 5 messages": Some(None) = all, Some(Some(k)) = last k.
+/// None when the line is not a copy-the-conversation request (a file "copy X to Y" is never one).
+fn copy_conversation_count(t: &str) -> Option<Option<usize>> {
+    let l = t.to_lowercase().trim_end_matches(['.', '!']).trim().to_string();
+    const WHOLE: &[&str] = &[
+        "copy our conversation", "copy the conversation", "copy conversation", "copy the whole conversation",
+        "copy whole conversation", "copy everything", "copy all messages", "copy all our messages", "copy the chat",
+        "copy chat", "copy our chat", "copy this conversation", "copy the full conversation", "copy the entire conversation",
+    ];
+    if WHOLE.contains(&l.as_str()) {
+        return Some(None);
+    }
+    for p in ["copy the last ", "copy last "] {
+        if let Some(r) = l.strip_prefix(p) {
+            let r = r.trim().trim_end_matches(" messages").trim_end_matches(" message").trim();
+            return r.parse::<usize>().ok().filter(|n| (1..=10000).contains(n)).map(Some);
+        }
+    }
+    None
+}
+
+fn history_path() -> Option<std::path::PathBuf> {
+    settings_path().map(|p| p.with_file_name("history.txt"))
+}
+
 fn settings_path() -> Option<std::path::PathBuf> {
     pawline_core::searchmem::default_path().map(|p| p.with_file_name("ui-settings.txt"))
 }
@@ -212,6 +330,19 @@ fn line_mode(l: &str) -> shape::Mode {
     } else {
         shape::Mode::Auto
     }
+}
+
+/// App-level (non-engine) confirmable actions: the saved-conversation delete is Pawline's own
+/// data, not a confined filesystem plan, so it cannot ride the engine's confirm path.
+enum AppAction {
+    DeleteHistory(Vec<std::path::PathBuf>),
+    /// Chosen target path and the already-rendered text (rendered when the card is shown,
+    /// so the card's line count is exactly what is written).
+    ExportHistory { target: std::path::PathBuf, text: String },
+    /// One saved-conversation file chosen from a fresh listing (item 19: per-conversation delete).
+    DeleteConversation { path: std::path::PathBuf, label: String, current: bool, lines: usize },
+    /// Load a named conversation's file as the live one (item 19).
+    SwitchConversation { target: std::path::PathBuf, name: String },
 }
 
 enum Req {
@@ -284,6 +415,8 @@ struct App {
     /// X11 backend (XFCE and other X11 sessions). None on Wayland.
     xb: Option<Xb>,
     #[cfg(unix)]
+    conn: Option<Connection>,
+    #[cfg(unix)]
     ddm: Option<DataDeviceManagerState>,
     #[cfg(unix)]
     ddev: Option<DataDevice>,
@@ -295,6 +428,9 @@ struct App {
     serial: u32,
     #[cfg(unix)]
     kb: Option<wl_keyboard::WlKeyboard>,
+    /// Event-loop handle, used to install client-side key repeat (Wayland compositors do not repeat keys for clients).
+    #[cfg(unix)]
+    lh: Option<calloop::LoopHandle<'static, App>>,
     #[cfg(unix)]
     ptr: Option<wl_pointer::WlPointer>,
     w: u32,
@@ -306,12 +442,27 @@ struct App {
     msgs: Vec<Msg>,
     /// Plan text awaiting a decision.
     confirm: Option<String>,
+    /// Set when `confirm` belongs to an AppAction rather than an engine plan.
+    app_pending: Option<AppAction>,
+    /// Small pictures shown above the card text (deck pictures only), decoded from the same bytes that go into the file.
+    confirm_thumbs: Vec<Pixmap>,
+    /// The microphone notice has been shown once this session.
+    mic_told: bool,
+    history_warned: bool,
+    /// First message index the history file may hold: switching history ON mid-session starts from then, not from what was already on screen.
+    hist_from: usize,
+    /// Name of the conversation the window is in (item 19), mirrored in the data dir's
+    /// current-conversation state file so it survives restarts. None = unnamed.
+    conv_name: Option<String>,
     focus: Btn,
     /// Pixels scrolled up from the bottom of the chat (0 = latest).
     scroll: f32,
     /// Pixels scrolled down from the top of the plan panel.
     plan_scroll: f32,
     busy: bool,
+    /// A Laya "thinking" line is on screen (experimental opt-in): the worker still
+    /// holds the request, but typing and Esc stay live and the next reply replaces it.
+    thinking: bool,
     menu_sel: usize,
     /// Folders from the last "zi" reply (inside the home area only); a click or Tab fills the input with "list <path>".
     zi_rows: Vec<String>,
@@ -349,6 +500,7 @@ struct App {
     settings: theme::Settings,
     settings_open: bool,
     settings_sel: usize,
+    settings_scroll: f32,
     t0: std::time::Instant,
     r_gear: (f32, f32, f32, f32),
     input_w: f32,
@@ -542,7 +694,17 @@ impl App {
         pm.fill_path(&pb.finish().unwrap(), &p, FillRule::Winding, Transform::identity(), None);
     }
 
+    /// With PAWLINE_PERF=1 every redraw prints its wall time (render + present) to stderr, one line each. Off otherwise.
     fn draw(&mut self) {
+        if std::env::var_os("PAWLINE_PERF").is_none() {
+            return self.draw_inner();
+        }
+        let t = std::time::Instant::now();
+        self.draw_inner();
+        eprintln!("PERF draw_ms={:.1} expanded={} settings={}", t.elapsed().as_secs_f64() * 1000.0, self.expanded, self.settings_open);
+    }
+
+    fn draw_inner(&mut self) {
         let st = if self.hidden { "hidden" } else if self.busy { "busy" } else if self.confirm.is_some() { "confirm" } else if self.expanded { "open" } else { "idle" };
         if let Ok(mut g) = self.state.lock() {
             *g = st;
@@ -614,7 +776,7 @@ impl App {
     /// Panel background: a three-colour diagonal gradient whose colours fade into each other, drifting slowly.
     fn fill_bg(&self, pm: &mut Pixmap, w: f32, h: f32) {
         let th = self.th();
-        let off = theme::drift_offset(self.t0.elapsed().as_secs_f32(), w, self.settings.drift);
+        let off = theme::drift_offset(self.t0.elapsed().as_secs_f32(), w, self.drift_on());
         let c = |k: usize| Color::from_rgba8(th.bg[k].0, th.bg[k].1, th.bg[k].2, 245);
         let g = LinearGradient::new(
             Point::from_xy(off, 0.0),
@@ -633,19 +795,56 @@ impl App {
     }
 
     fn settings_rows(&self) -> usize {
-        theme::THEMES.len() + 2
+        THEME_ROWS + 11
+    }
+
+    /// The drift animation runs only when its own switch is on and reduced motion is off (item 13).
+    fn drift_on(&self) -> bool {
+        self.settings.drift && !self.settings.reduced_motion
     }
 
     fn apply_setting(&mut self, row: usize) {
-        if row < theme::THEMES.len() {
-            self.settings.theme = row;
-        } else if row == theme::THEMES.len() {
+        if row < THEME_ROWS {
+            self.settings.theme = (self.settings.theme + 1) % theme::THEMES.len();
+        } else if row == THEME_ROWS {
             self.settings.drift = !self.settings.drift;
-        } else {
+        } else if row == THEME_ROWS + 1 {
+            self.settings.reduced_motion = !self.settings.reduced_motion;
+        } else if row == THEME_ROWS + 2 {
             self.settings.speak = !self.settings.speak;
             if !self.settings.speak {
                 self.stop_speaking();
             }
+        } else if row == THEME_ROWS + 7 {
+            self.settings.assist = !self.settings.assist;
+            bridge::set_assist_enabled(self.settings.assist);
+        } else if row == THEME_ROWS + 8 {
+            self.settings.speech_rate = (self.settings.speech_rate + 1) % theme::SPEECH_RATES.len();
+        } else if row == THEME_ROWS + 6 {
+            self.toggle_history();
+        } else if row == THEME_ROWS + 5 {
+            self.settings.mic_blocked = !self.settings.mic_blocked;
+            if self.settings.mic_blocked {
+                match self.vstate {
+                    VState::Listening { .. } => self.cancel_listening(),
+                    VState::Working => self.cancel_working(),
+                    VState::Idle => {}
+                }
+            }
+        } else if row == THEME_ROWS + 4 {
+            self.settings.offline = !self.settings.offline;
+            pawline_core::netgate::set_offline(self.settings.offline);
+        } else if row == THEME_ROWS + 9 {
+            self.settings.files_blocked = !self.settings.files_blocked;
+            pawline_core::filesgate::set_read_only(self.settings.files_blocked);
+        } else if row == THEME_ROWS + 10 {
+            self.settings.voice = (self.settings.voice + 1) % theme::VOICES.len();
+        } else {
+            let i = theme::TEXT_SIZES.iter().position(|p| *p == self.settings.text_pct).unwrap_or(0);
+            self.settings.text_pct = theme::TEXT_SIZES[(i + 1) % theme::TEXT_SIZES.len()];
+            theme::set_text_pct(self.settings.text_pct);
+            self.scroll = 0.0;
+            self.plan_scroll = 0.0;
         }
         if let Some(p) = settings_path() {
             let _ = theme::save(&p, &self.settings);
@@ -653,39 +852,144 @@ impl App {
     }
 
     fn settings_geom(&self) -> (f32, f32) {
-        (CHAT_TOP + 34.0, 34.0)
+        (CHAT_TOP + 34.0, 26.0)
+    }
+
+    /// Top and bottom of the scrollable settings area: below the header line, above the window edge.
+    fn settings_viewport(&self) -> (f32, f32) {
+        (CHAT_TOP + 34.0, self.h as f32 - 12.0)
+    }
+
+    /// Privacy notes shown under the settings rows. Assembled in one place so the drawn text and the
+    /// scrollable content height can never disagree.
+    fn settings_notes(&self) -> Vec<String> {
+        let mut notes = vec!["Offline mode stops Pawline's own requests only, not apps you open.".to_string(), history::NOTE.to_string()];
+        // Offline mode covers Pawline's built-in requests only. Say when a custom speech command is configured.
+        let custom: Vec<&str> = ["PAWLINE_STT_CMD", "PAWLINE_TTS_CMD", "PAWLINE_REC_CMD"].into_iter().filter(|k| std::env::var_os(k).is_some()).collect();
+        if !custom.is_empty() {
+            notes.push(format!("Custom command set ({}): Pawline cannot control whether it uses the network.", custom.join(", ")));
+        }
+        notes
+    }
+
+    /// Full height of the scrollable settings content (rows plus wrapped notes), in pixels.
+    fn settings_content_h(&mut self, w: f32) -> f32 {
+        let (_, rh) = self.settings_geom();
+        let mut hgt = self.settings_rows() as f32 * (rh + 4.0) + 14.0 + 33.0;
+        for n in self.settings_notes() {
+            hgt += self.wrap(&n, 12.0, w - 2.0 * PAD - 8.0).len() as f32 * 15.0;
+        }
+        hgt
+    }
+
+    /// Keep the selected settings row inside the visible area (called after Up/Down). On the last
+    /// row the notes below it count too, so a keyboard-only user can read the whole panel.
+    fn settings_ensure_visible(&mut self) {
+        let (_, rh) = self.settings_geom();
+        let (top, bot) = self.settings_viewport();
+        let row_top = self.settings_sel as f32 * (rh + 4.0);
+        let item_bot = if self.settings_sel + 1 == self.settings_rows() {
+            self.settings_content_h(self.w as f32)
+        } else {
+            row_top + rh
+        };
+        self.settings_scroll = scroll_to_visible(self.settings_scroll, row_top, item_bot, bot - top);
+    }
+
+    /// Fill a rounded rect clipped to the visible settings area.
+    fn settings_fill(&self, pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, r: f32, c: (u8, u8, u8, u8)) {
+        let (top, bot) = self.settings_viewport();
+        let (y0, y1) = (y.max(top), (y + h).min(bot));
+        if y1 > y0 {
+            fill(pm, &rrect(x, y0, w, y1 - y0, r), c);
+        }
     }
 
     fn draw_settings(&mut self, pm: &mut Pixmap, w: f32, h: f32) {
-        let _ = h;
         self.text(pm, "Settings", PAD + 4.0, CHAT_TOP + 18.0, 16.0, (235, 230, 250), (0.0, h));
+        // Version display: local only, from the package version at build time. Right-aligned on the
+        // header line so the settings layout grows by zero rows (no scroll layout yet).
+        let ver = concat!("Pawline ", env!("CARGO_PKG_VERSION"));
+        let vw = self.measure(ver, 12.0, shape::Mode::Auto);
+        self.text(pm, ver, (w - PAD - 4.0 - vw).max(PAD + 90.0), CHAT_TOP + 18.0, 12.0, (150, 145, 175), (0.0, h));
         let (top, rh) = self.settings_geom();
+        let (_, bot) = self.settings_viewport();
+        let content = self.settings_content_h(w);
+        self.settings_scroll = scroll_clamp(self.settings_scroll, content, bot - top);
+        let scroll = self.settings_scroll;
+        let clip = (top, bot);
         for k in 0..self.settings_rows() {
-            let y = top + k as f32 * (rh + 6.0);
+            let y = top + k as f32 * (rh + 4.0) - scroll;
+            if y + rh < top || y > bot {
+                continue;
+            }
             let sel = k == self.settings_sel;
-            fill(pm, &rrect(PAD - 2.0, y, w - 2.0 * PAD + 4.0, rh, 10.0), if sel { (70, 64, 110) } else { (44, 40, 64) }.rgba());
-            if k < theme::THEMES.len() {
-                let t = &theme::THEMES[k];
+            self.settings_fill(pm, PAD - 2.0, y, w - 2.0 * PAD + 4.0, rh, 10.0, if sel { (70, 64, 110) } else { (44, 40, 64) }.rgba());
+            if k < THEME_ROWS {
+                let t = &theme::THEMES[self.settings.theme.min(theme::THEMES.len() - 1)];
                 for (i, c) in t.bg.iter().enumerate() {
-                    fill(pm, &rrect(PAD + 8.0 + i as f32 * 18.0, y + 8.0, 18.0, 18.0, 4.0), (c.0, c.1, c.2, 255));
+                    self.settings_fill(pm, PAD + 8.0 + i as f32 * 18.0, y + 4.0, 18.0, 18.0, 4.0, (c.0, c.1, c.2, 255));
                 }
-                fill(pm, &rrect(PAD + 66.0, y + 8.0, 18.0, 18.0, 9.0), (t.accent.0, t.accent.1, t.accent.2, 255));
-                let label = format!("Theme: {}", t.name);
-                self.text(pm, &label, PAD + 96.0, y + 22.0, 14.0, (255, 255, 255), (0.0, h));
-                if k == self.settings.theme {
-                    self.text(pm, "selected", w - PAD - 74.0, y + 22.0, 12.0, (150, 230, 180), (0.0, h));
-                }
-            } else if k == theme::THEMES.len() + 1 {
+                self.settings_fill(pm, PAD + 66.0, y + 4.0, 18.0, 18.0, 9.0, (t.accent.0, t.accent.1, t.accent.2, 255));
+                let label = format!("Theme: {} (Enter for next)", t.name);
+                self.text(pm, &label, PAD + 96.0, y + 18.0, 14.0, (255, 255, 255), clip);
+            } else if k == THEME_ROWS + 10 {
+                let label = format!("Voice (espeak voices only): {} (Enter to change)", theme::VOICES[self.settings.voice.min(theme::VOICES.len() - 1)].0);
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
+            } else if k == THEME_ROWS + 9 {
+                let label = format!("File changes: {}", if self.settings.files_blocked { "BLOCKED (Pawline stays read-only)" } else { "allowed" });
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
+            } else if k == THEME_ROWS + 8 {
+                let label = format!("Speech rate: {} (Enter to change)", theme::SPEECH_RATES[self.settings.speech_rate.min(theme::SPEECH_RATES.len() - 1)].0);
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
+            } else if k == THEME_ROWS + 7 {
+                let label = format!("AI suggestions (local model): {}", if self.settings.assist { "on" } else { "off" });
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
+            } else if k == THEME_ROWS + 6 {
+                let label = format!("Keep conversation on this computer: {}", if self.settings.keep_history { "ON" } else { "off" });
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
+            } else if k == THEME_ROWS + 5 {
+                let label = format!("Microphone: {}", if self.settings.mic_blocked { "BLOCKED (voice input off)" } else { "allowed when you press the mic button" });
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
+            } else if k == THEME_ROWS + 4 {
+                let label = format!("Offline mode (Pawline's own online features): {}", if self.settings.offline { "ON" } else { "off" });
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
+            } else if k == THEME_ROWS + 3 {
+                let label = format!("Text size: {}% (Enter to change)", self.settings.text_pct);
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
+            } else if k == THEME_ROWS + 2 {
                 let label = format!("Speak replies aloud (local engine): {}", if self.settings.speak { "on" } else { "off" });
-                self.text(pm, &label, PAD + 10.0, y + 22.0, 14.0, (255, 255, 255), (0.0, h));
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
+            } else if k == THEME_ROWS + 1 {
+                let label = format!("Reduced motion (pauses colour drift): {}", if self.settings.reduced_motion { "ON" } else { "off" });
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
             } else {
-                let label = format!("Colours drift slowly: {}", if self.settings.drift { "on" } else { "off" });
-                self.text(pm, &label, PAD + 10.0, y + 22.0, 14.0, (255, 255, 255), (0.0, h));
+                let label = if self.settings.reduced_motion && self.settings.drift {
+                    "Colours drift slowly: paused (reduced motion is on)".to_string()
+                } else {
+                    format!("Colours drift slowly: {}", if self.settings.drift { "on" } else { "off" })
+                };
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
             }
         }
-        let note_y = top + self.settings_rows() as f32 * (rh + 6.0) + 14.0;
-        self.text(pm, "Up/Down choose, Enter applies, Esc closes.", PAD + 4.0, note_y, 12.0, (190, 185, 215), (0.0, h));
-        self.text(pm, "Saved on this computer only; no request text.", PAD + 4.0, note_y + 18.0, 12.0, (190, 185, 215), (0.0, h));
+        let note_y = top + self.settings_rows() as f32 * (rh + 4.0) + 14.0 - scroll;
+        self.text(pm, "Up/Down choose, Enter applies, Esc closes. The settings file", PAD + 4.0, note_y, 12.0, (190, 185, 215), clip);
+        self.text(pm, "holds only these switches, no message text.", PAD + 4.0, note_y + 15.0, 12.0, (190, 185, 215), clip);
+        let mut ny = note_y + 33.0;
+        for n in self.settings_notes() {
+            for l in self.wrap(&n, 12.0, w - 2.0 * PAD - 8.0) {
+                self.text(pm, &l, PAD + 4.0, ny, 12.0, (190, 185, 215), clip);
+                ny += 15.0;
+            }
+        }
+        // Scrollbar, drawn only when the content is taller than the visible area.
+        if content > bot - top {
+            let vh = bot - top;
+            fill(pm, &rrect(w - 7.0, top, 3.0, vh, 1.5), (60, 56, 84, 255));
+            let thumb_h = (vh * vh / content).max(18.0);
+            let thumb_y = top + (vh - thumb_h) * scroll / (content - vh);
+            fill(pm, &rrect(w - 7.0, thumb_y, 3.0, thumb_h, 1.5), (140, 130, 190, 255));
+        }
     }
 
     fn draw_card(&mut self, pm: &mut Pixmap) {
@@ -724,7 +1028,7 @@ impl App {
             let wmax = inner_w - 30.0;
             let chars: Vec<char> = self.input.text().chars().collect();
             self.input_w = wmax;
-            let full = self.shaper.layout(&self.input.text(), PX, shape::Mode::Auto);
+            let full = self.shaper.layout(&self.input.text(), px(), shape::Mode::Auto);
             let widths: Vec<f32> = full.ext.iter().map(|e| (e.1 - e.0).max(0.0)).collect();
             let spaces: Vec<bool> = chars.iter().map(|c| *c == ' ').collect();
             let lines = wrap_ranges(&widths, wmax, &spaces);
@@ -738,7 +1042,7 @@ impl App {
                 self.input_top = cl + 1 - nl;
             }
             self.input_top = self.input_top.min(lines.len().saturating_sub(nl));
-            self.input_extra = (nl as f32 - 1.0) * LH + self.chip_h();
+            self.input_extra = (nl as f32 - 1.0) * lh() + self.chip_h();
             let bh = 40.0 + self.input_extra;
             let top = h - 12.0 - bh;
             self.input_box_top = top;
@@ -755,22 +1059,22 @@ impl App {
             for k in 0..nl {
                 let li = self.input_top + k;
                 let (ls, le) = lines[li];
-                let ly = top + 6.0 + self.chip_h() + k as f32 * LH;
+                let ly = top + 6.0 + self.chip_h() + k as f32 * lh();
                 let text: String = chars[ls..le].iter().collect();
-                let laid = self.shaper.layout(&text, PX, shape::Mode::Auto);
+                let laid = self.shaper.layout(&text, px(), shape::Mode::Auto);
                 let x0 = PAD + 8.0 + if laid.rtl { (wmax - laid.width).max(0.0) } else { 0.0 };
                 if let Some((sa, sb)) = sel {
                     let (a, b) = (sa.max(ls), sb.min(le));
                     if b > a {
                         for (l, r) in laid.sel_rects(a - ls, b - ls) {
-                            fill(pm, &rrect(x0 + l, ly, r - l, LH, 3.0), self.th().accent.rgba());
+                            fill(pm, &rrect(x0 + l, ly, r - l, lh(), 3.0), self.th().accent.rgba());
                         }
                     }
                 }
-                self.text(pm, &text, x0, ly + 15.0, PX, col, (0.0, h));
+                self.text(pm, &text, x0, ly + 15.0, px(), col, (0.0, h));
                 if li == cl {
                     let cx = laid.caret_x(caret.min(le) - ls);
-                    fill(pm, &rrect(x0 + cx, ly + 1.0, 2.0, LH - 2.0, 1.0), (255, 255, 255, 255));
+                    fill(pm, &rrect(x0 + cx, ly + 1.0, 2.0, lh() - 2.0, 1.0), (255, 255, 255, 255));
                 }
             }
             self.input_lines = lines;
@@ -792,7 +1096,11 @@ impl App {
         let hint_top = self.chat_max > 0.0 && self.scroll < self.chat_max - 1.0;
         let hint_bot = self.scroll > 1.0;
         let top0 = CHAT_TOP;
-        let bot0 = h - BOTTOM - self.input_extra + 4.0 - if self.reply.is_some() { REPLY_H } else { 0.0 };
+        let voice_bar = !matches!(self.vstate, VState::Idle) || self.speaking.is_some() || self.vnote;
+        // The zi chooser (pick rows) is an overlay above the input box: shrink the
+        // message view while it is up so the last bubble is never hidden under it.
+        let zi_h = if self.zi_active() { self.zi_rows.len() as f32 * 26.0 + 22.0 + 8.0 + 8.0 } else { 0.0 };
+        let bot0 = h - BOTTOM - self.input_extra + 4.0 - if self.reply.is_some() { REPLY_H } else { 0.0 } - if voice_bar { 34.0 } else { 0.0 } - zi_h;
         let top = top0 + if hint_top { 20.0 } else { 0.0 };
         let bot = bot0 - if hint_bot { 20.0 } else { 0.0 };
         // layout all messages
@@ -817,10 +1125,10 @@ impl App {
             } else {
                 None
             };
-            let lines = if mdl.is_some() { vec![] } else { self.wrap(&text, PX, bub_w - 20.0) };
+            let lines = if mdl.is_some() { vec![] } else { self.wrap(&text, px(), bub_w - 20.0) };
             let body_h = match &mdl {
                 Some(m) => md::height(m),
-                None => lines.len() as f32 * LH,
+                None => lines.len() as f32 * lh(),
             };
             let bh = body_h + 14.0 + quote.as_ref().map_or(0.0, |_| 18.0) + thumb.as_ref().map_or(0.0, |t| t.height() as f32 + 6.0);
             total += bh + 8.0;
@@ -838,7 +1146,7 @@ impl App {
         for (idx, (user, kind, lines, bh, thumb, quote, mdl)) in items.into_iter().enumerate() {
             let mut bw0 = 0.0f32;
             for l in &lines {
-                bw0 = bw0.max(self.measure(l, PX, line_mode(l)));
+                bw0 = bw0.max(self.measure(l, px(), line_mode(l)));
             }
             let qw = match &quote {
                 Some(q) => (self.measure(q, 12.0, shape::Mode::Auto) + 8.0).min(bub_w - 20.0),
@@ -875,10 +1183,10 @@ impl App {
                     }
                 }
                 for (i, l) in lines.iter().enumerate() {
-                    self.para(&mut cp, l, bx + 10.0, bw - 20.0, y + qh + 7.0 + (i as f32 + 1.0) * LH - 5.0, PX, (235, 232, 245), (0.0, view), line_mode(l));
+                    self.para(&mut cp, l, bx + 10.0, bw - 20.0, y + qh + 7.0 + (i as f32 + 1.0) * lh() - 5.0, px(), (235, 232, 245), (0.0, view), line_mode(l));
                 }
                 if let Some(t) = &thumb {
-                    let body_h = mdl.as_ref().map_or(lines.len() as f32 * LH, |m| md::height(m));
+                    let body_h = mdl.as_ref().map_or(lines.len() as f32 * lh(), |m| md::height(m));
                     let ty = y + qh + 7.0 + body_h + 2.0;
                     cp.draw_pixmap((bx + 10.0) as i32, ty as i32, t.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
                 }
@@ -956,16 +1264,37 @@ impl App {
         } else {
             text
         };
-        let lines = self.wrap(&text, PX, inner_w - 16.0);
-        let total = lines.len() as f32 * LH + 16.0;
+        let lines = self.wrap(&text, px(), inner_w - 16.0);
+        // Deck pictures: a labelled strip above the text. It scrolls with the text, so the card text is never covered.
+        const PREVIEW_NOTE: &str = "Picture preview, decoded here from the bytes that go into the file. Not a PowerPoint render.";
+        let note_lines = if self.confirm_thumbs.is_empty() { vec![] } else { self.wrap(PREVIEW_NOTE, px(), inner_w - 16.0) };
+        let strip = if self.confirm_thumbs.is_empty() { 0.0 } else { THUMB_H as f32 + 8.0 + lh() * note_lines.len() as f32 };
+        let total = lines.len() as f32 * lh() + 16.0 + strip;
         let view = bot - top - 6.0;
         self.plan_max = (total - view).max(0.0);
         if self.plan_scroll > self.plan_max {
             self.plan_scroll = self.plan_max;
         }
+        if strip > 0.0 {
+            for (k, nl) in note_lines.iter().enumerate() {
+                let ly = top + 8.0 + (k as f32 + 1.0) * lh() - 5.0 - self.plan_scroll;
+                self.text_m(pm, nl, PAD + 4.0, ly, px(), (190, 185, 215), (top + 3.0, bot - 3.0), shape::Mode::Strict);
+            }
+            let mut x = PAD + 4.0;
+            let ty = top + 8.0 + lh() * note_lines.len() as f32 - self.plan_scroll;
+            // Clip to the card panel so a scrolled picture never paints over the header or the buttons.
+            let mut clip = tiny_skia::Mask::new(pm.width(), pm.height());
+            if let (Some(c), Some(r)) = (clip.as_mut(), tiny_skia::Rect::from_xywh(PAD, top + 3.0, w - 2.0 * PAD, (bot - 3.0) - (top + 3.0))) {
+                c.fill_path(&tiny_skia::PathBuilder::from_rect(r), tiny_skia::FillRule::Winding, false, Transform::identity());
+            }
+            for t in &self.confirm_thumbs {
+                pm.draw_pixmap(x as i32, ty as i32, t.as_ref(), &PixmapPaint::default(), Transform::identity(), clip.as_ref());
+                x += t.width() as f32 + 8.0;
+            }
+        }
         for (i, l) in lines.iter().enumerate() {
-            let y = top + 8.0 + (i as f32 + 1.0) * LH - 5.0 - self.plan_scroll;
-            self.text_m(pm, l, PAD + 4.0, y, PX, (235, 230, 255), (top + 3.0, bot - 3.0), shape::Mode::Strict);
+            let y = top + 8.0 + strip + (i as f32 + 1.0) * lh() - 5.0 - self.plan_scroll;
+            self.text_m(pm, l, PAD + 4.0, y, px(), (235, 230, 255), (top + 3.0, bot - 3.0), shape::Mode::Strict);
         }
         let can_yes = self.can_approve();
         if self.plan_max > 0.0 && !can_yes {
@@ -975,14 +1304,14 @@ impl App {
         let by = h - 46.0;
         self.r_yes = (PAD, by, 120.0, 34.0);
         self.r_no = (PAD + 136.0, by, 120.0, 34.0);
-        let (yes_bg, yes_fg) = if can_yes { ((46, 125, 80, 255), (255, 255, 255)) } else { ((60, 60, 66, 255), (130, 130, 140)) };
+        let (yes_bg, yes_fg) = if can_yes { ((46, 125, 80, 255), (255, 255, 255)) } else { ((60, 60, 66, 255), theme::DISABLED_FG) };
         fill(pm, &rrect(self.r_yes.0, by, 120.0, 34.0, 10.0), yes_bg);
         fill(pm, &rrect(self.r_no.0, by, 120.0, 34.0, 10.0), (110, 60, 70, 255));
-        self.text(pm, "Do it", self.r_yes.0 + 36.0, by + 23.0, PX, yes_fg, (0.0, h));
-        self.text(pm, "Cancel", self.r_no.0 + 30.0, by + 23.0, PX, (255, 255, 255), (0.0, h));
+        self.text(pm, "Do it", self.r_yes.0 + 36.0, by + 23.0, 15.0, yes_fg, (0.0, h));
+        self.text(pm, "Cancel", self.r_no.0 + 30.0, by + 23.0, 15.0, (255, 255, 255), (0.0, h));
         let fr = if self.focus == Btn::Yes { self.r_yes } else { self.r_no };
         stroke(pm, &rrect(fr.0 - 2.0, fr.1 - 2.0, fr.2 + 4.0, fr.3 + 4.0, 12.0), (34, 211, 238, 255), 2.5);
-        self.text(pm, "Left/Right, Enter", PAD + 280.0, by + 21.0, 12.0, (150, 145, 175), (0.0, h));
+        self.text(pm, "Left/Right, Enter", PAD + 280.0, by + 21.0, 12.0, theme::HINT, (0.0, h));
     }
 
     /// "Do it" is enabled only when the entire plan has been seen.
@@ -1049,10 +1378,10 @@ impl App {
         self.orb(pm, 20.0, h / 2.0, 11.0, self.busy);
         let chars: Vec<char> = self.input.text().chars().collect();
         if chars.is_empty() {
-            self.text(pm, "Ask Pawline...", 40.0, h / 2.0 + 5.0, PX, (150, 145, 175), (0.0, w));
+            self.text(pm, "Ask Pawline...", 40.0, h / 2.0 + 5.0, px(), theme::HINT, (0.0, w));
             return;
         }
-        let full = self.shaper.layout(&self.input.text(), PX, shape::Mode::Auto);
+        let full = self.shaper.layout(&self.input.text(), px(), shape::Mode::Auto);
         let widths: Vec<f32> = full.ext.iter().map(|e| (e.1 - e.0).max(0.0)).collect();
         let avail = w - 40.0 - 12.0;
         let caret = self.input.caret().min(chars.len());
@@ -1067,17 +1396,517 @@ impl App {
             end += 1;
         }
         let shown: String = chars[start..end].iter().collect();
-        let laid = self.shaper.layout(&shown, PX, shape::Mode::Auto);
+        let laid = self.shaper.layout(&shown, px(), shape::Mode::Auto);
         let x0 = 40.0 + if laid.rtl { (avail - laid.width).max(0.0) } else { 0.0 };
-        self.text(pm, &shown, x0, h / 2.0 + 5.0, PX, (255, 255, 255), (0.0, w));
+        self.text(pm, &shown, x0, h / 2.0 + 5.0, px(), (255, 255, 255), (0.0, w));
         let cx = laid.caret_x(caret.min(end) - start);
         fill(pm, &rrect(x0 + cx, h / 2.0 - 9.0, 2.0, 18.0, 1.0), (255, 255, 255, 255));
     }
+
+    /// Archived copies made by "new conversation", oldest first.
+    /// "search history for X": read-only search of the saved conversation and archived copies.
+    /// Never creates or changes anything; the unsaved lines on screen are not searched.
+    fn reply_history_search(&mut self, query: &str) {
+        let q = query.trim();
+        if q.is_empty() {
+            self.push(false, "message", "Say what to search for, for example: search history for cmake".into(), None);
+            return;
+        }
+        let Some(dir) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
+            self.push(false, "message", "There is no data folder to search.".into(), None);
+            return;
+        };
+        let (hits, total) = history::search_dir(&dir, q);
+        if total == 0 {
+            let has_files = !history::list_dir(&dir).is_empty();
+            let text = if has_files {
+                format!("No saved line contains \"{q}\". Searched the saved conversation and archived copies; the unsaved lines on this screen were not searched.")
+            } else {
+                format!("No saved conversation to search for \"{q}\": history keeping is off and nothing is saved. Turn it on in Settings first. Nothing was written.")
+            };
+            self.push(false, "message", text, None);
+            return;
+        }
+        let mut text = if total == 1 {
+            format!("1 saved line contains \"{q}\":")
+        } else {
+            format!("{total} saved lines contain \"{q}\":")
+        };
+        for h in &hits {
+            let who = if h.user { "You" } else { "Pawline" };
+            let where_ = match &h.source {
+                history::Src::Current => String::new(),
+                history::Src::Named(slug) => format!(" (conversation \"{slug}\")"),
+                history::Src::Archived => " (archived copy)".to_string(),
+            };
+            text.push_str(&format!("\n{who}{where_}: {}", h.text));
+        }
+        if total > hits.len() {
+            text.push_str(&format!("\n{} more not shown.", total - hits.len()));
+        }
+        text.push_str("\nSearched saved files only, nothing was written or sent.");
+        self.push(false, "message", text, None);
+    }
+
+    fn history_archives() -> Vec<std::path::PathBuf> {
+        let Some(dir) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else { return vec![] };
+        let mut v: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.file_name().map(|n| n.to_string_lossy().starts_with("history-archived-")).unwrap_or(false))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Named-conversation files (history-named-*.txt), sorted (item 19).
+    fn history_named_files() -> Vec<std::path::PathBuf> {
+        let Some(dir) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else { return vec![] };
+        let mut v: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("history-named-") && n.ends_with(".txt")).unwrap_or(false))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Turn conversation keeping on or off. On saves from now; off deletes the saved file AND every
+    /// archived copy (they are the same retained chat text). If anything cannot be deleted it stays
+    /// on and says so.
+    fn toggle_history(&mut self) {
+        let Some(p) = history_path() else {
+            self.push(false, "error", "No place to keep a conversation file was found, so nothing is saved.".into(), None);
+            return;
+        };
+        if self.settings.keep_history {
+            let archives = Self::history_archives();
+            let named = Self::history_named_files();
+            let mut failed: Vec<String> = Vec::new();
+            if let Err(e) = history::delete(&p) {
+                failed.push(format!("history.txt: {e}"));
+            }
+            for a in archives.iter().chain(named.iter()) {
+                if let Err(e) = std::fs::remove_file(a) {
+                    failed.push(format!("{}: {e}", a.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
+                }
+            }
+            if let Some(d) = p.parent() {
+                if let Err(e) = std::fs::remove_file(d.join("current-conversation")) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        failed.push(format!("current-conversation: {e}"));
+                    }
+                }
+            }
+            if failed.is_empty() {
+                self.settings.keep_history = false;
+                self.conv_name = None;
+                let extra = archives.len() + named.len();
+                if extra > 0 {
+                    self.push(false, "message", format!("Also deleted {extra} archived or named conversation file(s) and the current conversation's name."), None);
+                }
+            } else {
+                self.push(false, "error", format!("Could not delete everything ({}), so saving stays ON.", failed.join(", ")), None);
+            }
+        } else {
+            self.hist_from = self.msgs.len();
+            self.settings.keep_history = true;
+            self.persist_history();
+        }
+    }
+
+    /// Shared gate for the named-conversation commands (item 19): they keep things on disk, so
+    /// they need history keeping. Returns the data dir when usable; otherwise says so honestly.
+    fn named_conv_gate(&mut self) -> Option<std::path::PathBuf> {
+        if !self.settings.keep_history {
+            self.push(false, "message", "Naming and switching conversations keeps them on disk, so history keeping has to be on: turn it on in Settings first. Nothing was changed.".into(), None);
+            self.draw();
+            return None;
+        }
+        let Some(dir) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
+            self.push(false, "error", "No place to keep conversation files was found, so nothing was changed.".into(), None);
+            self.draw();
+            return None;
+        };
+        Some(dir)
+    }
+
+    /// "name this conversation X" (item 19). Reversible and nothing is written but the tiny
+    /// state file, so no confirm card; the reply says exactly what the name changes.
+    fn name_conversation(&mut self, name: &str) {
+        let name = name.trim();
+        let Some(dir) = self.named_conv_gate() else { return };
+        let Some(slug) = history::slugify(name) else {
+            self.push(false, "error", "That name has no letters or numbers I can use in a file name. Try adding Latin letters or digits. Nothing was changed.".into(), None);
+            self.draw();
+            return;
+        };
+        if self.conv_name.as_deref().and_then(history::slugify).as_deref() == Some(slug.as_str()) {
+            self.push(false, "message", format!("This conversation is already called \"{name}\". Nothing was changed."), None);
+            self.draw();
+            return;
+        }
+        if history::named_path(&dir, &slug).exists() {
+            self.push(false, "error", format!("A saved conversation called \"{name}\" already exists. Say \"switch to conversation {name}\" to open it, or pick another name. Nothing was changed."), None);
+            self.draw();
+            return;
+        }
+        match history::write_current_name(&dir, Some(name)) {
+            Ok(()) => {
+                self.conv_name = Some(name.to_string());
+                self.push(false, "message", format!("This conversation is now called \"{name}\". Its lines keep saving as you go; when you switch away or start another conversation, they are kept as history-named-{slug}.txt. Nothing was sent."), None);
+            }
+            Err(e) => self.push(false, "error", format!("Could not write the name ({e}). Nothing was changed."), None),
+        }
+        self.draw();
+    }
+
+    /// "new conversation called X" (item 19): same no-card flow as "new conversation" - the
+    /// current one is stashed with its disclosure note, the fresh one gets the name.
+    fn new_named_conversation(&mut self, name: &str) {
+        let name = name.trim();
+        let Some(dir) = self.named_conv_gate() else { return };
+        let Some(slug) = history::slugify(name) else {
+            self.push(false, "error", "That name has no letters or numbers I can use in a file name. Try adding Latin letters or digits. Nothing was changed.".into(), None);
+            self.draw();
+            return;
+        };
+        if history::named_path(&dir, &slug).exists() {
+            self.push(false, "error", format!("A saved conversation called \"{name}\" already exists. Say \"switch to conversation {name}\" to open it. Nothing was changed."), None);
+            self.draw();
+            return;
+        }
+        if self.conv_name.as_deref().and_then(history::slugify).as_deref() == Some(slug.as_str()) {
+            self.push(false, "message", format!("You are already in this conversation, and it is already called \"{name}\". Nothing was changed."), None);
+            self.draw();
+            return;
+        }
+        let (_, note) = self.stash_current_conversation();
+        self.conv_name = Some(name.to_string());
+        let saved_name = history::write_current_name(&dir, Some(name));
+        self.hist_from = 1;
+        self.msgs.clear();
+        self.msgs.push(Msg { user: false, kind: "welcome".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Ctrl+, opens Settings, Ctrl+C copies my last reply (clicking a reply copies it), Ctrl+R replies to a message.".into(), thumb: None, quote: None });
+        if let Some(n) = note {
+            self.msgs.push(Msg { user: false, kind: "restored".into(), md: false, text: n, thumb: None, quote: None });
+        }
+        match saved_name {
+            Ok(()) => self.msgs.push(Msg { user: false, kind: "message".into(), md: false, text: format!("New conversation \"{name}\" started. I remember none of the earlier lines, and none of them can trigger anything now. Nothing was sent or deleted."), thumb: None, quote: None }),
+            Err(e) => self.msgs.push(Msg { user: false, kind: "error".into(), md: false, text: format!("New conversation started, but its name could not be saved ({e}); it is unnamed. Nothing else was changed."), thumb: None, quote: None }),
+        }
+        self.scroll = 0.0;
+        self.draw();
+    }
+
+    /// "switch to conversation X" (item 19): the card names exactly what loads and where the
+    /// current one goes; the decide arm does the file swap with rollback on failure.
+    fn ask_switch_conversation(&mut self, name: &str) {
+        let name = name.trim();
+        let Some(dir) = self.named_conv_gate() else { return };
+        let Some(slug) = history::slugify(name) else {
+            self.push(false, "error", "That name has no letters or numbers I can use in a file name. Say \"list conversations\" to see the saved ones. Nothing was changed.".into(), None);
+            self.draw();
+            return;
+        };
+        if self.conv_name.as_deref().and_then(history::slugify).as_deref() == Some(slug.as_str()) {
+            self.push(false, "message", format!("You are already in conversation \"{name}\". Nothing was changed."), None);
+            self.draw();
+            return;
+        }
+        let target = history::named_path(&dir, &slug);
+        if !target.is_file() {
+            self.push(false, "error", format!("There is no saved conversation called \"{name}\". Say \"list conversations\" to see them. Nothing was changed."), None);
+            self.draw();
+            return;
+        }
+        let k = history::load(&target).len();
+        let cur_desc = match &self.conv_name {
+            Some(n) => format!(" \"{n}\""),
+            None => String::new(),
+        };
+        let kept = if self.conv_name.is_some() {
+            " as its own named file".to_string()
+        } else if history_path().map(|p| p.exists()).unwrap_or(false) {
+            " as an archived copy".to_string()
+        } else {
+            String::new()
+        };
+        self.confirm = Some(format!("Switch to conversation \"{name}\" ({k} saved lines)? They load into this window. The current conversation{cur_desc} is kept first{kept}. Nothing is deleted and nothing is sent."));
+        self.app_pending = Some(AppAction::SwitchConversation { target, name: name.to_string() });
+        self.focus = Btn::No;
+        self.plan_scroll = 0.0;
+        self.draw();
+    }
+
+    /// "list conversations" (item 19): read-only numbered listing of the current saved
+    /// conversation and every archived copy, with real line counts.
+    fn reply_list_conversations(&mut self) {
+        let Some(dir) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
+            self.push(false, "message", "No place to keep a conversation file was found, so nothing is saved or listed.".into(), None);
+            self.draw();
+            return;
+        };
+        let entries = history::list_dir(&dir);
+        if entries.is_empty() {
+            let on = self.settings.keep_history;
+            self.push(false, "message", if on {
+                "There are no saved conversations yet: keeping is on, so lines from now on are saved. Nothing was written.".into()
+            } else {
+                "There are no saved conversations: history keeping is off and nothing is saved. Turn it on in Settings first. Nothing was written.".into()
+            }, None);
+            self.draw();
+            return;
+        }
+        let total = entries.len();
+        let mut text = String::from("Saved conversations (nothing was written or deleted):");
+        for (i, e) in entries.iter().take(20).enumerate() {
+            let label = if e.current {
+                match &self.conv_name {
+                    Some(n) => format!("current saved conversation \"{n}\""),
+                    None => e.label.clone(),
+                }
+            } else {
+                e.label.clone()
+            };
+            text.push_str(&format!("\n{}. {} - {} saved lines", i + 1, label, e.lines));
+        }
+        if total > 20 {
+            text.push_str(&format!("\n... and {} more archived copies", total - 20));
+        }
+        text.push_str("\nSay \"delete conversation 2\" to remove one (a card asks first), \"export history\" to write them to one readable text file, or \"delete saved history\" to remove everything.");
+        self.push(false, "message", text, None);
+        self.draw();
+    }
+
+    /// "delete conversation N" (item 19): resolve N against a FRESH listing and show the exact
+    /// file in a confirm card. A stale or wrong number deletes nothing.
+    fn ask_delete_conversation(&mut self, num: &str) {
+        let Some(dir) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
+            self.push(false, "error", "No place to keep a conversation file was found, so there is nothing to delete.".into(), None);
+            self.draw();
+            return;
+        };
+        let entries = history::list_dir(&dir);
+        let n: usize = num.trim().parse().unwrap_or(0);
+        if n == 0 || n > entries.len() {
+            self.push(false, "error", format!("There is no saved conversation number {n}: {} exist(s). Say \"list conversations\" to see them. Nothing was deleted.", entries.len()), None);
+            self.draw();
+            return;
+        }
+        let e = &entries[n - 1];
+        let card = if e.current {
+            format!("Delete conversation {n} - {} ({} saved lines)? This cannot be undone. The on-screen conversation stays and keeping stays ON, so lines from now on are saved fresh. Nothing else is touched.", e.label, e.lines)
+        } else {
+            format!("Delete conversation {n} - {} ({} saved lines)? This cannot be undone. Only that file is removed from the Pawline data folder. Nothing else is touched.", e.label, e.lines)
+        };
+        self.confirm = Some(card);
+        self.app_pending = Some(AppAction::DeleteConversation { path: e.path.clone(), label: format!("conversation {n} ({})", e.label), current: e.current, lines: e.lines });
+        self.focus = Btn::No;
+        self.plan_scroll = 0.0;
+        self.draw();
+    }
+
+    /// Preview + confirm card for "delete saved history": lists exactly what will go.
+    fn ask_delete_history(&mut self) {
+        let mut targets: Vec<std::path::PathBuf> = Vec::new();
+        let mut lines = 0usize;
+        if let Some(p) = history_path() {
+            if p.exists() {
+                lines = history::load(&p).len();
+                targets.push(p);
+            }
+        }
+        let archives = Self::history_archives();
+        let na = archives.len();
+        targets.extend(archives);
+        let named = Self::history_named_files();
+        let nn = named.len();
+        targets.extend(named);
+        if let Some(d) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+            if d.join("current-conversation").exists() {
+                targets.push(d.join("current-conversation"));
+            }
+        }
+        if targets.is_empty() {
+            self.push(false, "message", "There is no saved conversation to delete: no history file and no archived or named copies exist. Nothing was done.".into(), None);
+            self.draw();
+            return;
+        }
+        let mut text = format!("Delete your saved conversation? This cannot be undone.
+- history.txt ({lines} saved lines)");
+        if na > 0 {
+            text.push_str(&format!("\n- {na} archived conversation file(s) (history-archived-*.txt)"));
+        }
+        if nn > 0 {
+            text.push_str(&format!("\n- {nn} named conversation file(s) (history-named-*.txt)"));
+        }
+        text.push_str("\nHistory keeping will also turn OFF, and the current conversation's name (if any) is forgotten. Nothing else is touched.");
+        self.confirm = Some(text);
+        self.app_pending = Some(AppAction::DeleteHistory(targets));
+        self.focus = Btn::No;
+        self.plan_scroll = 0.0;
+        self.draw();
+    }
+
+    /// "export history": write the saved conversation and archived copies to ONE readable text file
+    /// in Documents (or home), after a card showing the exact path. Never overwrites (item 19).
+    fn ask_export_history(&mut self) {
+        let Some(dir) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
+            self.push(false, "message", "There is no data folder to export from.".into(), None);
+            self.draw();
+            return;
+        };
+        let (text, total) = history::render_export(&dir);
+        if total == 0 {
+            self.push(false, "message", "There is no saved conversation to export: history keeping is off or nothing is saved. Turn it on in Settings first. Nothing was written.".into(), None);
+            self.draw();
+            return;
+        }
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("/"));
+        let docs = home.join("Documents");
+        let base = if docs.is_dir() { docs } else { home };
+        let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let mut target = base.join(format!("pawline-history-{epoch}.txt"));
+        for i in 1..10 {
+            if !target.exists() {
+                break;
+            }
+            target = base.join(format!("pawline-history-{epoch}-{i}.txt"));
+        }
+        if target.exists() {
+            self.push(false, "error", "Every export name tried already exists; nothing was written. Rename or move the older exports first.".into(), None);
+            self.draw();
+            return;
+        }
+        let archives = Self::history_archives().len();
+        let mut card = format!("Export your saved conversation to:\n{}", target.display());
+        card.push_str(&format!("\n- {total} saved lines in total"));
+        if archives > 0 {
+            card.push_str(&format!("\n- includes {archives} archived conversation file(s), labelled in the export"));
+        }
+        card.push_str("\nThe file is plain readable text. A new file is written; existing files are never overwritten, and the originals stay as they are.");
+        self.confirm = Some(card);
+        self.app_pending = Some(AppAction::ExportHistory { target, text });
+        self.focus = Btn::No;
+        self.plan_scroll = 0.0;
+        self.draw();
+    }
+
+    /// "New conversation": drop every bubble but the welcome line. The saved history file is NOT
+    /// erased silently: with history ON its earlier lines are moved aside to a dated archive name
+    /// first, so nothing the user chose to keep is lost (item 19).
+    /// Move the saved current conversation aside for a new or switched conversation (item 19):
+    /// to its own named file when it has a name (latest state wins there), else to a dated
+    /// archived copy. Returns (where history.txt went, the note for the view).
+    fn stash_current_conversation(&mut self) -> (Option<std::path::PathBuf>, Option<String>) {
+        if !self.settings.keep_history {
+            return (None, None);
+        }
+        let Some(p) = history_path() else { return (None, None) };
+        if !p.exists() {
+            return (None, None);
+        }
+        if let Some(slug) = self.conv_name.as_deref().and_then(history::slugify) {
+            let dest = history::named_path(p.parent().unwrap_or(std::path::Path::new(".")), &slug);
+            let fname = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            return match std::fs::rename(&p, &dest) {
+                Ok(()) => (Some(dest), Some(format!("Your saved conversation was kept as conversation \"{}\" ({fname}) in the Pawline data folder; say \"switch to conversation {}\" to bring it back.", self.conv_name.as_deref().unwrap_or(&slug), self.conv_name.as_deref().unwrap_or(&slug)))),
+                Err(e) => (None, Some(format!("Could not move the saved conversation aside ({e}); it stays as it was and will still load next time."))),
+            };
+        }
+        let stamp = {
+            let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            format!("history-archived-{t}.txt")
+        };
+        let dest = p.with_file_name(stamp.clone());
+        match std::fs::rename(&p, &dest) {
+            Ok(()) => (Some(dest), Some(format!("Your saved conversation was kept as {stamp} in the Pawline data folder; it is not loaded again. Delete it there if you don't want it."))),
+            Err(e) => (None, Some(format!("Could not move the saved conversation aside ({e}); it stays as it was and will still load next time."))),
+        }
+    }
+
+    fn clear_conversation_view(&mut self) {
+        let (_, note) = self.stash_current_conversation();
+        if self.settings.keep_history {
+            self.hist_from = 1; // only the welcome line remains, and it is never saved
+        } else {
+            self.hist_from = 1;
+        }
+        // A plain "new conversation" starts unnamed.
+        self.conv_name = None;
+        if let Some(d) = history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+            let _ = history::write_current_name(&d, None);
+        }
+        self.msgs.clear();
+        self.msgs.push(Msg { user: false, kind: "welcome".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Ctrl+, opens Settings, Ctrl+C copies my last reply (clicking a reply copies it), Ctrl+R replies to a message.".into(), thumb: None, quote: None });
+        if let Some(n) = note {
+            self.msgs.push(Msg { user: false, kind: "restored".into(), md: false, text: n, thumb: None, quote: None });
+        }
+        self.scroll = 0.0;
+    }
+
+    fn persist_history(&mut self) {
+        if !self.settings.keep_history {
+            return;
+        }
+        let lines = Self::hist_lines(&self.msgs, self.hist_from);
+        if let Some(p) = history_path() {
+            if history::save(&p, &lines).is_err() && !self.history_warned {
+                self.history_warned = true;
+                self.msgs.push(Msg { user: false, kind: "restored".into(), text: "Could not save the conversation file. It is only kept in memory.".into(), md: false, thumb: None, quote: None });
+            }
+        }
+    }
+
+/// The visible bubble list is the one unbounded conversation structure (item 19): a long session
+/// would grow it forever. Cap it well above the history file's own newest-100 policy, so dropping
+/// old VIEW bubbles can never lose anything the saved file would have kept (persist_history saves
+/// from the same list and history::save keeps at most MAX_MSGS). The welcome line always stays,
+/// and each drop says what happened in the view itself.
+const MAX_VIEW: usize = 200;
+
+fn cap_view(msgs: &mut Vec<Msg>, hist_from: &mut usize) {
+    if msgs.len() <= App::MAX_VIEW {
+        return;
+    }
+    let drop = msgs.len() - App::MAX_VIEW;
+    // Never eat the welcome line (index 0); drop the oldest after it.
+    let end = (1 + drop).min(msgs.len());
+    msgs.drain(1..end);
+    let gone = end - 1;
+    if *hist_from > 0 {
+        *hist_from = hist_from.saturating_sub(gone).max(1);
+    }
+    msgs.insert(1, Msg {
+        user: false,
+        kind: "restored".into(),
+        text: format!("Dropped {gone} older bubbles from this view to keep Pawline responsive. Nothing was deleted: the saved conversation file (when on) keeps the newest lines, and this only trims what you see."),
+        md: false,
+        thumb: None,
+        quote: None,
+    });
+    // The marker added one back; the watermark moved one down with the drain, so balance it.
+    if *hist_from > 0 {
+        *hist_from += 1;
+    }
+}
+
+/// Messages the history file may hold, from index `from` on. The welcome line, cards, errors and
+/// anything before a mid-session ON are left out.
+fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
+    msgs.iter().skip(from).filter(|m| m.kind != "welcome" && history::keep_kind(m.user, &m.kind)).map(|m| history::Line { user: m.user, text: m.text.clone() }).collect()
+}
 
     fn push(&mut self, user: bool, kind: &str, text: String, quote: Option<String>) {
         let thumb = if user { None } else { saved_picture(&text).and_then(|p| thumb::load(&p, THUMB_W, THUMB_H)) };
         self.msgs.push(Msg { user, kind: kind.into(), text, md: false, thumb, quote });
         self.scroll = 0.0;
+        self.persist_history();
+        Self::cap_view(&mut self.msgs, &mut self.hist_from);
     }
 
     /// Skill-menu rows matching what is typed (only a bare "/word", nothing else on screen).
@@ -1105,7 +1934,7 @@ impl App {
 
     fn vcmds(&self) -> Result<(voice::Cmd, voice::Cmd, std::path::PathBuf), String> {
         let wav = voice::temp_wav();
-        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+        let home = pawline_core::platform::home_dir().unwrap_or_default();
         let has = &voice::has_in_path;
         let rec = voice::recorder(std::env::var("PAWLINE_REC_CMD").ok().as_deref(), has, &wav)?;
         let setup = voice::find_stt(&home, &|b| voice::has_in_path(b));
@@ -1117,6 +1946,15 @@ impl App {
     fn start_listening(&mut self) {
         if !matches!(self.vstate, VState::Idle) || self.busy {
             return;
+        }
+        if let Err(e) = voice::mic_gate(self.settings.mic_blocked) {
+            self.push(false, "message", e, None);
+            self.draw();
+            return;
+        }
+        if !self.mic_told {
+            self.mic_told = true;
+            self.push(false, "message", voice::mic_notice(std::env::var_os("PAWLINE_REC_CMD").is_some(), std::env::var_os("PAWLINE_STT_CMD").is_some()), None);
         }
         match self.vcmds().and_then(|(rec, st, wav)| voice::start_recording(&rec, &wav).map(|c| (c, st, wav))) {
             Ok((child, st, wav)) => {
@@ -1171,7 +2009,7 @@ impl App {
 
     fn on_voice(&mut self, ev: VEv) {
         let VEv::Text(job, _) = &ev;
-        if *job != self.vjob || !matches!(self.vstate, VState::Working) {
+        if !voice::accept_transcript(*job, self.vjob, matches!(self.vstate, VState::Working), self.settings.mic_blocked) {
             return; // cancelled or stale: drop it
         }
         self.vstate = VState::Idle;
@@ -1201,7 +2039,9 @@ impl App {
         if t.is_empty() {
             return;
         }
-        match voice::tts(std::env::var("PAWLINE_TTS_CMD").ok().as_deref(), &voice::has_in_path).and_then(|c| voice::speak(&c, &t)) {
+        let wpm = theme::SPEECH_RATES[self.settings.speech_rate.min(theme::SPEECH_RATES.len() - 1)].1;
+        let vname = theme::VOICES[self.settings.voice.min(theme::VOICES.len() - 1)].1;
+        match voice::tts(std::env::var("PAWLINE_TTS_CMD").ok().as_deref(), &voice::has_in_path, wpm, vname).and_then(|c| voice::speak(&c, &t)) {
             Ok(ch) => self.speaking = Some(ch),
             Err(e) => self.push(false, "error", format!("Spoken replies are on but: {e}"), None),
         }
@@ -1241,8 +2081,8 @@ impl App {
         let bar_y = self.input_box_top - 34.0;
         let bw = w - 2.0 * PAD + 4.0;
         let label = match &self.vstate {
-            VState::Listening { since, .. } => Some(format!("Listening {}:{:02}  (on this computer, not uploaded)", since.elapsed().as_secs() / 60, since.elapsed().as_secs() % 60)),
-            VState::Working => Some("Turning speech into text on this computer...".to_string()),
+            VState::Listening { since, .. } => Some(voice::listening_label(since.elapsed().as_secs(), std::env::var_os("PAWLINE_REC_CMD").is_some())),
+            VState::Working => Some(voice::working_label(std::env::var_os("PAWLINE_STT_CMD").is_some()).to_string()),
             VState::Idle if self.speaking.is_some() => Some("Speaking...".to_string()),
             VState::Idle => None,
         };
@@ -1541,7 +2381,51 @@ impl App {
                 return;
             }
         }
-        self.push(true, "user", t.clone(), quote);
+        // Copy the conversation (all of it or the last few messages) to the clipboard. Local only.
+        if let Some(count) = copy_conversation_count(&t) {
+            let (body, n_shown) = {
+                let view: Vec<&Msg> = match count {
+                    None => self.msgs.iter().collect(),
+                    Some(k) => self.msgs.iter().rev().take(k).collect::<Vec<_>>().into_iter().rev().collect(),
+                };
+                let body = view
+                    .iter()
+                    .map(|m| format!("{}: {}", if m.user { "You" } else { "Pawline" }, m.text))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                (body, view.len())
+            };
+            self.push(true, "user", t.clone(), quote.clone());
+            let note = if n_shown == 0 {
+                "Nothing to copy yet.".to_string()
+            } else if self.clip_copy(body) {
+                match count {
+                    Some(_) => format!("Copied the last {n_shown} message{} to the clipboard.", if n_shown == 1 { "" } else { "s" }),
+                    None => format!("Copied the whole conversation ({n_shown} message{}) to the clipboard.", if n_shown == 1 { "" } else { "s" }),
+                }
+            } else {
+                "No clipboard here, nothing copied.".to_string()
+            };
+            self.push(false, "message", note, None);
+            self.draw();
+            return;
+        }
+        self.push(true, "user", t.clone(), quote.clone());
+        if matches!(t.to_lowercase().trim_end_matches(['.', '!']), "reset settings" | "restore default settings" | "restore defaults" | "reset to defaults") {
+            theme::reset_look(&mut self.settings);
+            theme::set_text_pct(self.settings.text_pct);
+            if !self.settings.speak {
+                self.stop_speaking();
+            }
+            self.scroll = 0.0;
+            self.plan_scroll = 0.0;
+            if let Some(p) = settings_path() {
+                let _ = theme::save(&p, &self.settings);
+            }
+            self.push(false, "message", "Text size, theme, drifting colours and spoken replies are back to their defaults. Offline mode, the microphone block, the saved-conversation switch, reduced motion and the file-changes block were not changed, and no file or conversation was deleted.".into(), None);
+            self.draw();
+            return;
+        }
         self.busy = true;
         let _ = self.tx.send(Req::Text(t, self.pill.clone()));
     }
@@ -1565,14 +2449,188 @@ impl App {
             return;
         }
         self.confirm = None;
+        self.confirm_thumbs.clear();
         self.plan_scroll = 0.0;
+        if let Some(act) = self.app_pending.take() {
+            // App-level action: runs here, never reaches the engine.
+            if !yes {
+                let msg = match &act {
+                    AppAction::ExportHistory { .. } => "Cancelled. Nothing was written.",
+                    AppAction::DeleteHistory(_) | AppAction::DeleteConversation { .. } => "Cancelled. Nothing was deleted.",
+                    AppAction::SwitchConversation { .. } => "Cancelled. Nothing was changed.",
+                };
+                self.push(false, "message", msg.into(), None);
+                self.draw();
+                return;
+            }
+            match act {
+                AppAction::ExportHistory { target, text, .. } => {
+                    match history::write_no_replace(&target, &text) {
+                        Ok(true) => {
+                            let n = text.lines().filter(|l| l.starts_with("You: ") || l.starts_with("Pawline: ")).count();
+                            self.push(false, "message", format!("Exported {n} saved lines to {}. The originals are untouched.", target.display()), None);
+                        }
+                        Ok(false) => self.push(false, "error", format!("Nothing was written: {} already exists (it appeared after the card was shown). Ask again for a fresh name.", target.display()), None),
+                        Err(e) => self.push(false, "error", format!("The export could not be written ({e}). Nothing was changed."), None),
+                    }
+                    self.draw();
+                }
+                AppAction::DeleteHistory(paths) => {
+                    let mut gone = 0usize;
+                    let mut failed: Vec<String> = Vec::new();
+                    for p in &paths {
+                        match std::fs::remove_file(p) {
+                            Ok(()) => gone += 1,
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(e) => failed.push(format!("{}: {e}", p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())),
+                        }
+                    }
+                    if failed.is_empty() {
+                        self.settings.keep_history = false;
+                        self.conv_name = None;
+                        if let Some(p) = settings_path() {
+                            let _ = theme::save(&p, &self.settings);
+                        }
+                        self.push(false, "message", format!("Deleted the saved conversation and archived copies ({gone} files). History keeping is now OFF; turn it back on in Settings if you want it. Nothing else was touched."), None);
+                    } else {
+                        self.push(false, "error", format!("Deleted {gone} files, but these could not be deleted: {}. History keeping stays as it was.", failed.join(", ")), None);
+                    }
+                    self.draw();
+                }
+                AppAction::SwitchConversation { target, name } => {
+                    // Stash the current conversation first; if the swap itself fails, put it
+                    // back so the on-screen conversation and its file never disagree.
+                    let (stashed, note) = self.stash_current_conversation();
+                    let Some(cur) = history_path() else {
+                        self.push(false, "error", "No place for the conversation file was found. Nothing was changed.".into(), None);
+                        self.draw();
+                        return;
+                    };
+                    match std::fs::rename(&target, &cur) {
+                        Ok(()) => {
+                            let lines = history::load(&cur);
+                            let dir = cur.parent().map(|d| d.to_path_buf());
+                            if let Some(d) = &dir {
+                                let _ = history::write_current_name(d, Some(&name));
+                            }
+                            self.conv_name = Some(name.clone());
+                            self.hist_from = 1;
+                            self.msgs.clear();
+                            self.msgs.push(Msg { user: false, kind: "welcome".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Ctrl+, opens Settings, Ctrl+C copies my last reply (clicking a reply copies it), Ctrl+R replies to a message.".into(), thumb: None, quote: None });
+                            let mut head = format!("Switched to conversation \"{name}\": {} saved lines loaded. None of them can trigger anything by themselves.", lines.len());
+                            if let Some(n) = note {
+                                head.push(' ');
+                                head.push_str(&n);
+                            }
+                            self.msgs.push(Msg { user: false, kind: "restored".into(), md: false, text: head, thumb: None, quote: None });
+                            for l in lines {
+                                self.msgs.push(Msg { user: l.user, kind: if l.user { "user".into() } else { "message".into() }, md: false, thumb: None, quote: None, text: l.text });
+                            }
+                            self.scroll = 0.0;
+                        }
+                        Err(e) => {
+                            if let Some(back) = stashed {
+                                let _ = std::fs::rename(&back, &cur);
+                            }
+                            self.push(false, "error", format!("Could not switch ({e}). The current conversation is back as it was; nothing was changed."), None);
+                        }
+                    }
+                    self.draw();
+                }
+                AppAction::DeleteConversation { path, label, current, lines } => {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {
+                            if current {
+                                // Keeping stays ON: without this the next save would rewrite the
+                                // lines just deleted. From now on only new lines are saved.
+                                self.hist_from = self.msgs.len();
+                            }
+                            let extra = if current { " The on-screen conversation stays and keeping stays ON, so lines from now on are saved fresh." } else { "" };
+                            self.push(false, "message", format!("Deleted {label} ({lines} saved lines).{extra} Nothing else was touched."), None);
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            self.push(false, "message", format!("{label} was already gone. Nothing was deleted."), None);
+                        }
+                        Err(e) => self.push(false, "error", format!("Could not delete {label} ({e}). Nothing was changed."), None),
+                    }
+                    self.draw();
+                }
+            }
+            return;
+        }
         self.busy = true;
         let _ = self.tx.send(if yes { Req::Confirm } else { Req::Cancel });
     }
 
-    fn on_reply(&mut self, r: UiReply) {
+    fn on_reply(&mut self, r: UiReply, preview: Vec<Vec<u8>>) {
+        // The experimental Laya wait posts an interim line so the wait is visible;
+        // the real reply replaces that line instead of adding a second one.
+        if r.kind == "thinking" {
+            if let Some(m) = self.msgs.iter_mut().rev().find(|m| !m.user && m.kind == "thinking") {
+                m.text = r.text.clone();
+            } else {
+                self.push(false, "thinking", r.text.clone(), None);
+            }
+            self.thinking = true;
+            self.draw();
+            return;
+        }
         self.busy = false;
-        self.push(false, &r.kind, r.text.clone(), None);
+        let replaced_thinking = if self.thinking {
+            self.thinking = false;
+            if let Some(pos) = self.msgs.iter().rposition(|m| !m.user && m.kind == "thinking") {
+                self.msgs[pos].kind = r.kind.clone();
+                self.msgs[pos].text = r.text.clone();
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if r.kind == "clearchat" {
+            self.clear_conversation_view();
+        }
+        if r.kind == "delhist" {
+            self.ask_delete_history();
+            return;
+        }
+        if r.kind == "histsearch" {
+            self.reply_history_search(r.plan.as_deref().unwrap_or(""));
+            return;
+        }
+        if r.kind == "exphist" {
+            self.ask_export_history();
+            return;
+        }
+        if r.kind == "nameconv" {
+            let n = r.plan.clone().unwrap_or_default();
+            self.name_conversation(&n);
+            return;
+        }
+        if r.kind == "newconv" {
+            let n = r.plan.clone().unwrap_or_default();
+            self.new_named_conversation(&n);
+            return;
+        }
+        if r.kind == "switchconv" {
+            let n = r.plan.clone().unwrap_or_default();
+            self.ask_switch_conversation(&n);
+            return;
+        }
+        if r.kind == "listconv" {
+            self.reply_list_conversations();
+            return;
+        }
+        if r.kind == "delconv" {
+            self.ask_delete_conversation(r.plan.as_deref().unwrap_or(""));
+            return;
+        }
+        if !replaced_thinking {
+            self.push(false, &r.kind, r.text.clone(), None);
+        } else {
+            self.persist_history();
+        }
         if r.kind == "md" {
             if let Some(m) = self.msgs.last_mut() {
                 m.md = true;
@@ -1585,6 +2643,7 @@ impl App {
         self.zi_rows = if r.kind == "message" { r.plan.as_deref().map(|p| p.lines().map(String::from).collect()).unwrap_or_default() } else { vec![] };
         self.zi_sel = 0;
         if r.kind == "confirm" {
+            self.confirm_thumbs = preview.iter().filter_map(|b| thumb::from_bytes(b, THUMB_W, THUMB_H)).collect();
             self.confirm = Some(r.text);
             self.focus = Btn::No; // Cancel is focused by default
             self.plan_scroll = 0.0;
@@ -1612,7 +2671,8 @@ impl App {
         if matches!(self.vstate, VState::Listening { .. }) {
             match e.keysym {
                 Keysym::Escape => self.cancel_listening(),
-                Keysym::Return | Keysym::KP_Enter => self.stop_listening(),
+                // Enter or F2 both stop and transcribe (F2 mirrors the mic button toggle).
+                Keysym::Return | Keysym::KP_Enter | Keysym::F2 => self.stop_listening(),
                 _ => {}
             }
             return;
@@ -1630,8 +2690,8 @@ impl App {
                 Keysym::Left | Keysym::Right | Keysym::Tab => {
                     self.focus = if self.focus == Btn::Yes { Btn::No } else { Btn::Yes };
                 }
-                Keysym::Down => self.plan_scroll = (self.plan_scroll + LH).min(self.plan_max),
-                Keysym::Up => self.plan_scroll = (self.plan_scroll - LH).max(0.0),
+                Keysym::Down => self.plan_scroll = (self.plan_scroll + lh()).min(self.plan_max),
+                Keysym::Up => self.plan_scroll = (self.plan_scroll - lh()).max(0.0),
                 Keysym::Page_Down => self.plan_scroll = (self.plan_scroll + page).min(self.plan_max),
                 Keysym::Page_Up => self.plan_scroll = (self.plan_scroll - page).max(0.0),
                 Keysym::Return | Keysym::KP_Enter => {
@@ -1652,8 +2712,15 @@ impl App {
             let n = self.settings_rows();
             match e.keysym {
                 Keysym::Escape => self.settings_open = false,
-                Keysym::Up => self.settings_sel = (self.settings_sel + n - 1) % n,
-                Keysym::Down | Keysym::Tab => self.settings_sel = (self.settings_sel + 1) % n,
+                Keysym::comma if self.ctrl => self.settings_open = false,
+                Keysym::Up => {
+                    self.settings_sel = (self.settings_sel + n - 1) % n;
+                    self.settings_ensure_visible();
+                }
+                Keysym::Down | Keysym::Tab => {
+                    self.settings_sel = (self.settings_sel + 1) % n;
+                    self.settings_ensure_visible();
+                }
                 Keysym::Return | Keysym::KP_Enter => self.apply_setting(self.settings_sel),
                 _ => {}
             }
@@ -1661,6 +2728,17 @@ impl App {
             return;
         }
         match e.keysym {
+            // F2 does what the mic button does: start or stop voice input (item 13 keyboard pass).
+            Keysym::F2 if self.confirm.is_none() => match self.vstate {
+                VState::Idle => self.start_listening(),
+                VState::Listening { .. } => self.stop_listening(),
+                VState::Working => {}
+            },
+            Keysym::comma if self.ctrl && self.confirm.is_none() && !self.busy => {
+                self.settings_open = true;
+                self.settings_scroll = 0.0;
+                self.settings_sel = 0;
+            }
             Keysym::r | Keysym::R if self.ctrl && !self.busy => {
                 if let Some(t) = self.msgs.last().map(|m| m.text.clone()) {
                     self.set_reply(&t);
@@ -1784,7 +2862,7 @@ impl App {
                 }
             }
             Keysym::v | Keysym::V | Keysym::Insert if self.ctrl || (self.shift && e.keysym == Keysym::Insert) => {
-                if !self.busy {
+                if !self.busy || self.thinking {
                     if let Some(t) = self.clip_paste() {
                         // inserted as sanitised text only; never submits anything
                         self.input.insert(&t);
@@ -1814,7 +2892,7 @@ impl App {
                 self.draw();
             }
             _ => {
-                if !self.busy && !self.ctrl {
+                if (!self.busy || self.thinking) && !self.ctrl {
                     if let Some(t) = e.utf8 {
                         if !t.is_empty() && !t.chars().any(|c| c.is_control()) {
                             self.input.insert(&t);
@@ -1832,11 +2910,11 @@ impl App {
         let chars: Vec<char> = self.input.text().chars().collect();
         let n = self.input_lines.len().max(1);
         let vis = n.min(MAX_IN_LINES);
-        let k = (((y - self.input_box_top - 6.0 - self.chip_h()) / LH).floor().max(0.0) as usize).min(vis - 1);
+        let k = (((y - self.input_box_top - 6.0 - self.chip_h()) / lh()).floor().max(0.0) as usize).min(vis - 1);
         let (ls, le) = self.input_lines.get(self.input_top + k).copied().unwrap_or((0, chars.len()));
         let (ls, le) = (ls.min(chars.len()), le.min(chars.len()));
         let text: String = chars[ls..le].iter().collect();
-        let laid = self.shaper.layout(&text, PX, shape::Mode::Auto);
+        let laid = self.shaper.layout(&text, px(), shape::Mode::Auto);
         let off = if laid.rtl { (self.input_w - laid.width).max(0.0) } else { 0.0 };
         ls + laid.index_at(target - off).min(le - ls)
     }
@@ -1852,7 +2930,7 @@ impl App {
         let (ls, le) = self.input_lines.get(k).copied().unwrap_or((0, chars.len()));
         let (ls, le) = (ls.min(chars.len()), le.min(chars.len()));
         let text: String = chars[ls..le].iter().collect();
-        let laid = self.shaper.layout(&text, PX, shape::Mode::Auto);
+        let laid = self.shaper.layout(&text, px(), shape::Mode::Auto);
         match laid.step(caret.clamp(ls, le) - ls, left) {
             Some(i) => self.input.set_caret(ls + i, extend),
             None => {
@@ -1885,18 +2963,24 @@ impl App {
         }
         if self.confirm.is_none() && inside(self.r_gear, self.ptr_pos) {
             self.settings_open = !self.settings_open;
+            if self.settings_open {
+                self.settings_scroll = 0.0;
+            }
             self.draw();
             return;
         }
         if self.settings_open && self.confirm.is_none() {
             let (top, rh) = self.settings_geom();
+            let (_, bot) = self.settings_viewport();
             let (px, py) = self.ptr_pos;
-            let w = self.w as f32;
-            for k in 0..self.settings_rows() {
-                let y = top + k as f32 * (rh + 6.0);
-                if inside((PAD - 2.0, y, w - 2.0 * PAD + 4.0, rh), (px, py)) {
-                    self.settings_sel = k;
-                    self.apply_setting(k);
+            if py >= top as f64 && py < bot as f64 {
+                let w = self.w as f32;
+                for k in 0..self.settings_rows() {
+                    let y = top + k as f32 * (rh + 4.0) - self.settings_scroll;
+                    if inside((PAD - 2.0, y, w - 2.0 * PAD + 4.0, rh), (px, py)) {
+                        self.settings_sel = k;
+                        self.apply_setting(k);
+                    }
                 }
             }
             self.draw();
@@ -2016,6 +3100,10 @@ impl App {
         }
         if self.confirm.is_some() {
             self.plan_scroll = (self.plan_scroll + dy).clamp(0.0, self.plan_max);
+        } else if self.settings_open {
+            let (top, bot) = self.settings_viewport();
+            let content = self.settings_content_h(self.w as f32);
+            self.settings_scroll = scroll_clamp(self.settings_scroll + dy, content, bot - top);
         } else {
             self.scroll = (self.scroll - dy).clamp(0.0, self.chat_max);
         }
@@ -2066,7 +3154,16 @@ impl SeatHandler for App {
     fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, cap: Capability) {
         if cap == Capability::Keyboard && self.kb.is_none() {
-            self.kb = self.seat.as_mut().unwrap().get_keyboard(qh, &seat, None).ok();
+            self.kb = match self.lh.clone() {
+                // with client-side repeat: a held key repeats at the rate the compositor announces
+                Some(lh) => self
+                    .seat
+                    .as_mut()
+                    .unwrap()
+                    .get_keyboard_with_repeat(qh, &seat, None, lh, Box::new(|app: &mut App, _, e| app.key(e)))
+                    .ok(),
+                None => self.seat.as_mut().unwrap().get_keyboard(qh, &seat, None).ok(),
+            };
             if let (Some(m), None) = (&self.ddm, &self.ddev) {
                 self.ddev = Some(m.get_data_device(qh, &seat));
             }
@@ -2098,7 +3195,12 @@ impl KeyboardHandler for App {
         self.key(e);
     }
     fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent) {}
-    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, m: Modifiers, _: u32) {
+    fn repeat_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, serial: u32, e: KeyEvent) {
+        // same handling as a press: held keys repeat (0.19 delivered repeats through press_key)
+        self.serial = serial;
+        self.key(e);
+    }
+    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, m: Modifiers, _: smithay_client_toolkit::seat::keyboard::RawModifiers, _: u32) {
         self.ctrl = m.ctrl;
         self.shift = m.shift;
     }
@@ -2210,7 +3312,7 @@ impl App {
     fn x_event(&mut self, ev: XEv) {
         use XEv;
         if std::env::var_os("PAWLINE_DEBUG").is_some() {
-            eprintln!("xev {}", match &ev { XEv::Key { sym, .. } => format!("key {sym:x}"), XEv::Press { button, x, y, .. } => format!("press {button} {x} {y}"), XEv::Release { .. } => "release".into(), #[cfg(windows)] XEv::Text { .. } => "text".into(), XEv::Motion { .. } => "motion".into(), XEv::Expose => "expose".into() });
+            eprintln!("xev {}", match &ev { XEv::Key { .. } => "key (symbol not logged)".to_string(), XEv::Press { button, x, y, .. } => format!("press {button} {x} {y}"), XEv::Release { .. } => "release".into(), #[cfg(windows)] XEv::Text { .. } => "text".into(), XEv::Motion { .. } => "motion".into(), XEv::Expose => "expose".into() });
         }
         match ev {
             XEv::Expose => self.draw(),
@@ -2268,15 +3370,44 @@ const CLIP_MAX: u64 = 64 * 1024;
 
 #[cfg(unix)]
 impl DataDeviceHandler for App {
-    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice, _: f64, _: f64, _: &wl_surface::WlSurface) {}
+    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _dev: &wl_data_device::WlDataDevice, _: f64, _: f64, _: &wl_surface::WlSurface) {
+        // Tell the source we take text or file paths, copied (never moved).
+        if let Some(offer) = self.ddev.as_ref().and_then(|d| d.data().drag_offer()) {
+            let mime = offer.with_mime_types(|ms| dropin::PASTE_MIMES.iter().find(|m| ms.iter().any(|x| x == **m)).map(|m| m.to_string()));
+            offer.accept_mime_type(offer.serial, mime);
+        }
+    }
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
     fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice, _: f64, _: f64) {}
     fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
-    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
+    fn drop_performed(&mut self, conn: &Connection, _: &QueueHandle<Self>, _dev: &wl_data_device::WlDataDevice) {
+        let Some(offer) = self.ddev.as_ref().and_then(|d| d.data().drag_offer()) else { return };
+        let Some(mime) = offer.with_mime_types(|ms| dropin::PASTE_MIMES.iter().find(|m| ms.iter().any(|x| x == **m)).map(|m| m.to_string())) else { return };
+        let Ok(pipe) = offer.receive(mime.clone()) else { return };
+        // Flush before waiting on the pipe: without this the source never learns it may send.
+        let _ = conn.flush();
+        offer.finish();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = pipe.take(CLIP_MAX).read_to_end(&mut buf);
+            let _ = tx.send(buf);
+        });
+        if let Ok(buf) = rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            if let Some(t) = dropin::offered_to_text(&mime, &buf) {
+                // inserted as sanitised text only; dropping never submits anything
+                self.input.insert(&t);
+                self.draw();
+            }
+        }
+    }
 }
 #[cfg(unix)]
 impl DataOfferHandler for App {
-    fn source_actions(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: wl_data_device_manager::DndAction) {}
+    fn source_actions(&mut self, _: &Connection, _: &QueueHandle<Self>, offer: &mut DragOffer, _: wl_data_device_manager::DndAction) {
+        offer.set_actions(wl_data_device_manager::DndAction::Copy, wl_data_device_manager::DndAction::Copy);
+    }
     fn selected_action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: wl_data_device_manager::DndAction) {}
 }
 #[cfg(unix)]
@@ -2348,8 +3479,13 @@ impl App {
         }
         let dev = self.ddev.as_ref()?;
         let offer = dev.data().selection_offer()?;
-        let mime = offer.with_mime_types(|ms| CLIP_MIMES.iter().find(|m| ms.iter().any(|x| x == **m)).map(|m| m.to_string()))?;
-        let pipe = offer.receive(mime).ok()?;
+        let mime = offer.with_mime_types(|ms| dropin::PASTE_MIMES.iter().find(|m| ms.iter().any(|x| x == **m)).map(|m| m.to_string()))?;
+        let pipe = offer.receive(mime.clone()).ok()?;
+        // The receive request must reach the compositor before the source can write; the event
+        // loop only flushes after this callback returns, so flush here or the read always times out.
+        if let Some(c) = &self.conn {
+            let _ = c.flush();
+        }
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             use std::io::Read;
@@ -2358,7 +3494,7 @@ impl App {
             let _ = tx.send(buf);
         });
         let buf = rx.recv_timeout(std::time::Duration::from_millis(500)).ok()?;
-        Some(String::from_utf8_lossy(&buf).into_owned())
+        dropin::offered_to_text(&mime, &buf)
     }
     /// Text of the latest reply, without the "Took" line.
     fn last_result_text(&self) -> Option<String> {
@@ -2378,25 +3514,7 @@ impl ShmHandler for App {
     }
 }
 #[cfg(unix)]
-delegate_compositor!(App);
-#[cfg(unix)]
-delegate_output!(App);
-#[cfg(unix)]
-delegate_shm!(App);
-#[cfg(unix)]
-delegate_seat!(App);
-#[cfg(unix)]
-delegate_keyboard!(App);
-#[cfg(unix)]
-delegate_pointer!(App);
-#[cfg(unix)]
-delegate_layer!(App);
-#[cfg(unix)]
-delegate_xdg_shell!(App);
-#[cfg(unix)]
-delegate_xdg_window!(App);
-#[cfg(unix)]
-delegate_data_device!(App);
+delegate_dispatch2!(App);
 #[cfg(unix)]
 delegate_registry!(App);
 #[cfg(unix)]
@@ -2410,8 +3528,8 @@ impl ProvidesRegistryState for App {
 /// The folder Pawline works inside: PAWLINE_ROOT if set, else the home folder.
 fn work_root() -> std::path::PathBuf {
     let root = std::env::var_os("PAWLINE_ROOT")
-        .or_else(|| std::env::var_os("HOME"))
         .map(std::path::PathBuf::from)
+        .or_else(pawline_core::platform::home_dir)
         .filter(|p| p.is_absolute() && p.is_dir());
     match root {
         Some(r) => r,
@@ -2428,11 +3546,36 @@ fn work_root() -> std::path::PathBuf {
 fn run_terminal() {
     use std::io::{BufRead, IsTerminal, Write};
     let tty = std::io::stdin().is_terminal();
+    // Honour the persisted offline switch, the same as the GUI at startup: without this the terminal
+    // ignored a "yes" to offline mode and let online requests reach a disclosure card.
+    if let Some(p) = settings_path() {
+        let s = theme::load(&p);
+        pawline_core::netgate::set_offline(s.offline);
+        pawline_core::filesgate::set_read_only(s.files_blocked);
+    }
     let mut st = bridge::new_state(work_root());
     println!("Pawline (terminal mode). Type a command, or 'quit' to leave.");
     if !st.notes.is_empty() {
         let n = st.notes.drain(..).collect::<Vec<_>>().join("\n");
         println!("After an interrupted run I checked the undo journal:\n{n}");
+    }
+    // A confirm card that was showing when Pawline closed is offered again (fingerprint-checked).
+    if let Some(r) = bridge::restore_pending_confirm(&mut st) {
+        println!("{}", r.text);
+        if r.kind == "confirm" {
+            let tty = std::io::stdin().is_terminal();
+            let mut lines0 = std::io::stdin().lock().lines();
+            if !tty {
+                let _ = bridge::cancel(&mut st);
+                println!("Not approved: confirmation needs a person typing at a terminal. Nothing was done.");
+            } else {
+                print!("Type yes to do this, anything else cancels: ");
+                let _ = std::io::stdout().flush();
+                let ans = lines0.next().and_then(|l| l.ok()).unwrap_or_default();
+                let r2 = if ans.trim() == "yes" { let r = bridge::confirm_inner(&mut st); bridge::with_notes(&mut st, r) } else { bridge::cancel(&mut st) };
+                println!("{}", r2.text);
+            }
+        }
     }
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
@@ -2451,6 +3594,12 @@ fn run_terminal() {
             break;
         }
         st.pending = None;
+        st.pending_request = None;
+        pawline_core::pending::clear(&st.root);
+        #[cfg(all(feature = "laya", not(windows)))]
+        {
+            st.laya_setup_pending = false;
+        }
         let r = bridge::handle_text(&mut st, t);
         let r = bridge::with_notes(&mut st, r);
         println!("{}", r.text);
@@ -2477,29 +3626,53 @@ fn run_terminal() {
     }
 }
 
-fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<UiReply>) {
+fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<(UiReply, Vec<Vec<u8>>)>) {
     let root = work_root();
     let mut st = bridge::new_state(root);
+    // Experimental Laya: the wait for the local model gets a visible line; the reply replaces it.
+    #[cfg(all(feature = "laya", not(windows)))]
+    {
+        let thinking_tx = back.clone();
+        bridge::set_laya_thinking_notifier(Some(Box::new(move |text: &str| {
+            let _ = thinking_tx.send((bridge::reply("thinking", text.to_string()), Vec::new()));
+        })));
+    }
     // Recovery notes from the previous run are shown first.
     if !st.notes.is_empty() {
         let n = st.notes.drain(..).collect::<Vec<_>>().join("\n");
-        let _ = back.send(bridge::reply("error", format!("After an interrupted run I checked the undo journal:\n{n}")));
+        let _ = back.send((bridge::reply("error", format!("After an interrupted run I checked the undo journal:\n{n}")), Vec::new()));
+    }
+    // A confirm card that was showing when Pawline closed is offered again (fingerprint-checked).
+    if let Some(r) = bridge::restore_pending_confirm(&mut st) {
+        let _ = back.send((r, Vec::new()));
     }
     while let Ok(req) = rx.recv() {
         let r = match req {
             Req::Text(t, dir) => {
                 st.pending = None;
+                st.pending_request = None;
+                pawline_core::pending::clear(&st.root);
+        #[cfg(all(feature = "laya", not(windows)))]
+        {
+            st.laya_setup_pending = false;
+        }
                 let r = bridge::handle_text_in(&mut st, &t, dir.as_deref());
                 bridge::with_notes(&mut st, r)
             }
             Req::Confirm => {
+                st.confirm_preview.clear();
                 let r = bridge::confirm_inner(&mut st);
                 bridge::with_notes(&mut st, r)
             }
-            Req::Cancel => bridge::cancel(&mut st),
+            Req::Cancel => {
+                st.confirm_preview.clear();
+                bridge::cancel(&mut st)
+            }
         };
         bridge::ONLINE_CHAT_UI.store(st.online_chat, std::sync::atomic::Ordering::Relaxed);
-        if back.send(r).is_err() {
+        // Pictures only travel with the confirm card they belong to.
+        let pv = if r.kind == "confirm" { std::mem::take(&mut st.confirm_preview) } else { st.confirm_preview.clear(); Vec::new() };
+        if back.send((r, pv)).is_err() {
             break;
         }
     }
@@ -2630,7 +3803,7 @@ fn main() {
     };
 
     let (req_tx, req_rx) = mpsc::channel::<Req>();
-    let (back_tx, back_rx) = channel::channel::<UiReply>();
+    let (back_tx, back_rx) = channel::channel::<(UiReply, Vec<Vec<u8>>)>();
     let (voice_tx, voice_rx) = channel::channel::<VEv>();
     let (search_tx, search_rx) = channel::channel::<(u64, String, Vec<std::path::PathBuf>)>();
     std::thread::spawn(move || worker(req_rx, back_tx));
@@ -2663,6 +3836,8 @@ fn main() {
         qh: qh0.clone(),
         xb,
         #[cfg(unix)]
+        conn: conn_opt.clone(),
+        #[cfg(unix)]
         ddm: wl_rest.as_ref().zip(qh0.as_ref()).and_then(|(r, q)| DataDeviceManagerState::bind(&r.0, q).ok()),
         #[cfg(unix)]
         ddev: None,
@@ -2674,6 +3849,8 @@ fn main() {
         serial: 0,
         #[cfg(unix)]
         kb: None,
+        #[cfg(unix)]
+        lh: None,
         #[cfg(unix)]
         ptr: None,
         w: COMPACT,
@@ -2693,12 +3870,32 @@ fn main() {
         bubbles: Vec::new(),
         toast: None,
         reply: None,
-        msgs: vec![Msg { user: false, kind: "message".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Click any reply to copy it. Right-click a message (or Ctrl+R) to reply to it.".into(), thumb: None, quote: None }],
+        msgs: {
+            let mut v = vec![Msg { user: false, kind: "welcome".into(), md: true, text: "Hi, I am Pawline. Try: make a folder called kitten paws. Ctrl+, opens Settings, Ctrl+C copies my last reply (clicking a reply copies it), Ctrl+R replies to a message.".into(), thumb: None, quote: None }];
+            let keep = settings_path().map(|p| theme::load(&p).keep_history).unwrap_or(false);
+            if keep {
+                let old = history_path().map(|p| history::load(&p)).unwrap_or_default();
+                if !old.is_empty() {
+                    v.push(Msg { user: false, kind: "restored".into(), md: false, thumb: None, quote: None, text: format!("Restored {} earlier messages from the file you chose to keep on this computer. Pending tasks and confirm cards are not restored.", old.len()) });
+                    for l in old {
+                        v.push(Msg { user: l.user, kind: if l.user { "user".into() } else { "message".into() }, md: false, thumb: None, quote: None, text: l.text });
+                    }
+                }
+            }
+            v
+        },
         confirm: None,
+        app_pending: None,
+        confirm_thumbs: Vec::new(),
+        mic_told: false,
+        history_warned: false,
+        hist_from: 0,
+        conv_name: history_path().and_then(|p| p.parent().map(|d| d.to_path_buf())).and_then(|d| history::read_current_name(&d)),
         focus: Btn::No,
         scroll: 0.0,
         plan_scroll: 0.0,
         busy: false,
+        thinking: false,
         menu_sel: 0,
         zi_rows: vec![],
         zi_sel: 0,
@@ -2726,9 +3923,17 @@ fn main() {
         pill_show: false,
         r_pill_name: (0.0, 0.0, 0.0, 0.0),
         r_pill_x: (0.0, 0.0, 0.0, 0.0),
-        settings: settings_path().map(|p| theme::load(&p)).unwrap_or_default(),
+        settings: {
+            let s = settings_path().map(|p| theme::load(&p)).unwrap_or_default();
+            theme::set_text_pct(s.text_pct);
+            pawline_core::netgate::set_offline(s.offline);
+            pawline_core::filesgate::set_read_only(s.files_blocked);
+            bridge::set_assist_enabled(s.assist);
+            s
+        },
         settings_open: false,
         settings_sel: 0,
+        settings_scroll: 0.0,
         t0: std::time::Instant::now(),
         r_gear: (0.0, 0.0, 0.0, 0.0),
         input_w: 300.0,
@@ -2785,8 +3990,12 @@ fn main() {
         }
     }
 
-    let mut event_loop: EventLoop<App> = EventLoop::try_new().unwrap();
+    let mut event_loop: EventLoop<'static, App> = EventLoop::try_new().unwrap();
     let handle = event_loop.handle();
+    #[cfg(unix)]
+    {
+        app.lh = Some(handle.clone());
+    }
     #[cfg(unix)]
     if let (Some(c), Some(q)) = (conn_opt.clone(), queue_opt) {
         WaylandSource::new(c, q).insert(handle.clone()).unwrap();
@@ -2814,8 +4023,8 @@ fn main() {
         .unwrap();
     handle
         .insert_source(back_rx, |ev, _, app: &mut App| {
-            if let channel::Event::Msg(r) = ev {
-                app.on_reply(r);
+            if let channel::Event::Msg((r, pv)) = ev {
+                app.on_reply(r, pv);
             }
         })
         .unwrap();
@@ -2831,7 +4040,7 @@ fn main() {
         .insert_source(
             calloop::timer::Timer::from_duration(std::time::Duration::from_millis(1000)),
             |_, _, app: &mut App| {
-                if app.settings.drift && app.expanded && !app.hidden && app.confirm.is_none() {
+                if app.drift_on() && app.expanded && !app.hidden && app.confirm.is_none() {
                     app.draw();
                 }
                 app.voice_tick();
@@ -2860,6 +4069,26 @@ fn main() {
 #[cfg(test)]
 mod wrap_tests {
     use super::*;
+    #[test]
+    fn history_file_starts_at_switch_on() {
+        let m = |user: bool, kind: &str, text: &str| Msg { user, kind: kind.into(), text: text.into(), md: false, thumb: None, quote: None };
+        let msgs = vec![
+            m(false, "welcome", "hi"),
+            m(true, "user", "private while off"),
+            m(false, "message", "reply while off"),
+            m(true, "user", "after on"),
+            m(false, "md", "answer after on"),
+            m(false, "error", "boom"),
+        ];
+        // from 0: welcome and error kinds are never kept, conversation lines are
+        assert_eq!(App::hist_lines(&msgs, 0).len(), 4);
+        // mid-session ON: nothing from before the switch is written
+        assert_eq!(
+            App::hist_lines(&msgs, 3),
+            vec![history::Line { user: true, text: "after on".into() }, history::Line { user: false, text: "answer after on".into() }]
+        );
+    }
+
     #[test]
     fn path_lines_are_laid_out_strictly_and_prose_is_not() {
         assert_eq!(line_mode("1. Move /tmp/ah/Downloads/\u{62a}\u{642}.txt to"), shape::Mode::Strict);
@@ -2919,5 +4148,27 @@ mod saved_tests {
         assert!(saved_picture("Saved /home/u/Pictures/other/a.png").is_none());
         assert!(saved_picture("Saved Pictures/Pawline/a.png").is_none());
         assert!(saved_picture("no path here").is_none());
+    }
+}
+
+#[cfg(test)]
+mod settings_scroll_tests {
+    use super::*;
+
+    #[test]
+    fn scroll_clamp_stays_within_the_scrollable_range() {
+        assert_eq!(scroll_clamp(-5.0, 100.0, 50.0), 0.0, "never below 0");
+        assert_eq!(scroll_clamp(80.0, 100.0, 50.0), 50.0, "never past the end");
+        assert_eq!(scroll_clamp(20.0, 100.0, 50.0), 20.0, "inside: unchanged");
+        assert_eq!(scroll_clamp(20.0, 40.0, 50.0), 0.0, "content shorter than the viewport: no scroll");
+    }
+
+    #[test]
+    fn scroll_to_visible_moves_only_as_much_as_needed() {
+        assert_eq!(scroll_to_visible(0.0, 10.0, 36.0, 50.0), 0.0, "already visible: unchanged");
+        assert_eq!(scroll_to_visible(30.0, 0.0, 26.0, 50.0), 0.0, "above the viewport: scroll up to its top");
+        assert_eq!(scroll_to_visible(0.0, 180.0, 206.0, 50.0), 156.0, "below the viewport: scroll down just enough");
+        assert_eq!(scroll_to_visible(100.0, 110.0, 136.0, 50.0), 100.0, "visible lower down: unchanged");
+        assert_eq!(scroll_to_visible(0.0, 0.0, 60.0, 50.0), 10.0, "taller than the viewport: its bottom decides");
     }
 }

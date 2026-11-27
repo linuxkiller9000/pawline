@@ -305,7 +305,7 @@ pub fn launch(argv: &[String]) -> Result<String, PawError> {
     let mut cmd = Command::new(exe);
     cmd.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     crate::platform::detach(&mut cmd);
-    if let Some(h) = std::env::var_os("HOME") {
+    if let Some(h) = crate::platform::home_dir() {
         cmd.current_dir(h);
     }
     let mut child = cmd.spawn().map_err(|e| PawError::Exec(format!("could not start {exe}: {e}")))?;

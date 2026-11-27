@@ -6,22 +6,30 @@
 //! this parser cannot handle; those proposals re-enter at validation and never
 //! bypass it.
 
+pub mod actions;
 pub mod apps;
+pub mod arabic;
 pub mod weather;
 pub mod assist;
 pub mod chat;
 pub mod context;
+pub mod laya_convert;
+pub mod laya_setup;
 pub mod deck;
+pub mod deckcheck;
 pub mod dirs;
 pub mod error;
 pub mod exec;
+pub mod filesgate;
 pub mod finder;
 pub mod imagegen;
 pub mod intent;
 pub mod journal;
 pub mod math;
+pub mod netgate;
 pub mod organize;
 pub mod plan;
+pub mod pending;
 pub mod platform;
 pub mod planmem;
 pub mod providers;
@@ -100,15 +108,26 @@ impl Engine {
                 Some(a) => (
                     // The assist's own failure text (confidence numbers, empty proposals) is
                     // internal detail; the user sees the parser's plain explanation only.
-                    a.propose(input).map_err(|_assist_err| match &parse_err {
-                        PawError::Parse(m) => PawError::Parse(m.clone()),
-                        other => PawError::Parse(other.to_string()),
-                    })?,
+                    // A model that panics is a model failure like any other: no proposal, the parser's explanation, nothing runs.
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.propose(input)))
+                        .unwrap_or_else(|_| Err(PawError::Parse("assist panicked".into())))
+                        .map_err(|_assist_err| match &parse_err {
+                            PawError::Parse(m) => PawError::Parse(m.clone()),
+                            other => PawError::Parse(other.to_string()),
+                        })?,
                     true,
                 ),
                 None => return Err(parse_err),
             },
         };
+        if from_assist && directives.is_empty() {
+            // An empty proposal is a failed proposal: never show an empty confirm card.
+            return Err(PawError::Parse(match intent::parse(input) {
+                Err(PawError::Parse(m)) => m,
+                Err(other) => other.to_string(),
+                Ok(_) => "I did not understand that.".into(),
+            }));
+        }
         self.validator.literal_names.set(input.contains(['"', '\u{201c}', '\u{201d}', '`']));
         let mut plan = self.validator.build_plan(&directives, &self.ctx)?;
         if from_assist {
@@ -173,6 +192,11 @@ impl Engine {
         assist: Option<&dyn Assist>,
     ) -> Result<Response, PawError> {
         let plan = self.plan_with(input, assist)?;
+        // Read-only mode (item 14): a plan that changes files never reaches a card
+        // (a card would promise a change) and never runs. The refusal is a plain message.
+        if filesgate::check_ops(&plan.ops).is_err() {
+            return Ok(Response::Message(filesgate::READ_ONLY_MESSAGE.to_string()));
+        }
         if plan.needs_confirmation && !confirmed {
             return Ok(Response::Confirm(plan));
         }
@@ -185,6 +209,10 @@ impl Engine {
         plan: Plan,
         backend: &dyn ExecutionBackend,
     ) -> Result<Response, PawError> {
+        // Defense in depth: a card confirmed before read-only mode was switched on still writes nothing.
+        if filesgate::check_ops(&plan.ops).is_err() {
+            return Ok(Response::Message(filesgate::READ_ONLY_MESSAGE.to_string()));
+        }
         let total = plan.ops.len();
         let mut outcomes = Vec::new();
         for op in &plan.ops {

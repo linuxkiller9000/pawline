@@ -20,7 +20,102 @@ pub struct Slide {
     pub title: String,
     /// (level 0 or 1, text)
     pub bullets: Vec<(u8, String)>,
+    /// Optional table (first row = header). Empty = no table. Written as `| a | b |` lines in the outline.
+    pub table: Vec<Vec<String>>,
+    /// `chart: bar|line|pie` under a slide draws the table's numbers as a native chart instead of a table.
+    pub chart: Option<ChartKind>,
+    /// `image: <path>` under a slide places one picture the user chose (PNG or JPEG). Empty `data` = not read yet.
+    pub image: Option<ImageRef>,
+    /// `source: <text or link>` is a note the USER wrote about where the slide's facts came from. Pawline never fetches or checks it.
+    pub source: Option<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRef {
+    /// As written in the outline.
+    pub path: String,
+    pub data: Vec<u8>,
+    pub jpeg: bool,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// Reader for `compose_with`: `~/x` is under `home`, a relative path is under `base`, and the file is opened through a
+/// directory handle on `home` (no `..`, no symlink out of the home area). Only a plain file up to 5 MB is read.
+pub fn confined_image_reader(home: &Path, base: &Path) -> impl Fn(&str) -> Result<Vec<u8>, String> {
+    let (home, base) = (home.to_path_buf(), base.to_path_buf());
+    move |raw: &str| {
+        use std::io::Read;
+        let full = if let Some(r) = raw.strip_prefix("~/") { home.join(r) } else if raw.starts_with('/') { PathBuf::from(raw) } else { base.join(raw) };
+        let rel = full.strip_prefix(&home).map_err(|_| format!("{} is outside your home folder, so Pawline will not read it", full.display()))?;
+        let dir = cap_std::fs::Dir::open_ambient_dir(&home, cap_std::ambient_authority()).map_err(|e| e.to_string())?;
+        let mut f = dir.open(rel).map_err(|_| format!("{} can't be opened (missing, or it points outside your home folder)", full.display()))?.into_std();
+        let m = f.metadata().map_err(|e| e.to_string())?;
+        if !m.is_file() {
+            return Err(format!("{} is not a plain file", full.display()));
+        }
+        if m.len() > MAX_IMAGE as u64 {
+            return Err("the picture is bigger than 5 MB".into());
+        }
+        let mut d = vec![];
+        Read::take(&mut f, MAX_IMAGE as u64 + 1).read_to_end(&mut d).map_err(|e| e.to_string())?;
+        Ok(d)
+    }
+}
+
+pub const MAX_SOURCE_NOTE: usize = 200;
+
+pub const MAX_IMAGE: usize = 5 * 1024 * 1024;
+
+/// Check the bytes really are a PNG or JPEG of sane size and read their pixel size. Nothing else is accepted.
+pub fn sniff_image(d: &[u8]) -> Result<(bool, u32, u32), String> {
+    if d.len() > MAX_IMAGE {
+        return Err("the picture is bigger than 5 MB".into());
+    }
+    if d.len() > 24 && d.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) && &d[12..16] == b"IHDR" {
+        let w = u32::from_be_bytes([d[16], d[17], d[18], d[19]]);
+        let h = u32::from_be_bytes([d[20], d[21], d[22], d[23]]);
+        if w == 0 || h == 0 || w > 20000 || h > 20000 {
+            return Err("the PNG has an unusable size".into());
+        }
+        return Ok((false, w, h));
+    }
+    if d.len() > 4 && d[0] == 0xFF && d[1] == 0xD8 {
+        let mut i = 2;
+        while i + 9 < d.len() {
+            if d[i] != 0xFF {
+                i += 1;
+                continue;
+            }
+            let m = d[i + 1];
+            if m == 0xFF {
+                i += 1;
+                continue;
+            }
+            if (0xC0..=0xCF).contains(&m) && !matches!(m, 0xC4 | 0xC8 | 0xCC) {
+                let h = u16::from_be_bytes([d[i + 5], d[i + 6]]) as u32;
+                let w = u16::from_be_bytes([d[i + 7], d[i + 8]]) as u32;
+                if w == 0 || h == 0 || w > 20000 || h > 20000 {
+                    return Err("the JPEG has an unusable size".into());
+                }
+                return Ok((true, w, h));
+            }
+            let l = u16::from_be_bytes([d[i + 2], d[i + 3]]) as usize;
+            i += 2 + l.max(2);
+        }
+        return Err("the JPEG header could not be read".into());
+    }
+    Err("only PNG and JPEG pictures are supported (the file is neither)".into())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChartKind {
+    Bar,
+    Line,
+    Pie,
+}
+
+pub const CHART_MAX_SERIES: usize = 3;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Report {
@@ -31,6 +126,7 @@ pub struct Report {
     /// Long lines cut into several bullets at sentence ends.
     pub lines_cut: usize,
     pub agenda: bool,
+    pub theme: Theme,
 }
 
 impl Report {
@@ -48,14 +144,120 @@ impl Report {
         if self.agenda {
             v.push("a Contents slide added".to_string());
         }
+        if self.theme != Theme::Pawline {
+            v.push(format!("{} theme", self.theme.name()));
+        }
         if v.is_empty() { "your outline was used as written".into() } else { v.join("; ") }
     }
+}
+
+
+/// Colour themes. Chosen with a first outline line `theme: dark` (names below). Only colours change; text is never touched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Theme {
+    #[default]
+    Pawline,
+    Dark,
+    Ocean,
+    Forest,
+    Sunset,
+    Contrast,
+}
+
+pub const THEMES: &[Theme] = &[Theme::Pawline, Theme::Dark, Theme::Ocean, Theme::Forest, Theme::Sunset, Theme::Contrast];
+
+impl Theme {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Theme::Pawline => "light",
+            Theme::Dark => "dark",
+            Theme::Ocean => "ocean",
+            Theme::Forest => "forest",
+            Theme::Sunset => "sunset",
+            Theme::Contrast => "contrast",
+        }
+    }
+    pub fn from_name(n: &str) -> Option<Theme> {
+        let n = n.trim().to_lowercase();
+        let n = n.trim_end_matches(" theme").trim();
+        match n {
+            "light" | "default" | "pawline" => Some(Theme::Pawline),
+            "dark" => Some(Theme::Dark),
+            "ocean" | "blue" => Some(Theme::Ocean),
+            "forest" | "green" => Some(Theme::Forest),
+            "sunset" | "warm" => Some(Theme::Sunset),
+            "contrast" | "high contrast" | "high-contrast" => Some(Theme::Contrast),
+            _ => None,
+        }
+    }
+    /// (dk1, lt1, dk2, lt2, accent1, accent2, dark background?)
+    fn colors(&self) -> (&'static str, &'static str, &'static str, &'static str, &'static str, &'static str, bool) {
+        match self {
+            Theme::Pawline => ("1F1D2B", "FFFFFF", "3B3558", "EEEBF5", "7C5CD6", "E8828C", false),
+            Theme::Dark => ("16141F", "F2F0FA", "3B3558", "D9D4EA", "A78BFA", "F29AA3", true),
+            Theme::Ocean => ("0B2540", "F4FAFF", "134074", "DCEBFA", "1F6FB5", "2A9D8F", false),
+            Theme::Forest => ("12281C", "F6FBF4", "1E4D32", "DDEEDD", "2E7D4F", "B7791F", false),
+            Theme::Sunset => ("2A1220", "FFF3E6", "5A2A3C", "FFD9B8", "FF8C6B", "FFC857", true),
+            Theme::Contrast => ("000000", "FFFFFF", "000000", "FFFFFF", "0033CC", "7A0000", false),
+        }
+    }
+    /// (background, text) as hex, for contrast checks.
+    pub fn bg_text(&self) -> (&'static str, &'static str) {
+        let (dk1, lt1, _, _, _, _, dark) = self.colors();
+        if dark { (dk1, lt1) } else { (lt1, dk1) }
+    }
+}
+
+/// Reads an optional first line `theme: <name>`; returns the text without it.
+fn take_theme(text: &str) -> Result<(Theme, String), String> {
+    let mut lines = text.lines();
+    let mut skipped = 0usize;
+    let mut rest_start = 0usize;
+    for l in text.split_inclusive('\n') {
+        if l.trim().is_empty() {
+            skipped += 1;
+            rest_start += l.len();
+            continue;
+        }
+        let low = l.trim().to_lowercase();
+        if let Some(n) = low.strip_prefix("theme:") {
+            return match Theme::from_name(n) {
+                Some(t) => Ok((t, text[rest_start + l.len()..].to_string())),
+                None => Err(format!("I don't know the theme \"{}\". The themes are: {}", n.trim(), THEMES.iter().map(|t| t.name()).collect::<Vec<_>>().join(", "))),
+            };
+        }
+        break;
+    }
+    let _ = (&mut lines, skipped);
+    Ok((Theme::Pawline, text.to_string()))
 }
 
 /// Source text -> readable slides, locally and deterministically (no AI, no rewriting: every word of the source is
 /// kept, only split, grouped and given titles). Outlines with "#" headings are used as written; plain paragraphs get
 /// one slide each; dense slides continue on a next slide instead of being refused or shrunk to unreadable text.
 pub fn compose(text: &str) -> Result<(Vec<Slide>, Report), String> {
+    compose_with(text, &|p| Err(format!("no place to read \"{p}\" from here")))
+}
+
+/// Like `compose`, and reads each `image:` picture through `read` (the caller confines it to the home area).
+pub fn compose_with(text: &str, read: &dyn Fn(&str) -> Result<Vec<u8>, String>) -> Result<(Vec<Slide>, Report), String> {
+    let (theme, text) = take_theme(text)?;
+    let (mut slides, mut rep) = compose_inner(&text)?;
+    for sl in slides.iter_mut() {
+        if let Some(im) = sl.image.as_mut() {
+            let d = read(&im.path).map_err(|e| format!("the picture \"{}\" on slide \"{}\" can't be used: {e}", im.path, sl.title))?;
+            let (jpeg, w, h) = sniff_image(&d).map_err(|e| format!("the picture \"{}\" on slide \"{}\" can't be used: {e}", im.path, sl.title))?;
+            im.data = d;
+            im.jpeg = jpeg;
+            im.w = w;
+            im.h = h;
+        }
+    }
+    rep.theme = theme;
+    Ok((slides, rep))
+}
+
+fn compose_inner(text: &str) -> Result<(Vec<Slide>, Report), String> {
     let has_headings = text.lines().any(|l| l.starts_with("# ") || l.starts_with("## ") || l.starts_with("### "));
     let first_is_title = text.lines().find(|l| !l.trim().is_empty()).is_some_and(|l| l.starts_with("# ")) || !has_headings;
     let mut rep = Report::default();
@@ -63,13 +265,36 @@ pub fn compose(text: &str) -> Result<(Vec<Slide>, Report), String> {
     let mut out: Vec<Slide> = vec![];
     let mut content_titles: Vec<String> = vec![];
     for (i, s) in raw.into_iter().enumerate() {
-        if i > 0 || !(s.bullets.len() <= 2 && first_is_title) {
+        if i > 0 || !(s.bullets.len() <= 2 && s.table.is_empty() && first_is_title) {
             content_titles.push(s.title.clone());
         }
-        if i == 0 && s.bullets.len() <= 2 && first_is_title {
+        if i == 0 && s.bullets.len() <= 2 && s.table.is_empty() && first_is_title {
+            if s.image.is_some() {
+                return Err("the first (title) slide can't hold a picture. Put the image line under a \"## slide\" heading".into());
+            }
             out.push(s);
             continue;
         }
+        if s.image.is_some() && !s.table.is_empty() {
+            return Err(format!("\"{}\" has both a picture and a table or chart. Put them on separate slides.", s.title));
+        }
+        if s.image.is_some() && (s.bullets.len() > 3 || s.bullets.iter().any(|(_, b)| b.chars().count() > SOFT_LINE)) {
+            return Err(format!("\"{}\" has a picture and too much text. A picture slide takes at most 3 short lines; move the rest to another slide", s.title));
+        }
+        if s.chart.is_some() && s.table.is_empty() {
+            return Err(format!("\"{}\" has a chart line but no data. Put the numbers in a table under it: first column names, the other columns numbers", s.title));
+        }
+        if !s.table.is_empty() {
+            // A table slide stays one slide: a few lines of text above the table, never split across slides.
+            check_table(&s)?;
+            if s.chart.is_some() {
+                check_chart(&s)?;
+            }
+            out.push(s);
+            continue;
+        }
+        let img = s.image.clone();
+        let src = s.source.clone();
         let mut groups: Vec<Vec<(u8, String)>> = vec![];
         for (lvl, b) in s.bullets {
             let parts = if lvl == 0 && b.chars().count() > SOFT_LINE { split_sentences(&b)? } else { vec![b] };
@@ -106,12 +331,12 @@ pub fn compose(text: &str) -> Result<(Vec<Slide>, Report), String> {
             if title.chars().count() > MAX_TITLE_CHARS {
                 return Err(format!("the title \"{}...\" is too long once \"({}/{n})\" is added; shorten it", s.title.chars().take(30).collect::<String>(), k + 1));
             }
-            out.push(Slide { title, bullets: p });
+            out.push(Slide { title, bullets: p, table: vec![], chart: None, image: if k == 0 { img.clone() } else { None }, source: if k == 0 { src.clone() } else { None } });
         }
     }
     // A Contents slide for longer talks: the original slide titles only (not continuations), after the title slide.
     if out.len() >= 5 && content_titles.len() >= 4 && content_titles.len() <= SLIDE_LINES + 2 {
-        out.insert(1, Slide { title: "Contents".into(), bullets: content_titles.into_iter().map(|t| (0, t)).collect() });
+        out.insert(1, Slide { title: "Contents".into(), bullets: content_titles.into_iter().map(|t| (0, t)).collect(), table: vec![], chart: None, image: None, source: None });
         rep.agenda = true;
     }
     if out.len() > MAX_SLIDES {
@@ -182,10 +407,10 @@ fn parse_prose(text: &str) -> Result<Vec<Slide>, String> {
     let first = it.peek().unwrap();
     let ends = |l: &str| l.trim_end().ends_with(['.', '!', '?', ':', '\u{061F}']);
     if first.len() == 1 && first[0].chars().count() <= MAX_TITLE_CHARS && !ends(first[0]) {
-        slides.push(Slide { title: first[0].to_string(), bullets: vec![] });
+        slides.push(Slide { title: first[0].to_string(), bullets: vec![], table: vec![], chart: None, image: None, source: None });
         it.next();
     } else {
-        slides.push(Slide { title: "Presentation".into(), bullets: vec![] });
+        slides.push(Slide { title: "Presentation".into(), bullets: vec![], table: vec![], chart: None, image: None, source: None });
     }
     for p in it {
         let bullet_like = |l: &str| l.starts_with("- ") || l.starts_with("* ") || l.starts_with("+ ");
@@ -196,7 +421,7 @@ fn parse_prose(text: &str) -> Result<Vec<Slide>, String> {
             let sents = split_sent(&all.replace(" - ", " "), false).unwrap_or_else(|_| vec![all.clone()]);
             prose_title(sents)
         };
-        slides.push(Slide { title, bullets: rest });
+        slides.push(Slide { title, bullets: rest, table: vec![], chart: None, image: None, source: None });
     }
     Ok(slides)
 }
@@ -283,19 +508,59 @@ pub fn parse_outline(text: &str) -> Result<Vec<Slide>, String> {
         if let Some(t) = line.strip_prefix("# ") {
             if !seen_title && slides.is_empty() {
                 seen_title = true;
-                slides.push(Slide { title: t.trim().to_string(), bullets: vec![] });
+                slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None, image: None, source: None });
                 continue;
             }
-            slides.push(Slide { title: t.trim().to_string(), bullets: vec![] });
+            slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None, image: None, source: None });
             continue;
         }
         if let Some(t) = line.strip_prefix("## ").or_else(|| line.strip_prefix("### ")) {
-            slides.push(Slide { title: t.trim().to_string(), bullets: vec![] });
+            slides.push(Slide { title: t.trim().to_string(), bullets: vec![], table: vec![], chart: None, image: None, source: None });
             continue;
         }
         let Some(cur) = slides.last_mut() else {
             return Err("the outline must start with a heading line like \"# My talk\" or \"## First slide\"".into());
         };
+        let tl = line.trim();
+        if let Some(k) = tl.to_lowercase().strip_prefix("chart:") {
+            cur.chart = Some(match k.trim() {
+                "bar" | "column" | "bars" => ChartKind::Bar,
+                "line" => ChartKind::Line,
+                "pie" => ChartKind::Pie,
+                other => return Err(format!("I don't know the chart type \"{other}\". Use chart: bar, chart: line or chart: pie")),
+            });
+            continue;
+        }
+        if tl.len() >= 7 && tl.is_char_boundary(7) && tl[..7].eq_ignore_ascii_case("source:") {
+            let t = tl[7..].trim();
+            if t.is_empty() || t.chars().count() > MAX_SOURCE_NOTE {
+                return Err(format!("\"{}\": a source line needs 1 to {MAX_SOURCE_NOTE} characters, for example: source: https://example.org/page (read by me on 2026-11-26)", cur.title));
+            }
+            if cur.source.is_some() {
+                return Err(format!("\"{}\" has two source lines. Put them in one line.", cur.title));
+            }
+            cur.source = Some(t.to_string());
+            continue;
+        }
+        if tl.len() >= 6 && tl.is_char_boundary(6) && tl[..6].eq_ignore_ascii_case("image:") {
+            if cur.image.is_some() {
+                return Err(format!("\"{}\" has two image lines. One picture per slide.", cur.title));
+            }
+            let p = tl[6..].trim().trim_matches('"');
+            if p.is_empty() {
+                return Err("an image line needs a file path, like image: ~/Pictures/cat.png".into());
+            }
+            cur.image = Some(ImageRef { path: p.to_string(), data: vec![], jpeg: false, w: 0, h: 0 });
+            continue;
+        }
+        if tl.starts_with('|') && tl.ends_with('|') && tl.len() >= 3 {
+            let cells: Vec<String> = tl[1..tl.len() - 1].split('|').map(|c| c.trim().to_string()).collect();
+            let is_sep = cells.iter().all(|c| !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':' | ' ')) && c.contains('-'));
+            if !is_sep {
+                cur.table.push(cells);
+            }
+            continue;
+        }
         let indent = line.len() - line.trim_start().len();
         let body = line.trim_start();
         let (is_b, body) = match body.strip_prefix("- ").or_else(|| body.strip_prefix("* ")).or_else(|| body.strip_prefix("+ ")) {
@@ -396,6 +661,205 @@ fn sp(id: u32, name: &str, ph: &str, idx: Option<u32>, x: i64, y: i64, w: i64, h
     format!("<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"{name}\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph type=\"{ph}\"{idxa}/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{w}\" cy=\"{h}\"/></a:xfrm></p:spPr>{body}</p:sp>")
 }
 
+
+pub const TABLE_MAX_ROWS: usize = 8;
+pub const TABLE_MAX_COLS: usize = 6;
+pub const TABLE_CELL_CHARS: usize = 60;
+
+fn table_font(rows: usize, cols: usize) -> u32 {
+    if cols <= 3 && rows <= 6 { 2000 } else if cols <= 5 && rows <= 7 { 1800 } else { 1600 }
+}
+
+/// Estimated height in points of the wrapped table (an estimate, like body_size).
+fn table_height(t: &[Vec<String>]) -> f32 {
+    let cols = t[0].len().max(1);
+    let pt = table_font(t.len(), cols) as f32 / 100.0;
+    let colw = 828.0 / cols as f32 - 14.0;
+    let per_line = (colw / (pt * 0.55)).floor().max(1.0);
+    t.iter().map(|r| r.iter().map(|c| (c.chars().count() as f32 / per_line).ceil().max(1.0)).fold(1.0, f32::max) * pt * 1.2 + 14.0).sum()
+}
+
+fn check_table(s: &Slide) -> Result<(), String> {
+    let t = &s.table;
+    let cols = t[0].len();
+    if t.len() < 2 {
+        return Err(format!("the table on \"{}\" has only a header row; add at least one data row", s.title));
+    }
+    if t.len() > TABLE_MAX_ROWS {
+        return Err(format!("the table on \"{}\" has {} rows; the limit is {TABLE_MAX_ROWS} (split it over two slides)", s.title, t.len()));
+    }
+    if cols > TABLE_MAX_COLS || cols == 0 {
+        return Err(format!("the table on \"{}\" has {cols} columns; the limit is {TABLE_MAX_COLS}", s.title));
+    }
+    for (i, r) in t.iter().enumerate() {
+        if r.len() != cols {
+            return Err(format!("row {} of the table on \"{}\" has {} cells but the header has {cols}. I will not guess which cells are missing", i + 1, s.title, r.len()));
+        }
+        if let Some(c) = r.iter().find(|c| c.chars().count() > TABLE_CELL_CHARS) {
+            return Err(format!("a cell on \"{}\" starting \"{}...\" is longer than {TABLE_CELL_CHARS} characters", s.title, c.chars().take(20).collect::<String>()));
+        }
+    }
+    if s.bullets.len() > 3 {
+        return Err(format!("\"{}\" has a table and {} text lines; with a table keep at most 3 lines of text", s.title, s.bullets.len()));
+    }
+    let room = if s.bullets.is_empty() { 330.0 } else { 250.0 };
+    let h = table_height(t);
+    if h > room {
+        return Err(format!("the table on \"{}\" would be about {h:.0} points tall and only {room:.0} fit; shorten the cells or split it", s.title));
+    }
+    Ok(())
+}
+
+fn table_xml(t: &[Vec<String>], y: i64) -> String {
+    let cols = t[0].len();
+    let sz = table_font(t.len(), cols);
+    let w_total: i64 = 10515600;
+    let cw = w_total / cols as i64;
+    let mut x = String::from("<a:tblGrid>");
+    for _ in 0..cols {
+        x.push_str(&format!("<a:gridCol w=\"{cw}\"/>"));
+    }
+    x.push_str("</a:tblGrid>");
+    for (ri, r) in t.iter().enumerate() {
+        x.push_str("<a:tr h=\"420000\">");
+        for c in r {
+            let rtl = is_rtl(c);
+            let lang = if rtl { "ar-SA" } else { "en-US" };
+            let ppr = if rtl { "<a:pPr algn=\"r\" rtl=\"1\"/>" } else { "" };
+            let b = if ri == 0 { " b=\"1\"" } else { "" };
+            let fill = if ri == 0 { "<a:solidFill><a:schemeClr val=\"bg2\"/></a:solidFill>" } else { "<a:noFill/>" };
+            x.push_str(&format!("<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p>{ppr}<a:r><a:rPr lang=\"{lang}\" sz=\"{sz}\"{b} dirty=\"0\"><a:solidFill><a:schemeClr val=\"tx1\"/></a:solidFill></a:rPr><a:t>{}</a:t></a:r></a:p></a:txBody><a:tcPr marL=\"91440\" marR=\"91440\" marT=\"45720\" marB=\"45720\" anchor=\"ctr\"><a:lnL w=\"0\"><a:noFill/></a:lnL><a:lnR w=\"0\"><a:noFill/></a:lnR><a:lnT w=\"0\"><a:noFill/></a:lnT><a:lnB w=\"12700\"><a:solidFill><a:schemeClr val=\"accent1\"/></a:solidFill></a:lnB>{fill}</a:tcPr></a:tc>", esc(c)));
+        }
+        x.push_str("</a:tr>");
+    }
+    let h = 420000 * t.len() as i64;
+    format!("<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"4\" name=\"Table\"/><p:cNvGraphicFramePr><a:graphicFrameLocks noGrp=\"1\"/></p:cNvGraphicFramePr><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x=\"838200\" y=\"{y}\"/><a:ext cx=\"{w_total}\" cy=\"{h}\"/></p:xfrm><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/table\"><a:tbl><a:tblPr firstRow=\"1\"/>{x}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>")
+}
+
+fn parse_num(c: &str) -> Option<f64> {
+    let t = c.trim();
+    if t.is_empty() || !t.chars().all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '-')) {
+        return None;
+    }
+    t.parse::<f64>().ok().filter(|v| v.is_finite() && v.abs() < 1e12)
+}
+
+/// Series are the numeric columns after the first; the first column holds the names. Every cell must be a plain number.
+pub fn chart_data(s: &Slide) -> Result<(Vec<String>, Vec<(String, Vec<f64>)>), String> {
+    let t = &s.table;
+    let cols = t[0].len();
+    if cols < 2 {
+        return Err(format!("the chart on \"{}\" needs a names column and at least one number column", s.title));
+    }
+    if cols - 1 > CHART_MAX_SERIES {
+        return Err(format!("the chart on \"{}\" has {} number columns; the limit is {CHART_MAX_SERIES}", s.title, cols - 1));
+    }
+    let cats: Vec<String> = t[1..].iter().map(|r| r[0].clone()).collect();
+    let mut series = vec![];
+    for c in 1..cols {
+        let mut vals = vec![];
+        for (ri, r) in t[1..].iter().enumerate() {
+            match parse_num(&r[c]) {
+                Some(v) => vals.push(v),
+                None => return Err(format!("\"{}\" in row {} of the chart on \"{}\" is not a plain number (use digits, a dot and a minus sign only). I will not guess a value", r[c], ri + 2, s.title)),
+            }
+        }
+        series.push((t[0][c].clone(), vals));
+    }
+    Ok((cats, series))
+}
+
+fn check_chart(s: &Slide) -> Result<(), String> {
+    let (_, series) = chart_data(s)?;
+    if s.chart == Some(ChartKind::Pie) {
+        if series.len() != 1 {
+            return Err(format!("a pie chart on \"{}\" takes exactly one number column", s.title));
+        }
+        if series[0].1.iter().any(|v| *v < 0.0) || series[0].1.iter().sum::<f64>() <= 0.0 {
+            return Err(format!("a pie chart on \"{}\" needs positive numbers", s.title));
+        }
+    }
+    Ok(())
+}
+
+fn num_s(v: f64) -> String {
+    format!("{v}")
+}
+
+/// Native chart part: values cached in the file, plus an embedded .xlsx with the same numbers so "Edit data" has a sheet to open.
+fn chart_xml(s: &Slide) -> String {
+    let (cats, series) = chart_data(s).unwrap_or_default();
+    let kind = s.chart.unwrap_or(ChartKind::Bar);
+    let mut ser = String::new();
+    for (i, (name, vals)) in series.iter().enumerate() {
+        let cat_pts: String = cats.iter().enumerate().map(|(k, c)| format!("<c:pt idx=\"{k}\"><c:v>{}</c:v></c:pt>", esc(c))).collect();
+        let val_pts: String = vals.iter().enumerate().map(|(k, v)| format!("<c:pt idx=\"{k}\"><c:v>{}</c:v></c:pt>", num_s(*v))).collect();
+        let acc = ["accent1", "accent2", "accent5"][i.min(2)];
+        let fill = match kind {
+            ChartKind::Pie => {
+                let dpts: String = (0..cats.len()).map(|k| format!("<c:dPt><c:idx val=\"{k}\"/><c:bubble3D val=\"0\"/><c:spPr><a:solidFill><a:schemeClr val=\"{}\"/></a:solidFill><a:ln w=\"12700\"><a:solidFill><a:schemeClr val=\"bg1\"/></a:solidFill></a:ln></c:spPr></c:dPt>", ["accent1", "accent2", "accent3", "accent4", "accent5", "accent6"][k % 6])).collect();
+                dpts
+            }
+            ChartKind::Line => format!("<c:spPr><a:ln w=\"38100\"><a:solidFill><a:schemeClr val=\"{acc}\"/></a:solidFill></a:ln></c:spPr><c:marker><c:symbol val=\"circle\"/><c:size val=\"7\"/><c:spPr><a:solidFill><a:schemeClr val=\"{acc}\"/></a:solidFill></c:spPr></c:marker>"),
+            ChartKind::Bar => format!("<c:spPr><a:solidFill><a:schemeClr val=\"{acc}\"/></a:solidFill></c:spPr><c:invertIfNegative val=\"0\"/>"),
+        };
+        ser.push_str(&format!(
+            "<c:ser><c:idx val=\"{i}\"/><c:order val=\"{i}\"/><c:tx><c:strRef><c:f>Sheet1!${col}$1</c:f><c:strCache><c:ptCount val=\"1\"/><c:pt idx=\"0\"><c:v>{}</c:v></c:pt></c:strCache></c:strRef></c:tx>{fill}<c:dLbls><c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz=\"1400\"><a:solidFill><a:schemeClr val=\"{lblclr}\"/></a:solidFill></a:defRPr></a:pPr><a:endParaRPr lang=\"en-US\"/></a:p></c:txPr>{pos}<c:showLegendKey val=\"0\"/><c:showVal val=\"1\"/><c:showCatName val=\"0\"/><c:showSerName val=\"0\"/><c:showPercent val=\"0\"/><c:showBubbleSize val=\"0\"/></c:dLbls><c:cat><c:strRef><c:f>Sheet1!$A$2:$A${last}</c:f><c:strCache><c:ptCount val=\"{}\"/>{cat_pts}</c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Sheet1!${col}$2:${col}${last}</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val=\"{}\"/>{val_pts}</c:numCache></c:numRef></c:val>{smooth}</c:ser>",
+            esc(name), cats.len(), vals.len(),
+            lblclr = if kind == ChartKind::Pie { "tx1" } else { "tx1" },
+            pos = match kind { ChartKind::Pie => "<c:dLblPos val=\"outEnd\"/>", ChartKind::Bar => "<c:dLblPos val=\"outEnd\"/>", ChartKind::Line => "<c:dLblPos val=\"t\"/>" },
+            col = (b'B' + i as u8) as char,
+            last = cats.len() + 1,
+            smooth = if kind == ChartKind::Line { "<c:smooth val=\"0\"/>" } else { "" },
+        ));
+    }
+    let txpr = "<c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz=\"1600\"><a:solidFill><a:schemeClr val=\"tx1\"/></a:solidFill></a:defRPr></a:pPr><a:endParaRPr lang=\"en-US\"/></a:p></c:txPr>";
+    let axes = "<c:axId val=\"111\"/><c:axId val=\"222\"/>";
+    let axdefs = format!("<c:catAx><c:axId val=\"111\"/><c:scaling><c:orientation val=\"minMax\"/></c:scaling><c:delete val=\"0\"/><c:axPos val=\"b\"/><c:numFmt formatCode=\"General\" sourceLinked=\"0\"/><c:majorTickMark val=\"none\"/><c:minorTickMark val=\"none\"/><c:tickLblPos val=\"nextTo\"/><c:spPr><a:ln w=\"9525\"><a:solidFill><a:schemeClr val=\"tx1\"/></a:solidFill></a:ln></c:spPr>{txpr}<c:crossAx val=\"222\"/><c:crosses val=\"autoZero\"/><c:auto val=\"1\"/><c:lblAlgn val=\"ctr\"/><c:lblOffset val=\"100\"/><c:noMultiLvlLbl val=\"0\"/></c:catAx><c:valAx><c:axId val=\"222\"/><c:scaling><c:orientation val=\"minMax\"/></c:scaling><c:delete val=\"0\"/><c:axPos val=\"l\"/><c:majorGridlines><c:spPr><a:ln w=\"6350\"><a:solidFill><a:schemeClr val=\"bg2\"/></a:solidFill></a:ln></c:spPr></c:majorGridlines><c:numFmt formatCode=\"General\" sourceLinked=\"0\"/><c:majorTickMark val=\"none\"/><c:minorTickMark val=\"none\"/><c:tickLblPos val=\"nextTo\"/><c:spPr><a:ln w=\"9525\"><a:noFill/></a:ln></c:spPr>{txpr}<c:crossAx val=\"111\"/><c:crosses val=\"autoZero\"/><c:crossBetween val=\"between\"/></c:valAx>");
+    let plot = match kind {
+        ChartKind::Bar => format!("<c:barChart><c:barDir val=\"col\"/><c:grouping val=\"clustered\"/><c:varyColors val=\"0\"/>{ser}<c:gapWidth val=\"80\"/>{axes}</c:barChart>{axdefs}"),
+        ChartKind::Line => format!("<c:lineChart><c:grouping val=\"standard\"/><c:varyColors val=\"0\"/>{ser}<c:marker val=\"1\"/>{axes}</c:lineChart>{axdefs}"),
+        ChartKind::Pie => format!("<c:pieChart><c:varyColors val=\"1\"/>{ser}<c:firstSliceAng val=\"0\"/></c:pieChart>"),
+    };
+    let legend = if series.len() > 1 || kind == ChartKind::Pie { format!("<c:legend><c:legendPos val=\"r\"/><c:overlay val=\"0\"/>{txpr}</c:legend>") } else { String::new() };
+    format!("{HDR}<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><c:roundedCorners val=\"0\"/><c:chart><c:autoTitleDeleted val=\"1\"/><c:plotArea><c:layout/>{plot}</c:plotArea>{legend}<c:plotVisOnly val=\"1\"/><c:dispBlanksAs val=\"gap\"/></c:chart><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr><c:externalData r:id=\"rId1\"><c:autoUpdate val=\"0\"/></c:externalData></c:chartSpace>")
+}
+
+/// Minimal workbook (inline strings, no shared strings) holding exactly the chart's table.
+fn chart_xlsx(s: &Slide) -> Vec<u8> {
+    let (cats, series) = chart_data(s).unwrap_or_default();
+    let head = s.table.first().cloned().unwrap_or_default();
+    let col = |i: usize| (b'A' + i as u8) as char;
+    let istr = |r: usize, c: usize, t: &str| format!("<c r=\"{}{r}\" t=\"inlineStr\"><is><t>{}</t></is></c>", col(c), esc(t));
+    let mut rows = String::from("<row r=\"1\">");
+    rows.push_str(&istr(1, 0, head.first().map(|x| x.as_str()).unwrap_or("")));
+    for (i, (n, _)) in series.iter().enumerate() {
+        rows.push_str(&istr(1, i + 1, n));
+    }
+    rows.push_str("</row>");
+    for (k, c) in cats.iter().enumerate() {
+        let r = k + 2;
+        rows.push_str(&format!("<row r=\"{r}\">{}", istr(r, 0, c)));
+        for (i, (_, v)) in series.iter().enumerate() {
+            rows.push_str(&format!("<c r=\"{}{r}\"><v>{}</v></c>", col(i + 1), num_s(v[k])));
+        }
+        rows.push_str("</row>");
+    }
+    let m = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    let files: Vec<(String, Vec<u8>)> = vec![
+        ("[Content_Types].xml".into(), format!("{HDR}<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>").into_bytes()),
+        ("_rels/.rels".into(), rels(&[("rId1".into(), "officeDocument", "xl/workbook.xml".into())]).into_bytes()),
+        ("xl/workbook.xml".into(), format!("{HDR}<workbook xmlns=\"{m}\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>").into_bytes()),
+        ("xl/_rels/workbook.xml.rels".into(), rels(&[("rId1".into(), "worksheet", "worksheets/sheet1.xml".into())]).into_bytes()),
+        ("xl/worksheets/sheet1.xml".into(), format!("{HDR}<worksheet xmlns=\"{m}\"><sheetData>{rows}</sheetData></worksheet>").into_bytes()),
+    ];
+    zip_stored(&files)
+}
+
+fn chart_frame_xml(y: i64, h: i64) -> String {
+    format!("<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"5\" name=\"Chart\"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x=\"838200\" y=\"{y}\"/><a:ext cx=\"10515600\" cy=\"{h}\"/></p:xfrm><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" r:id=\"rId2\"/></a:graphicData></a:graphic></p:graphicFrame>")
+}
+
 fn slide_xml(s: &Slide, is_title: bool) -> String {
     let mut shapes = String::new();
     let t = format!("<p:txBody><a:bodyPr/><a:lstStyle/>{}</p:txBody>", para(0, &s.title));
@@ -412,7 +876,42 @@ fn slide_xml(s: &Slide, is_title: bool) -> String {
         } else {
             { let z = body_size(&s.bullets); s.bullets.iter().map(|(l, b)| para_sz(*l as u32, b, z)).collect() }
         };
-        shapes.push_str(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Content\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr><a:noAutofit/></a:bodyPr><a:lstStyle/>{paras}</p:txBody></p:sp>"));
+        if let Some(im) = s.image.as_ref().filter(|i| !i.data.is_empty()) {
+            let mut y = 1500000i64;
+            if !s.bullets.is_empty() {
+                let h = 380000 * s.bullets.len() as i64 + 150000;
+                let paras: String = s.bullets.iter().map(|(l, b)| para_sz(*l as u32, b, 2000)).collect();
+                shapes.push_str(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Content\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"838200\" y=\"1500000\"/><a:ext cx=\"10515600\" cy=\"{h}\"/></a:xfrm></p:spPr><p:txBody><a:bodyPr><a:noAutofit/></a:bodyPr><a:lstStyle/>{paras}</p:txBody></p:sp>"));
+                y = 1500000 + h + 100000;
+            }
+            let (bw, bh) = (10515600i64, 6400000 - y);
+            let (mut cx, mut cy) = (bw, bw * im.h as i64 / im.w as i64);
+            if cy > bh {
+                cy = bh;
+                cx = bh * im.w as i64 / im.h as i64;
+            }
+            let x = 838200 + (bw - cx) / 2;
+            let name = im.path.rsplit('/').next().unwrap_or("picture");
+            shapes.push_str(&format!("<p:pic><p:nvPicPr><p:cNvPr id=\"5\" name=\"Picture\" descr=\"{}\"/><p:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"rId2\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>", esc(name)));
+        } else if s.table.is_empty() {
+            shapes.push_str(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Content\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr><a:noAutofit/></a:bodyPr><a:lstStyle/>{paras}</p:txBody></p:sp>"));
+        } else {
+            let mut y = 1825625i64;
+            if !s.bullets.is_empty() {
+                let h = 380000 * s.bullets.len() as i64 + 150000;
+                let paras: String = s.bullets.iter().map(|(l, b)| para_sz(*l as u32, b, 2000)).collect();
+                shapes.push_str(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Content\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"838200\" y=\"1500000\"/><a:ext cx=\"10515600\" cy=\"{h}\"/></a:xfrm></p:spPr><p:txBody><a:bodyPr><a:noAutofit/></a:bodyPr><a:lstStyle/>{paras}</p:txBody></p:sp>"));
+                y = 1500000 + h + 100000;
+            }
+            if s.chart.is_some() {
+                shapes.push_str(&chart_frame_xml(y, 6300000 - y));
+            } else {
+                shapes.push_str(&table_xml(&s.table, y));
+            }
+        }
+    }
+    if let Some(src) = &s.source {
+        shapes.push_str(&format!("<p:sp><p:nvSpPr><p:cNvPr id=\"9\" name=\"Source note\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"838200\" y=\"6330000\"/><a:ext cx=\"10515600\" cy=\"330000\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr wrap=\"square\" anchor=\"ctr\"><a:noAutofit/></a:bodyPr><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\" sz=\"1200\"><a:solidFill><a:schemeClr val=\"tx1\"><a:lumMod val=\"75000\"/><a:lumOff val=\"25000\"/></a:schemeClr></a:solidFill></a:rPr><a:t>Source noted by the author (not checked): {}</a:t></a:r></a:p></p:txBody></p:sp>", esc(src)));
     }
     format!("{HDR}<p:sld {NS}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{shapes}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>")
 }
@@ -429,15 +928,16 @@ fn layout_xml(name: &str, ty: &str, title_ph: &str, body_ph: Option<(&str, &str)
     format!("{HDR}<p:sldLayout {NS} type=\"{ty}\" preserve=\"1\"><p:cSld name=\"{name}\"><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{shapes}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>")
 }
 
-fn master_xml() -> String {
+fn master_xml(theme: Theme) -> String {
     let title = sp(2, "Title", "title", None, 838200, 365125, 10515600, 1325563, "<p:txBody><a:bodyPr anchor=\"ctr\"><a:normAutofit/></a:bodyPr><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\"/><a:t>Title</a:t></a:r></a:p></p:txBody>");
     let body = "<p:sp><p:nvSpPr><p:cNvPr id=\"3\" name=\"Body\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph type=\"body\" idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"838200\" y=\"1825625\"/><a:ext cx=\"10515600\" cy=\"4351338\"/></a:xfrm></p:spPr><p:txBody><a:bodyPr><a:noAutofit/></a:bodyPr><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\"/><a:t>Text</a:t></a:r></a:p></p:txBody></p:sp>";
     let lvl = |n: u32, marl: u32, sz: u32| format!("<a:lvl{n}pPr marL=\"{marl}\" indent=\"-285750\"><a:spcBef><a:spcPts val=\"600\"/></a:spcBef><a:buFont typeface=\"Arial\"/><a:buChar char=\"&#8226;\"/><a:defRPr sz=\"{sz}\" kern=\"1200\"><a:solidFill><a:schemeClr val=\"tx1\"/></a:solidFill><a:latin typeface=\"+mn-lt\"/></a:defRPr></a:lvl{n}pPr>");
-    format!("{HDR}<p:sldMaster {NS}><p:cSld><p:bg><p:bgRef idx=\"1001\"><a:schemeClr val=\"bg1\"/></p:bgRef></p:bg><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{title}{body}</p:spTree></p:cSld><p:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/><p:sldLayoutIdLst><p:sldLayoutId id=\"2147483649\" r:id=\"rId1\"/><p:sldLayoutId id=\"2147483650\" r:id=\"rId2\"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle><a:lvl1pPr algn=\"l\"><a:defRPr sz=\"3600\" b=\"1\" kern=\"1200\"><a:solidFill><a:schemeClr val=\"tx1\"/></a:solidFill><a:latin typeface=\"+mj-lt\"/></a:defRPr></a:lvl1pPr></p:titleStyle><p:bodyStyle>{}{}</p:bodyStyle><p:otherStyle><a:lvl1pPr><a:defRPr sz=\"1800\"/></a:lvl1pPr></p:otherStyle></p:txStyles></p:sldMaster>", lvl(1, 342900, 2800), lvl(2, 800100, 2400))
+    format!("{HDR}<p:sldMaster {NS}><p:cSld><p:bg><p:bgRef idx=\"1001\"><a:schemeClr val=\"bg1\"/></p:bgRef></p:bg><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{title}{body}</p:spTree></p:cSld><p:clrMap {} accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/><p:sldLayoutIdLst><p:sldLayoutId id=\"2147483649\" r:id=\"rId1\"/><p:sldLayoutId id=\"2147483650\" r:id=\"rId2\"/></p:sldLayoutIdLst><p:txStyles><p:titleStyle><a:lvl1pPr algn=\"l\"><a:defRPr sz=\"3600\" b=\"1\" kern=\"1200\"><a:solidFill><a:schemeClr val=\"tx1\"/></a:solidFill><a:latin typeface=\"+mj-lt\"/></a:defRPr></a:lvl1pPr></p:titleStyle><p:bodyStyle>{}{}</p:bodyStyle><p:otherStyle><a:lvl1pPr><a:defRPr sz=\"1800\"/></a:lvl1pPr></p:otherStyle></p:txStyles></p:sldMaster>", if theme.colors().6 { "bg1=\"dk1\" tx1=\"lt1\" bg2=\"dk2\" tx2=\"lt2\"" } else { "bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\"" }, lvl(1, 342900, 2800), lvl(2, 800100, 2400))
 }
 
-fn theme_xml() -> String {
-    format!("{HDR}<a:theme xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" name=\"Pawline\"><a:themeElements><a:clrScheme name=\"Pawline\"><a:dk1><a:srgbClr val=\"1F1D2B\"/></a:dk1><a:lt1><a:srgbClr val=\"FFFFFF\"/></a:lt1><a:dk2><a:srgbClr val=\"3B3558\"/></a:dk2><a:lt2><a:srgbClr val=\"EEEBF5\"/></a:lt2><a:accent1><a:srgbClr val=\"7C5CD6\"/></a:accent1><a:accent2><a:srgbClr val=\"E8828C\"/></a:accent2><a:accent3><a:srgbClr val=\"4E9F7D\"/></a:accent3><a:accent4><a:srgbClr val=\"D9A441\"/></a:accent4><a:accent5><a:srgbClr val=\"4A8FC7\"/></a:accent5><a:accent6><a:srgbClr val=\"8A8AA0\"/></a:accent6><a:hlink><a:srgbClr val=\"4A8FC7\"/></a:hlink><a:folHlink><a:srgbClr val=\"7C5CD6\"/></a:folHlink></a:clrScheme><a:fontScheme name=\"Pawline\"><a:majorFont><a:latin typeface=\"DejaVu Sans\"/><a:ea typeface=\"\"/><a:cs typeface=\"\"/></a:majorFont><a:minorFont><a:latin typeface=\"DejaVu Sans\"/><a:ea typeface=\"\"/><a:cs typeface=\"\"/></a:minorFont></a:fontScheme><a:fmtScheme name=\"Pawline\"><a:fillStyleLst><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w=\"9525\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln><a:ln w=\"19050\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln><a:ln w=\"28575\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>")
+fn theme_xml(theme: Theme) -> String {
+    let (dk1, lt1, dk2, lt2, a1, a2, _) = theme.colors();
+    format!("{HDR}<a:theme xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" name=\"Pawline\"><a:themeElements><a:clrScheme name=\"Pawline\"><a:dk1><a:srgbClr val=\"{dk1}\"/></a:dk1><a:lt1><a:srgbClr val=\"{lt1}\"/></a:lt1><a:dk2><a:srgbClr val=\"{dk2}\"/></a:dk2><a:lt2><a:srgbClr val=\"{lt2}\"/></a:lt2><a:accent1><a:srgbClr val=\"{a1}\"/></a:accent1><a:accent2><a:srgbClr val=\"{a2}\"/></a:accent2><a:accent3><a:srgbClr val=\"4E9F7D\"/></a:accent3><a:accent4><a:srgbClr val=\"D9A441\"/></a:accent4><a:accent5><a:srgbClr val=\"4A8FC7\"/></a:accent5><a:accent6><a:srgbClr val=\"8A8AA0\"/></a:accent6><a:hlink><a:srgbClr val=\"4A8FC7\"/></a:hlink><a:folHlink><a:srgbClr val=\"7C5CD6\"/></a:folHlink></a:clrScheme><a:fontScheme name=\"Pawline\"><a:majorFont><a:latin typeface=\"DejaVu Sans\"/><a:ea typeface=\"\"/><a:cs typeface=\"\"/></a:majorFont><a:minorFont><a:latin typeface=\"DejaVu Sans\"/><a:ea typeface=\"\"/><a:cs typeface=\"\"/></a:minorFont></a:fontScheme><a:fmtScheme name=\"Pawline\"><a:fillStyleLst><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w=\"9525\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln><a:ln w=\"19050\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln><a:ln w=\"28575\"><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>")
 }
 
 const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -453,10 +953,19 @@ fn rels(items: &[(String, &str, String)]) -> String {
 
 /// The complete .pptx file as bytes.
 pub fn build_pptx(slides: &[Slide]) -> Vec<u8> {
+    build_pptx_themed(slides, Theme::Pawline)
+}
+
+pub fn build_pptx_themed(slides: &[Slide], theme: Theme) -> Vec<u8> {
     let mut files: Vec<(String, Vec<u8>)> = vec![];
-    let mut ct = format!("{HDR}<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/><Override PartName=\"/ppt/slideMasters/slideMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml\"/><Override PartName=\"/ppt/slideLayouts/slideLayout1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/><Override PartName=\"/ppt/slideLayouts/slideLayout2.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/><Override PartName=\"/ppt/theme/theme1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.theme+xml\"/>");
+    let mut ct = format!("{HDR}<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Default Extension=\"png\" ContentType=\"image/png\"/><Default Extension=\"jpeg\" ContentType=\"image/jpeg\"/><Default Extension=\"xlsx\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\"/><Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/><Override PartName=\"/ppt/slideMasters/slideMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml\"/><Override PartName=\"/ppt/slideLayouts/slideLayout1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/><Override PartName=\"/ppt/slideLayouts/slideLayout2.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/><Override PartName=\"/ppt/theme/theme1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.theme+xml\"/>");
     for i in 1..=slides.len() {
         ct.push_str(&format!("<Override PartName=\"/ppt/slides/slide{i}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>"));
+    }
+    for (i, sl) in slides.iter().enumerate() {
+        if sl.chart.is_some() {
+            ct.push_str(&format!("<Override PartName=\"/ppt/charts/chart{}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.drawingml.chart+xml\"/>", i + 1));
+        }
     }
     ct.push_str("</Types>");
     files.push(("[Content_Types].xml".into(), ct.into_bytes()));
@@ -469,20 +978,32 @@ pub fn build_pptx(slides: &[Slide]) -> Vec<u8> {
     }
     files.push(("ppt/_rels/presentation.xml.rels".into(), rels(&prel).into_bytes()));
     files.push(("ppt/presentation.xml".into(), format!("{HDR}<p:presentation {NS}><p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" r:id=\"rId1\"/></p:sldMasterIdLst><p:sldIdLst>{ids}</p:sldIdLst><p:sldSz cx=\"12192000\" cy=\"6858000\"/><p:notesSz cx=\"6858000\" cy=\"9144000\"/></p:presentation>").into_bytes()));
-    files.push(("ppt/slideMasters/slideMaster1.xml".into(), master_xml().into_bytes()));
+    files.push(("ppt/slideMasters/slideMaster1.xml".into(), master_xml(theme).into_bytes()));
     files.push(("ppt/slideMasters/_rels/slideMaster1.xml.rels".into(), rels(&[("rId1".into(), "slideLayout", "../slideLayouts/slideLayout1.xml".into()), ("rId2".into(), "slideLayout", "../slideLayouts/slideLayout2.xml".into()), ("rId3".into(), "theme", "../theme/theme1.xml".into())]).into_bytes()));
     files.push(("ppt/slideLayouts/slideLayout1.xml".into(), layout_xml("Title Slide", "title", "ctrTitle", Some(("type=\"subTitle\" ", "1"))).into_bytes()));
     files.push(("ppt/slideLayouts/slideLayout2.xml".into(), layout_xml("Title and Content", "obj", "title", Some(("", "1"))).into_bytes()));
     for l in 1..=2 {
         files.push((format!("ppt/slideLayouts/_rels/slideLayout{l}.xml.rels"), rels(&[("rId1".into(), "slideMaster", "../slideMasters/slideMaster1.xml".into())]).into_bytes()));
     }
-    files.push(("ppt/theme/theme1.xml".into(), theme_xml().into_bytes()));
+    files.push(("ppt/theme/theme1.xml".into(), theme_xml(theme).into_bytes()));
     for (i, s) in slides.iter().enumerate() {
         let n = i + 1;
         let is_title = i == 0 && s.title_slide_like();
         files.push((format!("ppt/slides/slide{n}.xml"), slide_xml(s, is_title).into_bytes()));
         let layout = if is_title { 1 } else { 2 };
-        files.push((format!("ppt/slides/_rels/slide{n}.xml.rels"), rels(&[("rId1".into(), "slideLayout", format!("../slideLayouts/slideLayout{layout}.xml"))]).into_bytes()));
+        let mut sr = vec![("rId1".to_string(), "slideLayout", format!("../slideLayouts/slideLayout{layout}.xml"))];
+        if s.chart.is_some() {
+            sr.push(("rId2".into(), "chart", format!("../charts/chart{n}.xml")));
+            files.push((format!("ppt/charts/chart{n}.xml"), chart_xml(s).into_bytes()));
+            files.push((format!("ppt/charts/_rels/chart{n}.xml.rels"), rels(&[("rId1".into(), "package", format!("../embeddings/Microsoft_Excel_Sheet{n}.xlsx"))]).into_bytes()));
+            files.push((format!("ppt/embeddings/Microsoft_Excel_Sheet{n}.xlsx"), chart_xlsx(s)));
+        }
+        if let Some(im) = s.image.as_ref().filter(|i| !i.data.is_empty()) {
+            let ext = if im.jpeg { "jpeg" } else { "png" };
+            sr.push(("rId2".into(), "image", format!("../media/image{n}.{ext}")));
+            files.push((format!("ppt/media/image{n}.{ext}"), im.data.clone()));
+        }
+        files.push((format!("ppt/slides/_rels/slide{n}.xml.rels"), rels(&sr).into_bytes()));
     }
     zip_stored(&files)
 }
@@ -490,7 +1011,7 @@ pub fn build_pptx(slides: &[Slide]) -> Vec<u8> {
 impl Slide {
     /// The first slide is a title slide when it has at most two plain lines (a subtitle) and came from `# Title`.
     fn title_slide_like(&self) -> bool {
-        self.bullets.len() <= 2
+        self.bullets.len() <= 2 && self.table.is_empty()
     }
 }
 
@@ -734,6 +1255,116 @@ pub fn is_save_command(input: &str) -> bool {
     matches!(low.as_str(), "save the presentation" | "save presentation" | "save the draft" | "save the deck" | "save the slides" | "save these slides" | "save it as a presentation")
 }
 
+/// A change the user asks for on the reviewed draft. Numbers are the slide and line numbers shown in the review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DraftEdit {
+    Title { slide: usize, text: String },
+    Line { slide: usize, line: usize, text: String },
+    Delete { slide: usize },
+}
+
+/// "edit slide 2 title to ...", "change slide 2 line 1 to ...", "delete slide 3". The new text is kept exactly as typed.
+pub fn parse_edit_command(input: &str) -> Option<DraftEdit> {
+    let t = input.trim().trim_end_matches(['.', '!']);
+    let low = t.to_lowercase();
+    let num = |w: &str| w.parse::<usize>().ok().filter(|n| *n >= 1 && *n <= 99);
+    let lw: Vec<&str> = low.split_whitespace().collect();
+    let tw: Vec<&str> = t.split_whitespace().collect();
+    if lw.len() == 3 && matches!(lw[0], "delete" | "remove") && lw[1] == "slide" {
+        return Some(DraftEdit::Delete { slide: num(lw[2])? });
+    }
+    if lw.len() >= 6 && matches!(lw[0], "edit" | "change" | "set") && lw[1] == "slide" && lw[3] == "title" && lw[4] == "to" {
+        return Some(DraftEdit::Title { slide: num(lw[2])?, text: tw[5..].join(" ") });
+    }
+    if lw.len() >= 7 && matches!(lw[0], "edit" | "change" | "set") && lw[1] == "slide" && lw[3] == "line" && lw[5] == "to" {
+        return Some(DraftEdit::Line { slide: num(lw[2])?, line: num(lw[4])?, text: tw[6..].join(" ") });
+    }
+    None
+}
+
+fn is_heading(l: &str) -> bool {
+    l.starts_with("# ") || l.starts_with("## ") || l.starts_with("### ")
+}
+
+/// Apply an edit to the draft's outline text. Only the named heading or line changes; everything else stays byte for byte.
+/// The result must still compose, otherwise nothing changes. Typed text is never "corrected".
+pub fn edit_outline(text: &str, edit: &DraftEdit) -> Result<String, String> {
+    let (slides, rep) = compose(text)?;
+    let slide_no = match edit { DraftEdit::Title { slide, .. } | DraftEdit::Line { slide, .. } | DraftEdit::Delete { slide } => *slide };
+    if slide_no > slides.len() {
+        return Err(format!("There is no slide {slide_no}. The draft has {} slide(s).", slides.len()));
+    }
+    let sl = &slides[slide_no - 1];
+    if rep.agenda && slide_no == 2 {
+        return Err("Slide 2 is the Contents slide Pawline added from the other titles. Edit or delete the slides it lists instead.".into());
+    }
+    if sl.title.ends_with(')') && sl.title.rsplit_once(" (").is_some_and(|(_, k)| k.trim_end_matches(')').split_once('/').is_some_and(|(a, b)| a.parse::<u32>().is_ok() && b.parse::<u32>().is_ok())) {
+        return Err(format!("Slide {slide_no} is one part of a long slide that was split. Edit the original wording another way; nothing changed."));
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let heads: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| is_heading(l)).filter(|(_, l)| l.trim_start_matches('#').trim() == sl.title).map(|(i, _)| i).collect();
+    if heads.len() != 1 {
+        return Err(format!("I can't tell which heading is slide {slide_no} (\"{}\" appears {} times). Nothing changed.", sl.title, heads.len()));
+    }
+    let h = heads[0];
+    let end = (h + 1..lines.len()).find(|&i| is_heading(lines[i])).unwrap_or(lines.len());
+    let clean = |t: &str| -> Result<String, String> {
+        let t = t.trim();
+        let low = t.to_lowercase();
+        if t.is_empty() {
+            return Err("The new text is empty. Nothing changed.".into());
+        }
+        if t.starts_with('|') || t.starts_with('#') || low.starts_with("image:") || low.starts_with("source:") || low.starts_with("chart:") || low.starts_with("theme:") {
+            return Err("That text would be read as outline syntax (a table, heading, image, chart or theme line), so I did not use it. Nothing changed.".into());
+        }
+        Ok(t.to_string())
+    };
+    let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    match edit {
+        DraftEdit::Title { text: nt, .. } => {
+            let nt = clean(nt)?;
+            if nt.chars().count() > MAX_TITLE_CHARS {
+                return Err(format!("Titles are limited to {MAX_TITLE_CHARS} characters. Nothing changed."));
+            }
+            let pre: String = lines[h].chars().take_while(|c| *c == '#').collect();
+            out[h] = format!("{pre} {nt}");
+        }
+        DraftEdit::Line { line, text: nt, .. } => {
+            let nt = clean(nt)?;
+            let body: Vec<usize> = (h + 1..end).filter(|&i| { let l = lines[i].trim(); !l.is_empty() && !l.starts_with('|') && !l.to_lowercase().starts_with("chart:") && !l.to_lowercase().starts_with("image:") }).collect();
+            let Some(&i) = body.get(line - 1) else {
+                return Err(format!("Slide {slide_no} has {} line(s); there is no line {line}. Nothing changed.", body.len()));
+            };
+            let l = lines[i];
+            let indent = &l[..l.len() - l.trim_start().len()];
+            let rest = l.trim_start();
+            let marker = ["- ", "* ", "+ "].iter().find(|m| rest.starts_with(**m)).copied().unwrap_or("");
+            out[i] = format!("{indent}{marker}{nt}");
+        }
+        DraftEdit::Delete { .. } => {
+            if h == lines.iter().position(|l| is_heading(l)).unwrap_or(0) {
+                return Err("Slide 1 is the title slide, so I won't delete it. Nothing changed.".into());
+            }
+            out.drain(h..end);
+        }
+    }
+    let mut res = out.join("\n");
+    if text.ends_with('\n') {
+        res.push('\n');
+    }
+    compose(&res).map_err(|e| format!("That change would break the draft ({e}). Nothing changed."))?;
+    Ok(res)
+}
+
+/// A model-written draft may not carry a "source:" line: Pawline cannot tell whether such a citation is real, and the slide
+/// would show it as if it were. The whole draft is discarded rather than the line silently dropped.
+pub fn reject_model_sources(slides: &[Slide]) -> Result<(), String> {
+    if slides.iter().any(|s| s.source.is_some()) {
+        return Err("The online model wrote a \"source\" line. Pawline can't tell if a source like that is real, so it threw the draft away. Nothing was kept. Try again, or write your own outline with your own source lines.".into());
+    }
+    Ok(())
+}
+
 /// Full review text for a draft: every slide and every bullet, as it will be saved.
 pub fn review_text(slides: &[Slide], rep: &Report) -> String {
     let mut s = format!("{} slide(s) ({}):\n", slides.len(), rep.describe());
@@ -741,6 +1372,18 @@ pub fn review_text(slides: &[Slide], rep: &Report) -> String {
         s.push_str(&format!("\n{}. {}\n", i + 1, sl.title));
         for (lvl, b) in &sl.bullets {
             s.push_str(&format!("{}- {}\n", if *lvl > 0 { "    " } else { "  " }, b));
+        }
+        if let Some(k) = sl.chart {
+            s.push_str(&format!("  [{} chart drawn from this table; the numbers are exactly the ones below]\n", match k { ChartKind::Bar => "bar", ChartKind::Line => "line", ChartKind::Pie => "pie" }));
+        }
+        if let Some(src) = &sl.source {
+            s.push_str(&format!("  [source noted by you: {src} (shown on the slide as \"not checked\"; Pawline did not open or verify it)]\n"));
+        }
+        if let Some(im) = &sl.image {
+            s.push_str(&format!("  [picture from {}: {} {}x{} px, {} KB, placed as is, with the file name as its alt text]\n", im.path, if im.jpeg { "JPEG" } else { "PNG" }, im.w, im.h, im.data.len().div_ceil(1024)));
+        }
+        for (ri, r) in sl.table.iter().enumerate() {
+            s.push_str(&format!("  | {} |{}\n", r.join(" | "), if ri == 0 { "  (table header)" } else { "" }));
         }
     }
     s.trim_end().to_string()
@@ -935,6 +1578,323 @@ mod tests {
             }
             let s = parse_outline("# Pawline demo\nA small helper for your files\n\n## What it does\n- Makes folders and moves files\n  - always asks first\n- Shrinks videos\n- Searches with fd and rg\n\n## Safety\n- Nothing is overwritten\n- Undo for every change\n").unwrap();
             std::fs::write(p, build_pptx(&s)).unwrap();
+        }
+    }
+
+    fn lum(hex: &str) -> f64 {
+        let c: Vec<f64> = (0..3).map(|k| u8::from_str_radix(&hex[k * 2..k * 2 + 2], 16).unwrap() as f64 / 255.0).map(|v| if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }).collect();
+        0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+    }
+    fn ratio(a: &str, b: &str) -> f64 {
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn every_theme_has_readable_text_contrast() {
+        for t in THEMES {
+            let (bg, tx) = t.bg_text();
+            let r = ratio(bg, tx);
+            let need = if *t == Theme::Contrast { 7.0 } else { 4.5 };
+            assert!(r >= need, "{} contrast {r:.2} < {need}", t.name());
+            let (_, _, _, _, a1, _, _) = t.colors();
+            assert!(ratio(bg, a1) >= 3.0 || *t == Theme::Pawline, "{} accent contrast {:.2}", t.name(), ratio(bg, a1));
+        }
+    }
+
+    #[test]
+    fn theme_line_changes_colours_only() {
+        let body = "# Talk\n## One\n- a\n- b\n";
+        let (plain, r0) = compose(body).unwrap();
+        assert_eq!(r0.theme, Theme::Pawline);
+        for (name, t) in [("dark", Theme::Dark), ("Ocean", Theme::Ocean), ("theme: forest", Theme::Forest)] {
+            let line = if name.starts_with("theme:") { name.to_string() } else { format!("theme: {name}") };
+            let (sl, r) = compose(&format!("{line}\n{body}")).unwrap();
+            assert_eq!(sl, plain, "text must not change");
+            assert_eq!(r.theme, t);
+        }
+        let (sl, r) = compose(&format!("\n  Theme: Dark theme\n{body}")).unwrap();
+        assert_eq!((sl, r.theme), (plain, Theme::Dark));
+        let e = compose(&format!("theme: neon\n{body}")).unwrap_err();
+        assert!(e.contains("neon") && e.contains("ocean") && e.contains("contrast"), "{e}");
+        // a heading or bullet line that merely mentions a theme is content, not a directive
+        let (sl, r) = compose("# Talk\n## One\n- theme: dark\n").unwrap();
+        assert_eq!(r.theme, Theme::Pawline);
+        assert!(sl.iter().any(|s| s.bullets.iter().any(|b| b.1.contains("theme: dark"))));
+    }
+
+    #[test]
+    fn dark_theme_swaps_background_and_text_in_the_file() {
+        let (sl, r) = compose("theme: dark\n# T\n## A\n- x\n").unwrap();
+        let bytes = build_pptx_themed(&sl, r.theme);
+        let txt = String::from_utf8_lossy(&bytes);
+        assert!(txt.contains("bg1=\"dk1\" tx1=\"lt1\"") && txt.contains("16141F") && txt.contains("F2F0FA"));
+        let light = String::from_utf8_lossy(&build_pptx(&sl)).to_string();
+        assert!(light.contains("bg1=\"lt1\" tx1=\"dk1\"") && light.contains("1F1D2B"));
+        assert!(r.describe().contains("dark theme"));
+    }
+
+    #[test]
+    #[ignore]
+    fn write_theme_samples() {
+        std::fs::create_dir_all("/tmp/deck/themes").unwrap();
+        for t in THEMES {
+            let (sl, r) = compose(&format!("theme: {}\n# Tea at home\nA short talk\n## Why tea\n- Warm and calming\n- Many kinds\n  - green\n  - black\n## Brewing\n- Heat water\n- Wait three minutes\n", t.name())).unwrap();
+            std::fs::write(format!("/tmp/deck/themes/{}.pptx", t.name()), build_pptx_themed(&sl, r.theme)).unwrap();
+        }
+    }
+
+    const T: &str = "# Talk\n## Prices\nCoffee is cheap here.\n| Item | Price | Notes |\n|---|:---:|---|\n| Tea | 2 | hot |\n| Coffee | 3 | strong |\n| \u{0634}\u{0627}\u{064a} | 2 | \u{0633}\u{0627}\u{062e}\u{0646} |\n";
+
+    #[test]
+    fn markdown_table_becomes_a_native_table_and_keeps_every_cell() {
+        let (sl, _) = compose(T).unwrap();
+        let s = &sl[1];
+        assert_eq!(s.table.len(), 4);
+        assert_eq!(s.table[0], vec!["Item", "Price", "Notes"]);
+        assert_eq!(s.bullets, vec![(0, "Coffee is cheap here.".to_string())]);
+        let b = build_pptx(&sl);
+        let txt = String::from_utf8_lossy(&b);
+        assert!(txt.contains("<a:tbl>") && txt.contains("<a:gridCol") && txt.contains("Coffee") && txt.contains("rtl=\"1\""));
+        assert_eq!(txt.matches("<a:tr ").count(), 4);
+        assert!(review_text(&sl, &Report::default()).contains("| Tea | 2 | hot |"));
+    }
+
+    #[test]
+    fn bad_tables_are_refused_with_a_reason_and_never_guessed() {
+        let e = compose("# T\n## A\n| a | b |\n|--|--|\n| 1 |\n").unwrap_err();
+        assert!(e.contains("row 2") && e.contains("will not guess"), "{e}");
+        let e = compose("# T\n## A\n| a | b |\n").unwrap_err();
+        assert!(e.contains("only a header"), "{e}");
+        let many: String = (0..9).map(|i| format!("| r{i} | x |\n")).collect();
+        assert!(compose(&format!("# T\n## A\n{many}")).unwrap_err().contains("limit is 8"));
+        let wide = "| a | b | c | d | e | f | g |\n| 1 | 2 | 3 | 4 | 5 | 6 | 7 |\n";
+        assert!(compose(&format!("# T\n## A\n{wide}")).unwrap_err().contains("7 columns"));
+        let long = format!("| a | b |\n| {} | y |\n", "z".repeat(61));
+        assert!(compose(&format!("# T\n## A\n{long}")).unwrap_err().contains("longer than 60"));
+        let e = compose("# T\n## A\n- 1\n- 2\n- 3\n- 4\n| a | b |\n| 1 | 2 |\n").unwrap_err();
+        assert!(e.contains("at most 3 lines"), "{e}");
+        let tall = format!("| a | b |\n{}", "| row text row text row text row text row text row text row text row text | y |\n".repeat(0));
+        let _ = tall;
+    }
+
+    #[test]
+    fn a_table_on_the_first_slide_is_not_swallowed_by_the_title_slide() {
+        let (sl, _) = compose("# Prices\n| a | b |\n| 1 | 2 |\n").unwrap();
+        assert_eq!(sl[0].table.len(), 2);
+    }
+
+    #[test]
+    #[ignore]
+    fn write_table_sample() {
+        std::fs::create_dir_all("/tmp/deck/tables").unwrap();
+        for (n, th) in [("light", "light"), ("dark", "dark")] {
+            let (sl, r) = compose(&format!("theme: {th}\n{T}")).unwrap();
+            std::fs::write(format!("/tmp/deck/tables/{n}.pptx"), build_pptx_themed(&sl, r.theme)).unwrap();
+        }
+    }
+
+    const C: &str = "# Sales\n## Tea sold\nchart: bar\n| Month | Hot | Iced |\n|---|---|---|\n| Jan | 12 | 3 |\n| Feb | 15 | 4 |\n| Mar | 9.5 | 8 |\n## Share\nchart: pie\n| Kind | Cups |\n| Green | 40 |\n| Black | 35 |\n| Herbal | 25 |\n## Trend\nchart: line\n| Week | Visitors |\n| 1 | 100 |\n| 2 | 130 |\n| 3 | 120 |\n";
+
+    #[test]
+    fn charts_use_exactly_the_supplied_numbers() {
+        let (sl, _) = compose(C).unwrap();
+        assert_eq!(sl.len(), 4);
+        let (cats, ser) = chart_data(&sl[1]).unwrap();
+        assert_eq!(cats, vec!["Jan", "Feb", "Mar"]);
+        assert_eq!(ser, vec![("Hot".to_string(), vec![12.0, 15.0, 9.5]), ("Iced".to_string(), vec![3.0, 4.0, 8.0])]);
+        let b = build_pptx(&sl);
+        let t = String::from_utf8_lossy(&b);
+        assert_eq!(t.matches("<c:chartSpace").count(), 3);
+        assert!(t.contains("<c:v>9.5</c:v>") && t.contains("<c:barChart>") && t.contains("<c:pieChart>") && t.contains("<c:lineChart>"));
+        assert!(t.contains("/ppt/charts/chart2.xml") && t.contains("../charts/chart4.xml"));
+        assert!(t.contains("ppt/embeddings/Microsoft_Excel_Sheet2.xlsx") && t.contains("<c:externalData"));
+        assert!(!t.contains("<a:tbl>"), "a chart slide shows the chart, not the table");
+        assert!(review_text(&sl, &Report::default()).contains("bar chart drawn from this table"));
+    }
+
+    #[test]
+    fn bad_chart_data_is_refused_not_guessed() {
+        let e = compose("# T\n## A\nchart: bar\n| m | v |\n| a | 12k |\n").unwrap_err();
+        assert!(e.contains("12k") && e.contains("will not guess"), "{e}");
+        assert!(compose("# T\n## A\nchart: bar\n").unwrap_err().contains("no data"));
+        assert!(compose("# T\n## A\nchart: donut\n| a | b |\n| x | 1 |\n").unwrap_err().contains("donut"));
+        assert!(compose("# T\n## A\nchart: pie\n| a | b | c |\n| x | 1 | 2 |\n").unwrap_err().contains("exactly one"));
+        assert!(compose("# T\n## A\nchart: pie\n| a | b |\n| x | -1 |\n| y | 0 |\n").unwrap_err().contains("positive"));
+        assert!(compose("# T\n## A\nchart: bar\n| a | b | c | d | e |\n| x | 1 | 2 | 3 | 4 |\n").unwrap_err().contains("limit is 3"));
+        assert!(compose("# T\n## A\nchart: bar\n| a |\n| x |\n").unwrap_err().contains("at least one number column"));
+    }
+
+    #[test]
+    #[ignore]
+    fn write_chart_sample() {
+        std::fs::create_dir_all("/tmp/deck/charts").unwrap();
+        for th in ["light", "dark"] {
+            let (sl, r) = compose(&format!("theme: {th}\n{C}")).unwrap();
+            std::fs::write(format!("/tmp/deck/charts/{th}.pptx"), build_pptx_themed(&sl, r.theme)).unwrap();
+        }
+    }
+
+    fn tiny_png(w: u32, h: u32) -> Vec<u8> {
+        let mut raw = vec![];
+        for y in 0..h {
+            raw.push(0u8);
+            for x in 0..w {
+                raw.extend_from_slice(&[(x * 255 / w) as u8, (y * 255 / h) as u8, 120]);
+            }
+        }
+        let (mut a, mut b) = (1u32, 0u32);
+        for v in &raw {
+            a = (a + *v as u32) % 65521;
+            b = (b + a) % 65521;
+        }
+        let mut z = vec![0x78, 0x01];
+        let n = raw.len();
+        z.push(1);
+        z.extend_from_slice(&(n as u16).to_le_bytes());
+        z.extend_from_slice(&(!(n as u16)).to_le_bytes());
+        z.extend_from_slice(&raw);
+        z.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        let chunk = |t: &[u8; 4], d: &[u8]| {
+            let mut c = (d.len() as u32).to_be_bytes().to_vec();
+            let mut td = t.to_vec();
+            td.extend_from_slice(d);
+            c.extend_from_slice(&td);
+            c.extend_from_slice(&crc32(&td).to_be_bytes());
+            c
+        };
+        let mut out = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        let mut ih = w.to_be_bytes().to_vec();
+        ih.extend_from_slice(&h.to_be_bytes());
+        ih.extend_from_slice(&[8, 2, 0, 0, 0]);
+        out.extend(chunk(b"IHDR", &ih));
+        out.extend(chunk(b"IDAT", &z));
+        out.extend(chunk(b"IEND", &[]));
+        out
+    }
+
+    fn home_with_png() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("pawline-img-{}-{:?}", std::process::id(), std::thread::current().id()).replace(['(', ')', ' '], ""));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("Pictures")).unwrap();
+        std::fs::write(d.join("Pictures/cat.png"), tiny_png(40, 30)).unwrap();
+        std::fs::write(d.join("Pictures/notes.png"), b"this is text, not a picture at all").unwrap();
+        d
+    }
+
+    #[test]
+    fn picture_slide_is_embedded_after_a_confined_read() {
+        let home = home_with_png();
+        let rd = confined_image_reader(&home, &home);
+        let (sl, rep) = compose_with("# T\n## Cat\nimage: ~/Pictures/cat.png\n- a cat\n", &rd).unwrap();
+        let im = sl[1].image.as_ref().unwrap();
+        assert_eq!((im.w, im.h, im.jpeg), (40, 30, false));
+        let b = build_pptx_themed(&sl, rep.theme);
+        let t = String::from_utf8_lossy(&b);
+        assert!(t.contains("ppt/media/image2.png") && t.contains("<p:pic>") && t.contains("descr=\"cat.png\"") && t.contains("../media/image2.png"));
+        assert!(review_text(&sl, &rep).contains("picture from ~/Pictures/cat.png: PNG 40x30 px"));
+        // relative to the outline's folder
+        let rd2 = confined_image_reader(&home, &home.join("Pictures"));
+        assert!(compose_with("# T\n## Cat\nimage: cat.png\n", &rd2).is_ok());
+    }
+
+    #[test]
+    fn picture_refusals_fail_closed() {
+        let home = home_with_png();
+        let rd = confined_image_reader(&home, &home);
+        let e = |o: &str| compose_with(o, &rd).unwrap_err();
+        assert!(e("# T\n## A\nimage: /etc/passwd\n").contains("outside your home"));
+        assert!(e("# T\n## A\nimage: ~/../etc/passwd\n").contains("can't be opened"));
+        assert!(e("# T\n## A\nimage: ~/Pictures/notes.png\n").contains("neither"));
+        assert!(e("# T\n## A\nimage: ~/Pictures/none.png\n").contains("can't be opened"));
+        assert!(e("# T\n## A\nimage: ~/Pictures\n").contains("not a plain file"));
+        assert!(e("# T\n## A\nimage: ~/Pictures/cat.png\nimage: ~/Pictures/cat.png\n").contains("two image lines"));
+        assert!(e("# T\n## A\nimage: ~/Pictures/cat.png\n| a | b |\n| 1 | 2 |\n").contains("separate slides"));
+        assert!(e("# T\n## A\nimage:\n").contains("needs a file path") || e("# T\n## A\nimage:   \n").contains("needs"));
+        std::fs::write(home.join("Pictures/big.png"), vec![0u8; MAX_IMAGE + 10]).unwrap();
+        assert!(e("# T\n## A\nimage: ~/Pictures/big.png\n").contains("5 MB"));
+        #[cfg(unix)]
+        {
+            let out = std::env::temp_dir().join(format!("pawline-outside-{}.png", std::process::id()));
+            std::fs::write(&out, tiny_png(4, 4)).unwrap();
+            std::os::unix::fs::symlink(&out, home.join("Pictures/link.png")).unwrap();
+            assert!(e("# T\n## A\nimage: ~/Pictures/link.png\n").contains("can't be opened"));
+        }
+        assert!(e("# T\nimage: ~/Pictures/cat.png\n").contains("title) slide"));
+        assert!(e("# T\n## A\nimage: ~/Pictures/cat.png\n- 1\n- 2\n- 3\n- 4\n").contains("too much text"));
+        // plain compose (used for AI-written drafts) never reads a file
+        assert!(compose("# T\n## A\nimage: ~/Pictures/cat.png\n").unwrap_err().contains("no place to read"));
+    }
+
+    #[test]
+    #[ignore]
+    fn write_image_sample() {
+        let home = std::path::PathBuf::from("/tmp/deck/img");
+        let rd = confined_image_reader(&home, &home);
+        for th in ["light", "dark"] {
+            let (sl, r) = compose_with(&format!("theme: {th}\n# Pics\n## PNG wide\nimage: ~/wide.png\n## JPEG tall with text\n- a caption line\nimage: ~/tall.jpg\n"), &rd).unwrap();
+            std::fs::write(format!("/tmp/deck/img/{th}.pptx"), build_pptx_themed(&sl, r.theme)).unwrap();
+        }
+    }
+
+    const D: &str = "# Water\nsubtitle\n## Rain\n- Falls from clouds\n- Wets things\n## Rivers\n- Flow to the sea\n";
+
+    #[test]
+    fn draft_edits_change_only_what_was_named_and_keep_typed_text_verbatim() {
+        let e = parse_edit_command("Change slide 2 line 2 to Wets the gorund").unwrap();
+        assert_eq!(e, DraftEdit::Line { slide: 2, line: 2, text: "Wets the gorund".into() });
+        let t = edit_outline(D, &e).unwrap();
+        assert_eq!(t, D.replace("Wets things", "Wets the gorund"), "typo in the user's text is not rewritten");
+        let t = edit_outline(D, &parse_edit_command("edit slide 3 title to Streams").unwrap()).unwrap();
+        assert_eq!(t, D.replace("## Rivers", "## Streams"));
+        let t = edit_outline(D, &parse_edit_command("delete slide 2").unwrap()).unwrap();
+        assert_eq!(t, "# Water\nsubtitle\n## Rivers\n- Flow to the sea\n");
+        assert!(parse_edit_command("delete slide").is_none() && parse_edit_command("delete slide x").is_none() && parse_edit_command("delete the slide 2 file").is_none());
+    }
+
+    #[test]
+    fn draft_edit_refusals_change_nothing() {
+        let ed = |c: &str| edit_outline(D, &parse_edit_command(c).unwrap()).unwrap_err();
+        assert!(ed("delete slide 1").contains("title slide"));
+        assert!(ed("delete slide 9").contains("no slide 9"));
+        assert!(ed("change slide 2 line 5 to x").contains("no line 5"));
+        assert!(ed("change slide 2 line 1 to image: ~/secret.png").contains("outline syntax"));
+        assert!(ed("change slide 2 line 1 to | a | b |").contains("outline syntax"));
+        assert!(ed("edit slide 2 title to # sneaky").contains("outline syntax"));
+        let long = "x".repeat(81);
+        assert!(ed(&format!("edit slide 2 title to {long}")).contains("limited"));
+        // a draft can never gain a picture or file read through an edit
+        let t = edit_outline(D, &parse_edit_command("change slide 2 line 1 to see image: here").unwrap()).unwrap();
+        assert!(compose(&t).unwrap().0[1].image.is_none());
+        // two slides with one title: refused, not guessed
+        let dup = "# T\n## A\n- x\n## A\n- y\n";
+        assert!(edit_outline(dup, &DraftEdit::Delete { slide: 2 }).unwrap_err().contains("2 times"));
+    }
+
+    #[test]
+    fn source_notes_are_the_users_words_labelled_unchecked() {
+        let (sl, rep) = compose("# T\n## Tea\n- Grown in many places\nsource: https://example.org/tea (read by me)\n").unwrap();
+        assert_eq!(sl[1].source.as_deref(), Some("https://example.org/tea (read by me)"));
+        let t = String::from_utf8_lossy(&build_pptx(&sl)).to_string();
+        assert!(t.contains("Source noted by the author (not checked): https://example.org/tea (read by me)"));
+        let r = review_text(&sl, &rep);
+        assert!(r.contains("did not open or verify it") && !r.to_lowercase().contains("verified by"), "{r}");
+        assert!(compose("# T\n## A\nsource:\n").is_err() && compose("# T\n## A\nsource: a\nsource: b\n").is_err());
+        assert!(compose(&format!("# T\n## A\nsource: {}\n", "x".repeat(201))).is_err());
+        // a source line cannot be added through a draft edit
+        let d = "# T\n## A\n- x\n## B\n- y\n";
+        assert!(edit_outline(d, &parse_edit_command("change slide 2 line 1 to source: https://x").unwrap()).unwrap_err().contains("outline syntax"));
+        assert!(reject_model_sources(&sl).is_err());
+        assert!(reject_model_sources(&compose(d).unwrap().0).is_ok());
+    }
+
+    #[test]
+    #[ignore]
+    fn write_source_sample() {
+        std::fs::create_dir_all("/tmp/deck/src").unwrap();
+        for th in ["light", "dark"] {
+            let (sl, r) = compose(&format!("theme: {th}\n# Tea\n## Where tea grows\n- Mostly in warm, wet regions\n- Picked by hand or machine\nsource: https://example.org/tea-growing (I read this page on 2026-11-26)\n")).unwrap();
+            std::fs::write(format!("/tmp/deck/src/{th}.pptx"), build_pptx_themed(&sl, r.theme)).unwrap();
         }
     }
 }

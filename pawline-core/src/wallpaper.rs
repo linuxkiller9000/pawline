@@ -148,6 +148,76 @@ pub fn current_swaybg_image() -> Option<PathBuf> {
     if found.len() == 1 { found.pop() } else { None }
 }
 
+/// The image the awww (or swww) daemon is showing, asked over its own socket.
+/// None when there is no daemon, several monitors show different pictures, or
+/// the query fails. The daemon answers on a local socket; a wedged one gets 2
+/// seconds, then we treat it as unknown rather than block planning.
+pub fn current_awww_image() -> Option<PathBuf> {
+    let bin = if in_path("awww") {
+        "awww"
+    } else if in_path("swww") {
+        "swww"
+    } else {
+        return None;
+    };
+    let daemon = if bin == "awww" { "awww-daemon" } else { "swww-daemon" };
+    if !process_running(daemon) {
+        return None;
+    }
+    let out = std::process::Command::new(bin)
+        .arg("query")
+        .env("LC_ALL", "C")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()
+        .and_then(|mut child| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(child.wait_with_output());
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(2)).ok()?.ok()
+        })?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    // "eDP-1: 1920x1080, scale: 1, currently displaying: image: /path/to.jpg"
+    let mut imgs: Vec<PathBuf> = text
+        .lines()
+        .filter_map(|l| l.rsplit_once("currently displaying: image: ").map(|x| PathBuf::from(x.1.trim())))
+        .collect();
+    imgs.sort();
+    imgs.dedup();
+    if imgs.len() == 1 { imgs.pop() } else { None }
+}
+
+/// Plain-words account of what the wallpaper backup check looked at and found,
+/// for the message that explains why Undo could not restore the current picture.
+pub fn backup_check_note() -> String {
+    let mut found: Vec<String> = Vec::new();
+    if in_path("swaybg") {
+        found.push(format!("swaybg installed, {}", if current_swaybg_image().is_some() { "one running with an image" } else if process_running("swaybg") { "running but its image is not readable" } else { "not running" }));
+    } else {
+        found.push("swaybg not installed".into());
+    }
+    let awww_bin = if in_path("awww") { Some("awww") } else if in_path("swww") { Some("swww") } else { None };
+    match awww_bin {
+        Some(b) => {
+            let d = if b == "awww" { "awww-daemon" } else { "swww-daemon" };
+            found.push(format!("{b} installed, {d} {}", if process_running(d) { "running" } else { "not running" }));
+        }
+        None => found.push("awww/swww not installed".into()),
+    }
+    let niri = std::env::var("XDG_CURRENT_DESKTOP").map(|v| v.to_lowercase().contains("niri")).unwrap_or(false);
+    let tip = if niri {
+        " On niri the wallpaper comes from a tool like swaybg or awww; with one of those running and showing your picture, I can back it up next time."
+    } else {
+        ""
+    };
+    format!("What I found: {}.{tip}", found.join("; "))
+}
+
 /// True when a process with this exact name (from /proc/<pid>/comm) runs
 /// under the current user. comm is truncated to 15 chars by the kernel.
 fn process_running(name: &str) -> bool {

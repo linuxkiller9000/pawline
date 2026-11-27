@@ -15,6 +15,34 @@ static CANCEL_UPTO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 pub fn request_cancel() {
     use std::sync::atomic::Ordering::SeqCst;
     CANCEL_UPTO.store(GEN.load(SeqCst), SeqCst);
+    #[cfg(all(feature = "laya", not(windows)))]
+    LAYA_CANCEL.store(true, SeqCst);
+}
+
+/// Esc during a Laya wait: the worker checks this after the model load and after routing
+/// and stops instead of suggesting. The model call itself is not interrupted.
+#[cfg(all(feature = "laya", not(windows)))]
+pub static LAYA_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+// The GUI worker installs a hook here so a visible "thinking" line appears while the
+// model loads or routes. Terminal mode installs nothing and behaves exactly as before.
+#[cfg(all(feature = "laya", not(windows)))]
+std::thread_local! {
+    static LAYA_THINKING: std::cell::RefCell<Option<Box<dyn Fn(&str)>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(feature = "laya", not(windows)))]
+pub fn set_laya_thinking_notifier(f: Option<Box<dyn Fn(&str)>>) {
+    LAYA_THINKING.with(|c| *c.borrow_mut() = f);
+}
+
+#[cfg(all(feature = "laya", not(windows)))]
+fn notify_laya_thinking(text: &str) {
+    LAYA_THINKING.with(|c| {
+        if let Some(f) = c.borrow().as_ref() {
+            f(text);
+        }
+    });
 }
 
 /// Run one provider request on its own thread so Esc can end the wait now.
@@ -58,6 +86,41 @@ fn run_cancellable_with<T: Send + 'static>(
 }
 
 static LAST_CHAT_ANSWER: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Longest the app waits for the local model. Not tuned against measured inference times; a timeout switches the assist off for the session.
+const ASSIST_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Longest the embedded assist gets to LOAD (its answers already have ASSIST_LIMIT). The load is
+/// native code with no cancel hook, so an over-running load keeps going in the background; the
+/// reply is not held hostage either way. Native anchor: a few seconds on a 2026 sandbox host.
+const NEEDLE_LOAD_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Wait for a worker's answer in 100 ms ticks so a cancel flag can win mid-wait instead of only
+/// at the end. None means timed out, cancelled, or the worker died; an over-running worker is
+/// abandoned, not killed (native code cannot be cancelled safely), which the caller must say.
+fn wait_ticks<T>(rx: std::sync::mpsc::Receiver<T>, limit: std::time::Duration, cancelled: &dyn Fn() -> bool) -> Option<T> {
+    let start = std::time::Instant::now();
+    loop {
+        if cancelled() {
+            return None;
+        }
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(v) => return Some(v),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if start.elapsed() >= limit {
+                    return None;
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+}
+/// Longer input than this never reaches the assist: a huge blob only burns the whole timeout and the
+/// parser's answer is the honest one anyway. The GUI input caps at 2000 (edit.rs MAX_CHARS); this is stricter.
+const ASSIST_INPUT_MAX: usize = 1000;
+
+fn assist_len_ok(input: &str) -> bool {
+    input.chars().count() <= ASSIST_INPUT_MAX
+}
 
 /// The chat provider as configured right now (falls back to Pollinations).
 fn current_chat_provider() -> pawline_core::providers::ChatProvider {
@@ -138,17 +201,50 @@ fn ask_online(text: &str) -> Result<String, PawError> {
 /// Places offered by the weather chooser, waiting for a number. Memory only; any other input clears it.
 static WEATHER_PICK: std::sync::Mutex<Option<Vec<pawline_core::weather::Place>>> = std::sync::Mutex::new(None);
 
-/// A typed number while a weather chooser is open fetches that place's forecast; anything else cancels the chooser.
+/// A typed number - or the typed name of one listed place - while a weather chooser is open fetches
+/// that place's forecast. A name matching several listed places asks for the number and keeps the
+/// chooser open. Anything else cancels the chooser and is treated as a new request.
 pub fn weather_pick(input: &str) -> Option<UiReply> {
-    let opts = WEATHER_PICK.lock().unwrap().take()?;
+    let opts = WEATHER_PICK.lock().unwrap().clone()?;
     let low = input.trim().to_lowercase();
     let low = low.trim_end_matches(['.', '!']);
     if matches!(low, "cancel" | "no" | "nope" | "no thanks" | "no thank you" | "never mind" | "nevermind" | "stop" | "none" | "skip" | "forget it") {
+        WEATHER_PICK.lock().unwrap().take();
         return Some(reply("message", "Cancelled. No forecast was fetched.".into()));
     }
-    let n: usize = input.trim().trim_end_matches('.').parse().ok().filter(|n| (1..=opts.len()).contains(n))?;
+    let pick: Option<usize> = match input.trim().trim_end_matches('.').parse::<usize>() {
+        Ok(n) if (1..=opts.len()).contains(&n) => Some(n - 1),
+        _ => {
+            // Typed name: exact match on a listed place's city part or whole label.
+            let m: Vec<usize> = opts
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| {
+                    let l = p.label.to_lowercase();
+                    let city = l.split(',').next().unwrap_or("").trim();
+                    !low.is_empty() && (city == low || l == low)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            match m.len() {
+                1 => Some(m[0]),
+                0 => {
+                    // Not a pick: the chooser is cancelled and the input is handled as a new request.
+                    WEATHER_PICK.lock().unwrap().take();
+                    return None;
+                }
+                _ => {
+                    let list = m.iter().map(|i| format!("{}. {}", i + 1, opts[*i].label)).collect::<Vec<_>>().join("
+");
+                    return Some(reply("message", format!("More than one listed place is called \"{}\":\n{list}\nType its number. The list is still open; nothing else was sent.", input.trim())));
+                }
+            }
+        }
+    };
+    let i = pick?;
+    WEATHER_PICK.lock().unwrap().take();
     let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(20));
-    Some(match pawline_core::weather::forecast(&http, &opts[n - 1]) {
+    Some(match pawline_core::weather::forecast(&http, &opts[i]) {
         Ok(t) => reply("executed", t),
         Err(e) => {
             let t = e.to_string();
@@ -222,8 +318,7 @@ impl ExecutionBackend for UiBackend {
         }
         if let Operation::GenerateImage { provider, prompt } = op {
             // Only reached after the card naming this provider was confirmed.
-            let dir = std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
+            let dir = pawline_core::platform::home_dir()
                 .ok_or_else(|| PawError::Exec("HOME is not set; can't pick the Pictures folder".into()))?
                 .join("Pictures")
                 .join("Pawline");
@@ -261,6 +356,7 @@ impl ExecutionBackend for UiBackend {
                 pawline_core::deck::author(&http, &t, cancelled, commit)
             })?;
             let (slides, rep) = pawline_core::deck::compose(&outline).map_err(PawError::Validation)?;
+            pawline_core::deck::reject_model_sources(&slides).map_err(PawError::Validation)?;
             let review = pawline_core::deck::review_text(&slides, &rep);
             if !deck_draft_finish(gen, outline) {
                 return Err(PawError::Exec("A newer request replaced this one. The older draft was discarded and nothing was kept.".into()));
@@ -285,6 +381,7 @@ impl ExecutionBackend for UiBackend {
         let r = self.inner.execute(op);
         if matches!(op, Operation::DeckText { .. }) && r.is_ok() {
             *DECK_DRAFT.lock().unwrap() = None; // saved: the draft is used up
+            *DECK_CHECK.lock().unwrap() = None;
         }
         r
     }
@@ -303,8 +400,14 @@ pub struct UiState {
     pub pending: Option<Plan>,
     /// Request wording of the pending plan, kept in memory only to build the lookup key if the plan completes. Never written to disk.
     pub pending_request: Option<String>,
-    pub assist: Option<NeedleAssist>,
+    /// Picture bytes for the deck card that is about to be shown (read through the confined reader). Per state, never global.
+    /// Cleared by every new request, confirm and cancel. The window receives it only together with a "confirm" reply.
+    pub confirm_preview: Vec<Vec<u8>>,
+    pub assist: Option<pawline_core::assist::TimedAssist>,
     pub assist_tried: bool,
+    /// The local assist timed out or crashed: say so once, in the next reply.
+    pub assist_notice: bool,
+    pub assist_off_told: bool,
     /// Journal recovery findings not yet shown to the user.
     pub notes: Vec<String>,
     /// Working time already spent on the pending plan (planning/validation), not counting any wait for the user.
@@ -313,11 +416,27 @@ pub struct UiState {
     pub picks: Vec<String>,
     /// Steps of an organize plan waiting for a yes, and of the last organize that ran (for "undo organize"). Memory only.
     pub organize_pending: Option<usize>,
+    /// The last confirmed command that fully ran, so "save that as NAME" has something exact to save. Memory only.
+    pub action_candidate: Option<pawline_core::actions::Candidate>,
+    /// A saved action whose delete card is on screen; only the card's Approve removes it.
+    pub action_delete_pending: Option<String>,
+    /// A fact-check against a web page whose disclosure card is on screen; only the card's Approve sends the request.
+    pub check_url_pending: Option<String>,
     pub undo_batch: Option<usize>,
     /// Offline conversation: a few recent lines, memory only, never written to disk.
     pub chat: pawline_core::chat::ChatState,
     /// Online chat for this session only (off at start, never saved): on/off, earlier lines that were really sent/answered, and the user line of the card now pending.
     pub online_chat: bool,
+    /// Experimental Laya router: session-only opt-in, lazily loaded model, one load attempt.
+    #[cfg(all(feature = "laya", not(windows)))]
+    pub laya_on: bool,
+    #[cfg(all(feature = "laya", not(windows)))]
+    pub laya: Option<crate::laya::Laya>,
+    #[cfg(all(feature = "laya", not(windows)))]
+    pub laya_tried: bool,
+    /// One-time model download+convert card is on screen; only the card's Approve sets it off.
+    #[cfg(all(feature = "laya", not(windows)))]
+    pub laya_setup_pending: bool,
     pub online_ctx: Vec<String>,
     pub online_pending: Option<String>,
 }
@@ -382,7 +501,7 @@ pub fn folders_of(ops: &[Operation]) -> Vec<std::path::PathBuf> {
     let mut v = vec![];
     for o in ops {
         match o {
-            O::CreateDir { path } | O::List { path } => v.push(path.clone()),
+            O::CreateDir { path } | O::List { path, .. } => v.push(path.clone()),
             O::CreateFile { path } => v.extend(path.parent().map(|p| p.to_path_buf())),
             O::Move { to, .. } | O::Copy { to, .. } | O::Rename { to, .. } => v.extend(to.parent().map(|p| p.to_path_buf())),
             _ => {}
@@ -445,10 +564,212 @@ fn typo_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
     Some(out)
 }
 
+/// Experimental Laya suggestion path: lazily loads the model once, routes the missed
+/// message, and turns a confident match into a pick that refills the input. Typing never
+/// approves anything: the picked text goes through the normal parser and its confirmations.
+/// Runs on the worker thread like the other assists, so the window stays responsive.
+/// Longest Laya gets to LOAD and to ANSWER before it is switched off for the session; a slow
+/// machine gets an honest message instead of a reply that hangs for minutes. Native anchors
+/// (2026-11-26, sandbox host, release build): load 3-9 s, route 1-2 s, so the bounds are generous
+/// for old CPUs. Esc is honoured mid-wait in 100 ms ticks, matching the thinking line's promise.
+#[cfg(all(feature = "laya", not(windows)))]
+const LAYA_LOAD_LIMIT: std::time::Duration = std::time::Duration::from_secs(180);
+#[cfg(all(feature = "laya", not(windows)))]
+const LAYA_ROUTE_LIMIT: std::time::Duration = std::time::Duration::from_secs(90);
+
+#[cfg(all(feature = "laya", not(windows)))]
+fn laya_gate(state: &mut UiState, input: &str) -> Option<UiReply> {
+    use std::sync::atomic::Ordering::SeqCst;
+    LAYA_CANCEL.store(false, SeqCst);
+    if !state.laya_tried {
+        state.laya_tried = true;
+        if let Some(dir) = crate::laya::model_dir() {
+            if crate::laya::model_present(&dir) {
+                // The first load reads ~660 MB from disk; on an old computer this is
+                // the slow part, so the thinking line appears before it starts.
+                notify_laya_thinking("Laya (experimental) is thinking... The model is local; the first suggestion of a session loads it, which can take a while on an old computer. You can keep typing; Esc stops the wait.");
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::laya::Laya::load(&dir));
+                });
+                match wait_ticks(rx, LAYA_LOAD_LIMIT, &|| LAYA_CANCEL.load(SeqCst)) {
+                    Some(Ok(l)) => state.laya = Some(l),
+                    Some(Err(e)) => {
+                        state.laya_on = false;
+                        return Some(reply("error", format!("Laya did not load: {e}. Laya stays off; nothing else changed.")));
+                    }
+                    None => {
+                        state.laya_on = false;
+                        if LAYA_CANCEL.swap(false, SeqCst) {
+                            return Some(reply("message", "Stopped thinking. Nothing was suggested. Laya is off for now; say \"laya on\" to try again.".into()));
+                        }
+                        return Some(reply("message", format!("Laya took longer than {} seconds to load on this machine, so it is off for now. The load may still finish in the background; it changes nothing by itself. Say \"laya on\" to try again.", LAYA_LOAD_LIMIT.as_secs())));
+                    }
+                }
+            }
+        }
+    }
+    if LAYA_CANCEL.swap(false, SeqCst) {
+        return Some(reply("message", "Stopped thinking. Nothing was suggested.".into()));
+    }
+    // The model moves into the worker for the route, so an over-running route can be abandoned:
+    // the worker keeps it, and this session never touches that instance again.
+    let mut laya = state.laya.take()?;
+    notify_laya_thinking("Laya (experimental) is thinking... The model is local; the first suggestion of a session loads it, which can take a while on an old computer. You can keep typing; Esc stops the wait.");
+    let text = input.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let r = laya.route(&text);
+        let _ = tx.send((laya, r));
+    });
+    let (laya_back, route) = match wait_ticks(rx, LAYA_ROUTE_LIMIT, &|| LAYA_CANCEL.load(SeqCst)) {
+        Some(pair) => pair,
+        None => {
+            if LAYA_CANCEL.swap(false, SeqCst) {
+                state.laya_on = false;
+                return Some(reply("message", "Stopped thinking. Nothing was suggested. Laya is off for now; say \"laya on\" to try again.".into()));
+            }
+            state.laya_on = false;
+            return Some(reply("message", format!("Laya took longer than {} seconds to answer, so it is off for now. The answer may still finish in the background; it changes nothing by itself. Say \"laya on\" to try again.", LAYA_ROUTE_LIMIT.as_secs())));
+        }
+    };
+    state.laya = Some(laya_back);
+    if LAYA_CANCEL.swap(false, SeqCst) {
+        return Some(reply("message", "Stopped thinking. Nothing was suggested.".into()));
+    }
+    let route = route?;
+    let sug = crate::laya::suggest(route.intent, input)?;
+    let mut out = reply(
+        "message",
+        format!(
+            "Laya (experimental, a small local model) thinks this is \"{}\". Did you mean:
+{sug}
+Pick it (click, or Up/Down then Tab), then press Enter. Nothing was done yet. You will still see the full request and confirm before anything changes. If it reads wrong, just retype or say \"laya off\".",
+            route.intent.replace('_', " ")
+        ),
+    );
+    state.picks = vec![sug.clone()];
+    out.plan = Some(format!("{sug}	{sug}"));
+    Some(out)
+}
+
 pub static ONLINE_CHAT_UI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// "AI suggestions" setting (item 20): when off, a parser gap never wakes the embedded model and the
+/// plain parse error is the whole reply. On by default, which is the behaviour before the setting existed.
+pub static ASSIST_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+std::thread_local! {
+    static THREAD_ASSIST_ENABLED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+pub fn set_assist_enabled(on: bool) {
+    ASSIST_ENABLED.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// For tests only: override the setting for the CURRENT thread, so parallel tests do not see each other's switch.
+pub fn set_assist_enabled_for_this_thread(v: Option<bool>) {
+    THREAD_ASSIST_ENABLED.with(|c| c.set(v));
+}
+
+pub fn assist_enabled() -> bool {
+    THREAD_ASSIST_ENABLED.with(|c| c.get()).unwrap_or_else(|| ASSIST_ENABLED.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// The one place the picture-ready line is written, so both completion arms always label
+/// AI-generated pictures the same way (tested below).
+fn picture_ready_label(provider: &pawline_core::imagegen::ImageProvider, detail: &str) -> String {
+    format!("Picture ready (AI-generated by {}, unchecked)\n{}", provider.label(), detail)
+}
+
+/// "search history for X" / "find X in history" (and my/saved variants). Returns X byte for byte
+/// from the original input; matching is ASCII case-insensitive on the fixed words only.
+fn history_search_query(input: &str) -> Option<&str> {
+    let t = input.trim().trim_end_matches(['.', '!']).trim_end();
+    for bare in ["search my saved history for", "search saved history for", "search my history for", "search history for", "find in my saved history", "find in saved history", "find in my history", "find in history"] {
+        if t.eq_ignore_ascii_case(bare) {
+            return Some("");
+        }
+    }
+    for p in ["search my saved history for ", "search saved history for ", "search my history for ", "search history for "] {
+        if t.get(..p.len()).map(|h| h.eq_ignore_ascii_case(p)).unwrap_or(false) {
+            return Some(&t[p.len()..]);
+        }
+    }
+    if t.get(..5).map(|h| h.eq_ignore_ascii_case("find ")).unwrap_or(false) {
+        for s in [" in my saved history", " in saved history", " in my history", " in history"] {
+            if t.len() > 5 + s.len() && t.get(t.len() - s.len()..).map(|h| h.eq_ignore_ascii_case(s)).unwrap_or(false) {
+                return Some(&t[5..t.len() - s.len()]);
+            }
+        }
+    }
+    None
+}
+
+/// "delete conversation 2" style phrases (item 19: per-conversation delete). Returns the text
+/// after the fixed prefix, matched ASCII case-insensitively; empty when nothing followed.
+/// Only a bare number deletes (resolved against a fresh listing in the window); anything
+/// else gets a hint, never a deletion.
+fn delete_conversation_query(input: &str) -> Option<String> {
+    let t = input.trim().trim_end_matches(['.', '!']).trim_end();
+    for p in ["delete conversation", "delete archived conversation", "delete saved conversation", "delete my conversation", "delete my saved conversation", "delete that conversation"] {
+        if let Some(rest) = t.get(p.len()..).filter(|_| t.get(..p.len()).map(|h| h.eq_ignore_ascii_case(p)).unwrap_or(false)) {
+            if rest.is_empty() || rest.starts_with(' ') {
+                return Some(rest.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Named-conversation phrases (item 19). Returns the name BYTE FOR BYTE from the original
+/// input; matching is ASCII case-insensitive on the fixed words only. The window validates the
+/// name, derives the file slug, and owns every file effect. `want` selects the phrase family.
+fn named_conversation_query(input: &str, want: &str) -> Option<String> {
+    let t = input.trim().trim_end_matches(['.', '!']).trim_end();
+    let prefixes: &[&str] = match want {
+        "name" => &["name this conversation", "call this conversation", "name our conversation", "rename this conversation"],
+        "new" => &["new conversation called", "new chat called", "start a new conversation called", "start a conversation called", "start a new chat called"],
+        "switch" => &["switch to conversation", "switch to the conversation", "switch back to conversation", "switch back to the conversation", "open conversation", "open the conversation", "continue conversation", "continue the conversation", "go back to conversation"],
+        _ => return None,
+    };
+    for p in prefixes {
+        if let Some(rest) = t.get(p.len()..).filter(|_| t.get(..p.len()).map(|h| h.eq_ignore_ascii_case(p)).unwrap_or(false)) {
+            if rest.is_empty() {
+                return Some(String::new());
+            }
+            if let Some(r) = rest.strip_prefix(' ') {
+                // quoted names keep their inner text only; no shell, no path, this is a label
+                let r = r.trim().trim_matches('"').trim_matches('\'').trim();
+                return Some(r.to_string());
+            }
+        }
+    }
+    None
+}
 
 fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     state.online_pending = None;
+    state.confirm_preview.clear();
+    // Arabic requests (item 11a): a fixed set of command shapes becomes the English command the normal path already
+    // understands, shown to the user. Names stay byte for byte. The normal path then applies its own rules (confirm card where it asks for one).
+    match pawline_core::arabic::translate(input) {
+        pawline_core::arabic::Outcome::Pass => {}
+        pawline_core::arabic::Outcome::Reply(t) => return reply("message", t),
+        pawline_core::arabic::Outcome::Command(e) => {
+            let mut r = handle_text_inner(state, &e);
+            // Fixed Arabic status line for the two outcomes we can recognise. The rest of the reply (paths, card) stays English.
+            let status = if r.text.contains("This needs your confirmation") { "\nهذا يحتاج تأكيدك قبل أي تغيير." } else if r.text.contains("Done:") { "\nتم." } else { "" };
+            r.text = format!("فهمت طلبك هكذا / Understood from your Arabic request as: {e}{status}\n{}", r.text);
+            return r;
+        }
+        pawline_core::arabic::Outcome::Suggest { english, said, meant } => {
+            let mut out = reply("message", format!("قرأت \"{said}\" على أنها \"{meant}\". هل تقصد هذا الأمر؟ / I read \"{said}\" as \"{meant}\". Did you mean:\n{english}\nPick it (click, or Up/Down then Tab), then press Enter. Nothing was done yet. You will still see the full path and confirm before anything changes. Names are never corrected."));
+            state.picks = vec![english.clone()];
+            out.plan = Some(format!("{english}\t{english}"));
+            return out;
+        }
+    }
     if let Some(r) = weather_pick(input) {
         return r;
     }
@@ -460,12 +781,124 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             state.online_pending = None;
             if matches!(low, "new chat" | "new conversation") {
                 state.chat = Default::default();
+                // Must RETURN here: "new" is a create verb, so falling through would make a file
+                // called "conversation" (found 2026-11-26, item 19). The "clearchat" kind lets the
+                // window clear its view; terminal mode just prints the text.
+                return reply(
+                    "clearchat",
+                    "New conversation started. I remember none of the earlier lines, and none of them can trigger anything now. Nothing was sent or deleted.".into(),
+                );
             }
+            // Also return for the forget phrases: the chat engine's own forget reply is bypassed
+            // because these lines were already cleared above; saying so twice would confuse.
+            return reply(
+                "message",
+                "This chat is forgotten: its lines are cleared from memory and none of them can trigger anything now. Nothing was sent or deleted.".into(),
+            );
+        }
+        if matches!(low, "delete saved history" | "delete my saved history" | "delete saved conversations" | "delete my saved conversations" | "delete my saved conversation") {
+            // The window owns the history file: it shows the confirm card with the real counts.
+            // Terminal mode keeps no history file, so say so instead of pretending.
+            return reply("delhist", "The app will list the saved conversation file and any archived copies and ask before deleting. (Terminal sessions keep no history file.)".into());
+        }
+        if matches!(low, "list conversations" | "list my conversations" | "list saved conversations" | "list my saved conversations" | "what conversations are saved" | "what conversations do i have saved" | "show saved conversations" | "show my saved conversations") {
+            // The window owns the history files and lists them with real counts.
+            return reply("listconv", "The window lists the saved conversation and any archived copies. (Terminal sessions keep no history file.)".into());
+        }
+        if let Some(rest) = delete_conversation_query(input) {
+            // The window resolves the number against a FRESH listing and shows the exact file in a
+            // confirm card; a stale or wrong number deletes nothing.
+            if rest.is_empty() && low == "delete saved conversation" {
+                // Singular of the shipped "delete saved conversations": the whole-history card,
+                // which names everything it would remove and can be cancelled.
+                return reply("delhist", "The app will list the saved conversation file and any archived copies and ask before deleting. (Terminal sessions keep no history file.)".into());
+            }
+            match rest.parse::<usize>() {
+                Ok(n) if n > 0 => {
+                    let mut r = reply("delconv", "The window will name the exact conversation file and ask before deleting. (Terminal sessions keep no history file.)".into());
+                    r.plan = Some(rest);
+                    return r;
+                }
+                _ => {
+                    return reply("message", "Say \"list conversations\" to see the saved conversations and their numbers, then for example \"delete conversation 2\". Nothing was deleted.".into());
+                }
+            }
+        }
+        if let Some(name) = named_conversation_query(input, "name") {
+            if name.is_empty() {
+                return reply("message", "Say the name too, for example: name this conversation trip planning".into());
+            }
+            let mut r = reply("nameconv", "The window names the current conversation. (Terminal sessions keep no history file.)".into());
+            r.plan = Some(name);
+            return r;
+        }
+        if let Some(name) = named_conversation_query(input, "new") {
+            if name.is_empty() {
+                return reply("message", "Say the name too, for example: new conversation called trip planning".into());
+            }
+            let mut r = reply("newconv", "The window starts a named conversation. (Terminal sessions keep no history file.)".into());
+            r.plan = Some(name);
+            return r;
+        }
+        if let Some(name) = named_conversation_query(input, "switch") {
+            if name.is_empty() {
+                return reply("message", "Say which conversation, for example: switch to conversation trip planning. Say \"list conversations\" to see them.".into());
+            }
+            let mut r = reply("switchconv", "The window names exactly what loads and asks first. (Terminal sessions keep no history file.)".into());
+            r.plan = Some(name);
+            return r;
+        }
+        if matches!(low, "export history" | "export my history" | "export saved history" | "export my saved history" | "export saved conversation" | "export saved conversations" | "export my saved conversation" | "export my saved conversations" | "export chat history") {
+            // The window owns the history files: it shows the exact target path and asks first.
+            return reply("exphist", "The app will show where the export would be written and ask first. (Terminal sessions keep no history file.)".into());
+        }
+        // History search (item 19). The query travels BYTE FOR BYTE from the original input in
+        // `plan`: lowercasing and typo tolerance must never touch what the user wants to find.
+        if let Some(q) = history_search_query(input) {
+            if q.trim().is_empty() {
+                return reply("message", "Say what to search for, for example: search history for cmake".into());
+            }
+            let mut r = reply("histsearch", "The window searches the saved conversation file and any archived copies. (Terminal sessions keep no history file.)".into());
+            r.plan = Some(q.trim().to_string());
+            return r;
         }
         if matches!(low, "chat online" | "start online chat" | "turn on online chat" | "online chat" | "chat online on") {
             state.online_chat = true;
             let provider = current_chat_provider();
             return reply("message", format!("Online chat is ON for this session only. Nothing was sent. Commands and offline help still run first and locally. When something is not a command, I will show you a card with the exact messages (up to {} earlier lines of this session, kept in memory only) before anything goes out. {} Your files, location and saved history are never sent; texts with paths, addresses, long numbers, file names, passwords or other credentials are not offered. Replies are AI-written and may be wrong. Say \"chat off\" to stop, \"forget our chat\" to clear the lines, or \"chat provider\" to change where answers come from.", pawline_core::textfallback::CHAT_CONTEXT_LINES, provider.destination_line()));
+        }
+        #[cfg(all(feature = "laya", not(windows)))]
+        if matches!(low, "laya on" | "turn on laya" | "enable laya" | "laya on please" | "laya setup" | "set up laya" | "install laya") {
+            let on_text = "Laya suggestions are ON for this session only (EXPERIMENTAL). When my normal parser does not understand a message, a small local model may suggest a command. Nothing runs by itself: every suggestion still needs your pick, Enter and the usual confirmation. Local only, English only, and slow on an old CPU (a few seconds per suggestion). Say \"laya off\" to stop.";
+            match crate::laya::model_dir() {
+                Some(dir) if crate::laya::model_present(&dir) => {
+                    state.laya_on = true;
+                    if state.laya.is_none() {
+                        state.laya_tried = false; // fresh load attempt after an earlier timeout or cancel
+                    }
+                    return reply("message", format!("{on_text} Model found at {}. It loads on the first suggestion (about 700 MB RAM while loaded). No network is used after setup.", dir.display()));
+                }
+                Some(_) => {
+                    if pawline_core::netgate::is_offline() {
+                        return reply("message", "Offline mode is on, so I cannot download the Laya model. Nothing was done and Laya stays off. Turn offline mode off in Settings and say \"laya on\" again if you want it.".into());
+                    }
+                    state.laya_setup_pending = true;
+                    return reply("confirm", format!("Set up Laya suggestions (EXPERIMENTAL, one time)?
+
+This downloads the Laya intent model (288 MB, made by vrajnotviraj, Apache-2.0) and a 2 MB tokenizer from huggingface.co - free, no account, no sign-up; huggingface.co sees your IP address. The model is then converted on this machine, which needs about 950 MB of free disk during setup and leaves about 640 MB installed (the download is removed). It uses about 700 MB of RAM while loaded.
+
+Nothing is sent from your machine, and after setup Laya works fully offline. You can cancel while it runs; nothing is installed until it finishes. Laya stays off until then. Say \"laya off\" at any time to stop using it."));
+                }
+                None => {
+                    return reply("message", "No data folder found, so the Laya model cannot be installed. Nothing was done.".into());
+                }
+            }
+        }
+        #[cfg(all(feature = "laya", not(windows)))]
+        if matches!(low, "laya off" | "turn off laya" | "disable laya") {
+            state.laya_on = false;
+            state.laya = None; // free the model memory
+            return reply("message", "Laya suggestions are OFF and the model is unloaded.".into());
         }
         if matches!(low, "chat off" | "stop online chat" | "turn off online chat" | "chat offline" | "online chat off") {
             state.online_chat = false;
@@ -593,7 +1026,10 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
         }
         return r;
     }
-    if let Some(r) = deck_write_command(state, input).or_else(|| deck_save_command(state, input)) {
+    if let Some(r) = action_command(state, input) {
+        return r;
+    }
+    if let Some(r) = deck_write_command(state, input).or_else(|| deck_save_command(state, input)).or_else(|| deck_edit_command(state, input)).or_else(|| deck_check_command(state, input)) {
         return r;
     }
     if let Some(r) = deck_command(state, input) {
@@ -655,13 +1091,51 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     // Parser first. The 35 MB model is loaded only when the parser has a
     // gap, so ordinary commands never wait for it.
     let mut r = state.engine.handle_with(input, &backend, false, None);
-    if r.is_err() {
+    // Length gate: beyond ASSIST_INPUT_MAX the assist only churns until its timeout (measured 33.7s on a
+    // 10k-char input, then it disables itself). Skip it; the note at the error reply says what happened.
+    let too_long_for_assist = r.is_err() && !assist_len_ok(input);
+    // A single word is either a known command (already parsed) or not worth seconds of model
+    // inference: fail fast and let the message offer the closest commands instead.
+    let single_word = input.trim().split_whitespace().count() == 1;
+    // Experimental Laya router: on a parser gap it may SUGGEST a normalized command.
+    // The suggestion only refills the input; accepting it re-enters the normal parser,
+    // so every confirm card and validation still applies. Nothing runs from the model.
+    #[cfg(all(feature = "laya", not(windows)))]
+    if matches!(&r, Err(PawError::Parse(_))) && state.laya_on {
+        if let Some(out) = laya_gate(state, input) {
+            return out;
+        }
+    }
+    if r.is_err() && !too_long_for_assist && !single_word && assist_enabled() {
         if !state.assist_tried {
-            state.assist_tried = true;
-            state.assist = NeedleAssist::embedded().ok();
+            // A busy error is transient (an earlier abandoned inference still holds the native
+            // session) and cheap, so it does not burn the one lazy-load attempt; other failures
+            // (e.g. weights refused) do, so a broken load is not retried on every parser gap.
+            // The load itself is time-bounded (NEEDLE_LOAD_LIMIT): a machine too slow for the
+            // load gets the timed-out note instead of a reply that hangs for minutes.
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(NeedleAssist::embedded());
+            });
+            match wait_ticks(rx, NEEDLE_LOAD_LIMIT, &|| false) {
+                Some(Ok(a)) => {
+                    state.assist = Some(pawline_core::assist::TimedAssist::new(std::sync::Arc::new(a), ASSIST_LIMIT));
+                    state.assist_tried = true;
+                }
+                Some(Err(e)) => state.assist_tried = !e.0.contains("busy"),
+                None => {
+                    state.assist_tried = true;
+                    state.assist_off_told = true;
+                    state.assist_notice = true;
+                }
+            }
         }
         if let Some(a) = state.assist.as_ref() {
             r = state.engine.handle_with(input, &backend, false, Some(a as &dyn pawline_core::assist::Assist));
+            if a.switched_off() && !state.assist_off_told {
+                state.assist_off_told = true;
+                state.assist_notice = true;
+            }
         }
     }
     // Several folders fit the destination words: a normal question with the choices clickable.
@@ -705,6 +1179,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                     notes: vec![],
                 });
                 state.pending_request = None;
+            pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
                 return UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) };
             }
             Some(why) => {
@@ -714,6 +1189,10 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     }
     if matches!(&r, Err(PawError::Parse(_))) {
         use pawline_core::textfallback::{classify, Class};
+        // Questions only Pawline or the user can answer get a plain reply, never an online offer.
+        if let Some(msg) = pawline_core::textfallback::offline_answer_instead(input) {
+            return reply("message", msg.into());
+        }
         match classify(input) {
             Class::Ask | Class::Auto => {
                 let op = Operation::AskOnline { text: input.trim().to_string() };
@@ -727,6 +1206,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                 };
                 state.pending = Some(plan);
                 state.pending_request = None;
+            pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
                 return UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) };
             }
             Class::Block => {
@@ -739,6 +1219,8 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
         Ok(Response::Executed(ops)) => {
             state.undo_batch = None; // anything else that ran since an organize means "undo organize" is no longer the last thing
             let done: Vec<String> = ops.iter().map(|o| o.op.describe()).collect();
+            let creates_only = pawline_core::actions::ops_are_creates_only(&ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>());
+            state.action_candidate = Some(pawline_core::actions::Candidate { command: input.to_string(), steps: done.clone(), creates_only });
             if let Some(p) = pawline_core::dirs::own_path() {
                 pawline_core::dirs::record_own(&p, &folders_of(&ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>()), pawline_core::searchmem::now_secs());
             }
@@ -759,7 +1241,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                     .iter()
                     .map(|o| match &o.op {
                         pawline_core::plan::Operation::GenerateImage { provider, .. } => {
-                            format!("Picture ready ({})\n{}", provider.label(), o.detail)
+                            picture_ready_label(provider, &o.detail)
                         }
                         pawline_core::plan::Operation::Shrink { .. } | pawline_core::plan::Operation::Deck { .. } | pawline_core::plan::Operation::DeckDraft { .. } | pawline_core::plan::Operation::DeckText { .. } => o.detail.clone(),
                         pawline_core::plan::Operation::Weather { .. } => o.detail.clone(),
@@ -790,13 +1272,21 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                 text: format!("{why}\n{summary}"),
                 plan: Some(summary),
             };
+            pawline_core::pending::save(&state.root, &plan, input.trim());
             state.pending = Some(plan);
             state.pending_request = Some(input.trim().to_string());
             r
         }
         Ok(Response::Message(m)) => reply("message", m),
         Ok(Response::Failed { completed, failed, error, remaining }) => reply(if error.to_string().contains("Cancelled.") { "message" } else { "failed" }, fail_text(completed.len(), &failed.to_string(), &error.to_string(), remaining.to_string())),
-        Err(e) => reply("error", e.to_string()),
+        Err(e) => {
+            let t = e.to_string();
+            reply("error", if too_long_for_assist {
+                format!("{t}\n(Over {ASSIST_INPUT_MAX} characters is too long for the local AI reader, so only the plain command parser tried it. Nothing else was run.)")
+            } else {
+                t
+            })
+        }
     }
 }
 
@@ -813,7 +1303,13 @@ fn fail_text(done: usize, failed: &str, error: &str, remaining: String) -> Strin
 }
 
 /// Put any journal recovery findings in front of the reply, once.
+pub const ASSIST_OFF_NOTE: &str = "The local AI assist did not answer in time (or crashed), so it is switched off until you restart Pawline. What you see is the plain command parser's answer, not an AI answer. The stuck work cannot be stopped from here and may still be using your CPU in the background.";
+
 pub fn with_notes(state: &mut UiState, mut r: UiReply) -> UiReply {
+    if state.assist_notice {
+        state.assist_notice = false;
+        r.text = format!("{ASSIST_OFF_NOTE}\n\n{}", r.text);
+    }
     if !state.notes.is_empty() {
         let n = state.notes.drain(..).collect::<Vec<_>>().join("\n");
         r.text = format!("After an interrupted run I checked the undo journal:\n{n}\n\n{}", r.text);
@@ -821,11 +1317,52 @@ pub fn with_notes(state: &mut UiState, mut r: UiReply) -> UiReply {
     r
 }
 
+/// The Laya setup card was approved: download + convert + install on this worker
+/// (the window stays responsive and Esc cancels), then load the model and turn on.
+#[cfg(all(feature = "laya", not(windows)))]
+fn laya_setup_exec(state: &mut UiState) -> UiReply {
+    use std::sync::atomic::Ordering::SeqCst;
+    let dir = match crate::laya::model_dir() {
+        Some(d) => d,
+        None => return reply("error", "No data folder found; cannot install the model.".into()),
+    };
+    LAYA_CANCEL.store(false, SeqCst);
+    let outcome = pawline_core::laya_setup::install(&dir, &LAYA_CANCEL, &|line| notify_laya_thinking(line));
+    match outcome {
+        Ok(pawline_core::laya_setup::Outcome::Canceled) => {
+            reply("message", "Laya setup cancelled. Nothing was installed and Laya stays off.".into())
+        }
+        Ok(pawline_core::laya_setup::Outcome::Installed) | Ok(pawline_core::laya_setup::Outcome::AlreadyInstalled) => {
+            notify_laya_thinking("Loading the model (about 700 MB RAM while loaded)...");
+            state.laya_tried = true;
+            state.laya = crate::laya::Laya::load(&dir).ok();
+            if state.laya.is_none() {
+                return reply("error", "The model was installed but did not load. Laya stays off; nothing else changed.".into());
+            }
+            state.laya_on = true;
+            reply("message", "Laya is set up and ON for this session only (EXPERIMENTAL). When my normal parser does not understand a message, the model may suggest a command. Nothing runs by itself: every suggestion still needs your pick, Enter and the usual confirmation. From now on it works fully offline. Say \"laya off\" to stop.".into())
+        }
+        Err(e) => reply("error", format!("Laya setup did not finish: {e}. Nothing was installed and Laya stays off.")),
+    }
+}
+
 fn confirm_exec(state: &mut UiState) -> UiReply {
+    #[cfg(all(feature = "laya", not(windows)))]
+    if state.laya_setup_pending {
+        state.laya_setup_pending = false;
+        return laya_setup_exec(state);
+    }
+    if let Some(name) = state.action_delete_pending.take() {
+        return action_delete_exec(state, &name);
+    }
+    if let Some(url) = state.check_url_pending.take() {
+        return url_check_exec(state, &url);
+    }
     let plan = match state.pending.take() {
         Some(p) => p,
         None => return reply("error", "Nothing waiting for confirmation.".into()),
     };
+    pawline_core::pending::clear(&state.root);
     let request = state.pending_request.take();
     let organize_n = state.organize_pending.take();
     let backend = match DirectFsBackend::new(&state.root).map(|inner| UiBackend { inner }) {
@@ -850,6 +1387,10 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
                 remember_steps(&p, req, &ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>(), pawline_core::searchmem::now_secs());
             }
             let done: Vec<String> = ops.iter().map(|o| o.op.describe()).collect();
+            if let Some(req) = request.as_deref() {
+                let creates_only = pawline_core::actions::ops_are_creates_only(&ops.iter().map(|o| o.op.clone()).collect::<Vec<_>>());
+                state.action_candidate = Some(pawline_core::actions::Candidate { command: req.to_string(), steps: done.clone(), creates_only });
+            }
             let body = if ops.len() == 1
                 && matches!(ops[0].op, pawline_core::plan::Operation::Answer { .. })
             {
@@ -859,7 +1400,7 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
                     .iter()
                     .map(|o| match &o.op {
                         pawline_core::plan::Operation::GenerateImage { provider, .. } => {
-                            format!("Picture ready ({})\n{}", provider.label(), o.detail)
+                            picture_ready_label(provider, &o.detail)
                         }
                         pawline_core::plan::Operation::Shrink { .. } | pawline_core::plan::Operation::Deck { .. } | pawline_core::plan::Operation::DeckDraft { .. } | pawline_core::plan::Operation::DeckText { .. } => o.detail.clone(),
                         pawline_core::plan::Operation::Weather { .. } => o.detail.clone(),
@@ -897,17 +1438,31 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
         picks: vec![],
         chat: Default::default(),
         online_chat: false,
+        #[cfg(all(feature = "laya", not(windows)))]
+        laya_on: false,
+        #[cfg(all(feature = "laya", not(windows)))]
+        laya: None,
+        #[cfg(all(feature = "laya", not(windows)))]
+        laya_tried: false,
+        #[cfg(all(feature = "laya", not(windows)))]
+        laya_setup_pending: false,
         online_ctx: vec![],
         online_pending: None,
         organize_pending: None,
+        action_candidate: None,
+        action_delete_pending: None,
+        check_url_pending: None,
         undo_batch: None,
         carried: std::time::Duration::ZERO,
         engine: Engine::new(root.clone()),
         root,
         pending: None,
         pending_request: None,
+        confirm_preview: Vec::new(),
         assist: None,
         assist_tried: false,
+        assist_notice: false,
+        assist_off_told: false,
         notes,
     }
 }
@@ -923,6 +1478,7 @@ static DECK_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::ne
 fn deck_draft_begin() -> u64 {
     use std::sync::atomic::Ordering::SeqCst;
     *DECK_DRAFT.lock().unwrap() = None;
+    *DECK_CHECK.lock().unwrap() = None; // a new draft replaces any earlier check
     DECK_GEN.fetch_add(1, SeqCst) + 1
 }
 
@@ -950,8 +1506,229 @@ fn deck_write_command(state: &mut UiState, input: &str) -> Option<UiReply> {
     let summary = format!("1. {}", op.describe());
     state.pending = Some(Plan { ops: vec![op], needs_confirmation: true, confirmation_reasons: vec!["This would send your topic text to an online service.".into()], assist_derived: false, notes: vec![] });
     state.pending_request = None;
+            pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
     state.organize_pending = None;
     Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) })
+}
+
+/// Saved actions: "save that as NAME", "run saved action NAME", "list saved actions",
+/// "show saved action NAME", "delete saved action NAME". The store is re-read on every
+/// command so two windows never disagree for long; every run re-parses the stored command
+/// with the deterministic parser only and needs the usual card.
+fn action_command(state: &mut UiState, input: &str) -> Option<UiReply> {
+    use pawline_core::actions as act;
+    let meta = act::parse_meta(input)?;
+    match meta {
+        act::Meta::Save(name) => {
+            let Some(cand) = state.action_candidate.clone() else {
+                return Some(reply("message", "There is nothing to save yet. Run a command first, then say \"save that as NAME\". Nothing was changed.".into()));
+            };
+            if !cand.creates_only {
+                return Some(reply("message", "That can't be saved: only create-folder, create-file and copy actions can be saved for now. Nothing was changed.".into()));
+            }
+            let directives = match pawline_core::intent::parse(&cand.command) {
+                Ok(d) => d,
+                Err(e) => return Some(reply("message", format!("That command cannot be saved: {e}. Nothing was changed."))),
+            };
+            if let Err(why) = act::directives_not_session_bound(&directives) {
+                return Some(reply("message", format!("That can't be saved: {why}. Nothing was changed.")));
+            }
+            let mut all = match act::load(&state.root) {
+                Ok(a) => a,
+                Err(e) => return Some(reply("error", format!("The saved-actions store could not be read: {e}. Nothing was changed."))),
+            };
+            match act::add(&mut all, &name, &cand) {
+                Err(e) => Some(reply("message", format!("{e} Nothing was changed."))),
+                Ok(()) => match act::store(&state.root, &all) {
+                    Ok(()) => Some(reply("message", format!("Saved as \"{name}\": {}. Run it with \"run saved action {name}\". It is re-checked against the disk and needs your confirmation every single time; it never runs by itself, on a schedule, or from history.", cand.command))),
+                    Err(e) => Some(reply("error", format!("The action could not be written: {e}. Nothing was saved."))),
+                },
+            }
+        }
+        act::Meta::List => {
+            let all = match act::load(&state.root) {
+                Ok(a) => a,
+                Err(e) => return Some(reply("error", format!("The saved-actions store could not be read: {e}."))),
+            };
+            if all.is_empty() {
+                return Some(reply("message", "No saved actions yet. After a command runs, \"save that as NAME\" keeps it for re-use. Nothing was changed.".into()));
+            }
+            let mut t = format!("{} saved action(s). Each one is re-checked and confirmed every time it runs; nothing runs by itself.\n", all.len());
+            for a in &all {
+                t.push_str(&format!("- {}: {}\n", a.name, a.command));
+            }
+            Some(reply("message", t))
+        }
+        act::Meta::Show(name) => {
+            let all = match act::load(&state.root) {
+                Ok(a) => a,
+                Err(e) => return Some(reply("error", format!("The saved-actions store could not be read: {e}."))),
+            };
+            match act::find(&all, &name) {
+                Some(a) => Some(reply("message", format!("Saved action, re-checked and confirmed every time it runs:\n{}", act::describe_saved(a)))),
+                None => Some(reply("message", format!("There is no saved action called \"{name}\". Nothing was changed."))),
+            }
+        }
+        act::Meta::Delete(name) => {
+            let all = match act::load(&state.root) {
+                Ok(a) => a,
+                Err(e) => return Some(reply("error", format!("The saved-actions store could not be read: {e}."))),
+            };
+            let Some(a) = act::find(&all, &name) else {
+                return Some(reply("message", format!("There is no saved action called \"{name}\". Nothing was changed.")));
+            };
+            let real = a.name.clone();
+            let desc = act::describe_saved(a);
+            // Deleting a saved action loses the stored command and steps, so it gets the same card as other destructive steps.
+            state.pending = None;
+            state.pending_request = None;
+            pawline_core::pending::clear(&state.root);
+            state.organize_pending = None;
+            state.action_delete_pending = Some(real.clone());
+            Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n1. Delete saved action \"{real}\". The stored command and its saved steps are removed from the actions file; no file or folder on disk is touched:\n{desc}"), plan: None })
+        }
+        act::Meta::Run(name) => {
+            let all = match act::load(&state.root) {
+                Ok(a) => a,
+                Err(e) => return Some(reply("error", format!("The saved-actions store could not be read: {e}. Nothing was run."))),
+            };
+            let Some(a) = act::find(&all, &name) else {
+                return Some(reply("message", format!("There is no saved action called \"{name}\". Nothing was run.")));
+            };
+            // Deterministic re-parse only: the assist and Laya are never consulted for a saved action.
+            let mut plan = match state.engine.plan_with(&a.command, None) {
+                Ok(p) => p,
+                Err(e) => return Some(reply("failed", format!("Saved action \"{}\" did NOT run: the command fails its checks against the disk as it is now ({e}). If that is expected, delete the action and save it again when it fits. Nothing was run.", a.name))),
+            };
+            let now: Vec<String> = plan.ops.iter().map(|o| o.describe()).collect();
+            if now != a.steps {
+                let mut t = format!("Saved action \"{}\" was NOT run: what it would do now differs from what was saved. The command or the disk changed.\n\nSaved:\n", a.name);
+                for (i, st) in a.steps.iter().enumerate() {
+                    t.push_str(&format!("  {}. {}\n", i + 1, st));
+                }
+                t.push_str("Now:\n");
+                for (i, st) in now.iter().enumerate() {
+                    t.push_str(&format!("  {}. {}\n", i + 1, st));
+                }
+                t.push_str("If the new version is what you want, run the command yourself once, then save it again.");
+                return Some(reply("failed", t));
+            }
+            plan.needs_confirmation = true; // a saved action always asks, every time
+            let summary = format!("Saved action \"{}\" (re-checked against the disk just now; it matches what was saved):\n{}", a.name, now.iter().enumerate().map(|(i, st)| format!("{}. {}", i + 1, st)).collect::<Vec<_>>().join("\n"));
+            pawline_core::pending::save(&state.root, &plan, &a.command);
+            state.pending = Some(plan);
+            state.pending_request = Some(a.command.clone());
+            state.organize_pending = None;
+            Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) })
+        }
+    }
+}
+
+/// The delete card's Approve: remove the action and rewrite the store atomically.
+fn action_delete_exec(state: &mut UiState, name: &str) -> UiReply {
+    use pawline_core::actions as act;
+    let mut all = match act::load(&state.root) {
+        Ok(a) => a,
+        Err(e) => return reply("error", format!("The saved-actions store could not be read: {e}. Nothing was deleted.")),
+    };
+    match act::remove(&mut all, name) {
+        Err(e) => reply("message", format!("{e}. Nothing was deleted.")),
+        Ok(()) => match act::store(&state.root, &all) {
+            Ok(()) => reply("message", format!("Deleted saved action \"{name}\". No file or folder on disk was touched.")),
+            Err(e) => reply("error", format!("The store could not be rewritten: {e}. The action may still be there; check with \"list saved actions\".")),
+        },
+    }
+}
+
+/// "edit slide 2 title to ...", "change slide 2 line 1 to ...", "delete slide 3" on the reviewed draft. Only acts while a draft
+/// exists. The edited text replaces the draft in memory, any open save card is dropped (it holds the old text), and the full
+/// review is shown again. Nothing is saved or sent.
+fn deck_edit_command(state: &mut UiState, input: &str) -> Option<UiReply> {
+    let edit = pawline_core::deck::parse_edit_command(input)?;
+    let mut d = DECK_DRAFT.lock().unwrap();
+    let text = d.clone()?;
+    match pawline_core::deck::edit_outline(&text, &edit) {
+        Err(e) => Some(reply("message", e)),
+        Ok(new) => {
+            let (slides, rep) = pawline_core::deck::compose(&new).ok()?;
+            *d = Some(new);
+            *DECK_CHECK.lock().unwrap() = None; // the checked text changed; the old result no longer applies
+            if state.pending.as_ref().is_some_and(|p| p.ops.iter().any(|o| matches!(o, Operation::DeckText { .. }))) {
+                state.pending = None;
+            }
+            Some(reply("message", format!("Changed the draft as you typed it. NOTHING IS SAVED YET. Your wording was kept exactly and is not fact-checked.\n{}\n\nSay \"save the presentation\" to see the file name and confirm. An earlier save card, if open, was dropped.", pawline_core::deck::review_text(&slides, &rep))))
+        }
+    }
+}
+
+/// Result of the last "check the draft against <file>": (file as typed, lines not found, lines total).
+/// Memory only; cleared when a new draft starts, on save and on any edit (the check no longer matches the text).
+static DECK_CHECK: std::sync::Mutex<Option<(String, usize, usize)>> = std::sync::Mutex::new(None);
+
+/// "check the draft against <file>": word-level comparison of the reviewed draft against a local text file
+/// the user chose. Never edits the draft; the result is a review list and is repeated on the save card.
+fn deck_check_command(state: &mut UiState, input: &str) -> Option<UiReply> {
+    let target = pawline_core::deckcheck::parse_check_command(input)?;
+    let Some(text) = DECK_DRAFT.lock().unwrap().clone() else {
+        return Some(reply("message", "There is no reviewed draft to check. Ask me to write a presentation about a topic first, then say \"check the draft against <file or web address>\". Nothing was changed.".into()));
+    };
+    if let pawline_core::deckcheck::CheckTarget::Url(url) = target {
+        if let Err(e) = pawline_core::deckcheck::valid_source_url(&url) {
+            return Some(reply("failed", format!("I can't check against that address: {e}. Nothing was fetched.")));
+        }
+        if pawline_core::netgate::is_offline() {
+            return Some(reply("failed", "Offline mode is on, so I cannot fetch a web page. Nothing was fetched. Turn offline mode off in Settings and say the check again if you want it.".into()));
+        }
+        // Only this card's Approve may send the request; drop any other pending card first.
+        state.pending = None;
+        state.pending_request = None;
+        pawline_core::pending::clear(&state.root);
+        state.online_pending = None;
+        state.organize_pending = None;
+        state.action_delete_pending = None;
+        state.check_url_pending = Some(url.clone());
+        let card = format!("Check the draft against a web page?\n\nThis sends one request to {url} - the site sees your IP address and a \"Pawline\" user-agent. Only the page text is read; it is used once for the word-level check in memory and is never saved to disk or sent anywhere else. Nothing from your machine or your draft is uploaded.");
+        return Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{card}"), plan: Some(card) });
+    }
+    let pawline_core::deckcheck::CheckTarget::File(path) = target else { return None; };
+    let home = std::fs::canonicalize(&state.root).unwrap_or_else(|_| state.root.clone());
+    let src = match pawline_core::deckcheck::read_source_text(&home, &path) {
+        Ok(t) => t,
+        Err(e) => return Some(reply("failed", format!("I can't check against that file: {e}. Nothing was changed."))),
+    };
+    if src.trim().is_empty() {
+        return Some(reply("failed", format!("{path} has no text to compare against. Nothing was changed.")));
+    }
+    let (slides, rep) = match pawline_core::deck::compose(&text) {
+        Ok(s) => s,
+        Err(e) => return Some(reply("failed", format!("I can't build that draft: {e}. Nothing was changed."))),
+    };
+    let checks = pawline_core::deckcheck::check_slides_against_source(&slides, &src);
+    let _ = rep;
+    let not_found = checks.iter().filter(|c| !c.found()).count();
+    *DECK_CHECK.lock().unwrap() = Some((path.clone(), not_found, checks.len()));
+    Some(reply("message", format!("{}\n\nThe draft is unchanged. Say \"save the presentation\" to see the file name and confirm - the card repeats how many lines were not found.", pawline_core::deckcheck::check_review_text(&path, &checks))))
+}
+
+/// The disclosure card's Approve for a web-page fact-check: fetch once and compare. Page text stays in memory.
+fn url_check_exec(state: &mut UiState, url: &str) -> UiReply {
+    let Some(text) = DECK_DRAFT.lock().unwrap().clone() else {
+        return reply("message", "There is no reviewed draft to check any more. Nothing was fetched.".into());
+    };
+    let (slides, rep) = match pawline_core::deck::compose(&text) {
+        Ok(s) => s,
+        Err(e) => return reply("failed", format!("I can't build that draft: {e}. Nothing was fetched.")),
+    };
+    let _ = rep;
+    let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(30));
+    match pawline_core::deckcheck::fetch_and_check(&http, url, &slides) {
+        Ok(r) => {
+            let not_found = r.checks.iter().filter(|c| !c.found()).count();
+            *DECK_CHECK.lock().unwrap() = Some((url.to_string(), not_found, r.checks.len()));
+            reply("message", format!("{}\n\nThe draft is unchanged. Say \"save the presentation\" to see the file name and confirm - the card repeats how many lines were not found.", r.review))
+        }
+        Err(e) => reply("failed", format!("I can't check against that page: {e}. Nothing was changed.")),
+    }
 }
 
 /// "save the presentation" after a draft was shown: a second card with the full file path.
@@ -962,17 +1739,23 @@ fn deck_save_command(state: &mut UiState, input: &str) -> Option<UiReply> {
     let Some(text) = DECK_DRAFT.lock().unwrap().clone() else {
         return Some(reply("message", "There is no reviewed draft to save. Ask me to write a presentation about a topic first. Nothing was changed.".into()));
     };
-    let (slides, rep) = match pawline_core::deck::compose(&text) {
+    let home = std::fs::canonicalize(&state.root).unwrap_or_else(|_| state.root.clone());
+    let rd = pawline_core::deck::confined_image_reader(&home, &home);
+    let (slides, rep) = match pawline_core::deck::compose_with(&text, &rd) {
         Ok(s) => s,
         Err(e) => return Some(reply("failed", format!("I can't build that draft: {e}. Nothing was changed."))),
     };
-    let home = std::fs::canonicalize(&state.root).unwrap_or_else(|_| state.root.clone());
     let dir = if home.join("Documents").is_dir() { home.join("Documents") } else { home };
     let to = pawline_core::deck::output_in(&dir, &slides[0].title);
     let op = Operation::DeckText { text, to };
-    let summary = format!("1. {}\n{}", op.describe(), pawline_core::deck::review_text(&slides, &rep));
+    let check_note = match DECK_CHECK.lock().unwrap().clone() {
+        Some((f, nf, total)) => format!("\nChecked against {f}: {nf} of {total} lines were NOT found there (word-level match, not understanding)."),
+        None => String::new(),
+    };
+    let summary = format!("1. {}{}\n{}", op.describe(), check_note, pawline_core::deck::review_text(&slides, &rep));
     state.pending = Some(Plan { ops: vec![op], needs_confirmation: true, confirmation_reasons: vec!["This saves one new .pptx file.".into()], assist_derived: false, notes: vec![] });
     state.pending_request = None;
+            pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
     state.organize_pending = None;
     Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) })
 }
@@ -990,13 +1773,14 @@ fn deck_command(state: &mut UiState, input: &str) -> Option<UiReply> {
                 Ok(m) if m.len() <= pawline_core::deck::MAX_SOURCE => std::fs::read_to_string(&from).unwrap_or_default(),
                 _ => return Some(reply("failed", format!("{} is too big or unreadable (limit 256 KB of text).", from.display()))),
             };
-            let (slides, rep) = match pawline_core::deck::compose(&text) {
+            let rd = pawline_core::deck::confined_image_reader(&home, from.parent().unwrap_or(&home));
+            let (slides, rep) = match pawline_core::deck::compose_with(&text, &rd) {
                 Ok(s) => s,
                 Err(e) => return Some(reply("failed", format!("I can't make slides from {}: {e}. Nothing was changed.", from.display()))),
             };
             let to = pawline_core::deck::output_for(&from);
             let op = Operation::Deck { from, to };
-            let titles = slides.iter().enumerate().map(|(i, s)| format!("  {}. {} ({} line(s))", i + 1, s.title, s.bullets.len())).collect::<Vec<_>>().join("\n");
+            let titles = slides.iter().enumerate().map(|(i, s)| format!("  {}. {} ({} line(s)){}", i + 1, s.title, s.bullets.len(), s.image.as_ref().map(|im| format!("\n     [picture from {}: {} {}x{} px, {} KB. It is copied into the new .pptx; the original file is untouched]", im.path, if im.jpeg { "JPEG" } else { "PNG" }, im.w, im.h, im.data.len().div_ceil(1024))).unwrap_or_default())).collect::<Vec<_>>().join("\n");
             let summary = format!("1. {}\n{} slide(s) ({}):\n{titles}", op.describe(), slides.len(), rep.describe());
             state.pending = Some(Plan {
                 ops: vec![op],
@@ -1006,7 +1790,9 @@ fn deck_command(state: &mut UiState, input: &str) -> Option<UiReply> {
                 notes: vec![],
             });
             state.pending_request = None;
+            pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
             state.organize_pending = None;
+            state.confirm_preview = slides.iter().filter_map(|s| s.image.as_ref().map(|im| im.data.clone())).take(3).collect();
             Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) })
         }
         _ => {
@@ -1043,6 +1829,7 @@ fn shrink_command(state: &mut UiState, input: &str) -> Option<UiReply> {
             };
             state.pending = Some(plan);
             state.pending_request = None; // never remembered as a reusable plan
+            pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
             state.organize_pending = None;
             Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}\nIt runs ffmpeg on a {} video and saves a new smaller file next to it. It can take several minutes (Cancel stops it). The new file is only kept if it decodes without errors, has the same length, keeps the video and audio streams listed above and is really smaller; otherwise nothing is saved.", pawline_core::shrink::mb(size)), plan: Some(summary) })
         }
@@ -1135,11 +1922,19 @@ fn organize_command(state: &mut UiState, input: &str) -> Option<UiReply> {
 }
 
 pub fn cancel(state: &mut UiState) -> UiReply {
+    pawline_core::pending::clear(&state.root);
     state.carried = std::time::Duration::ZERO;
+    #[cfg(all(feature = "laya", not(windows)))]
+    {
+        state.laya_setup_pending = false;
+    }
     state.pending = None;
     state.pending_request = None;
+            pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
     state.online_pending = None;
     state.organize_pending = None;
+    state.action_delete_pending = None;
+    state.check_url_pending = None;
     reply("message", "Cancelled. Nothing was done.".into())
 }
 
@@ -1178,7 +1973,7 @@ pub fn chip_conflict(input: &str, dir: &std::path::Path) -> Option<String> {
     let bare = |l: &L| matches!(l, L::Named(_));
     let hit = ds.iter().any(|d| match d {
         D::Create { parent, .. } => bare(parent),
-        D::Delete { target } | D::List { target } => bare(target),
+        D::Delete { target } | D::List { target, .. } => bare(target),
         D::Rename { target, .. } => bare(target),
         D::Move { target, dest } | D::Copy { target, dest } => bare(target) || bare(dest),
         D::SetWallpaper { image, .. } => bare(image),
@@ -1272,6 +2067,46 @@ pub fn folder_candidates(home: &std::path::Path, query: &str, cancel: &dyn Fn() 
 }
 
 /// Confirmation received -> result ready: carried planning time plus execution.
+/// 15b: at startup, offer again a confirm card that was showing when Pawline last closed or
+/// crashed. Every file the plan touches must match its fingerprint exactly; a changed or missing
+/// target drops the card with a note instead of offering a stale plan. Only local file plans are
+/// remembered at all (see pawline_core::pending). The returned confirm reply is a real card: in
+/// the GUI it draws the buttons, in the terminal it gets the typed-yes prompt - typing the
+/// request again or a plain "yes" never approves it.
+pub fn restore_pending_confirm(state: &mut UiState) -> Option<UiReply> {
+    let rec = pawline_core::pending::load(&state.root)?;
+    pawline_core::pending::clear(&state.root);
+    if !pawline_core::pending::matches_disk(&rec.fingerprints) {
+        return Some(reply(
+            "message",
+            "Before Pawline closed, a change was waiting for your confirmation. The files it touches changed since then, so it was dropped. Nothing was done.".into(),
+        ));
+    }
+    let backend = match DirectFsBackend::new(&state.root).map(|inner| UiBackend { inner }) {
+        Ok(b) => b,
+        Err(e) => {
+            return Some(reply("error", format!("Before Pawline closed, a change was waiting for your confirmation, but it could not be checked now: {e}. It was dropped; nothing was done.")));
+        }
+    };
+    match state.engine.handle_with(&rec.request, &backend, false, None) {
+        Ok(pawline_core::Response::Confirm(plan)) => {
+            let summary = plan.summary();
+            pawline_core::pending::save(&state.root, &plan, &rec.request); // a crash while the card is up again still recovers
+            state.pending = Some(plan);
+            state.pending_request = Some(rec.request);
+            Some(UiReply {
+                kind: "confirm".into(),
+                text: format!("Before Pawline closed, this was waiting for your confirmation (nothing was done yet):\n{summary}"),
+                plan: Some(summary),
+            })
+        }
+        _ => Some(reply(
+            "message",
+            "Before Pawline closed, a change was waiting for your confirmation. It no longer applies as it was, so it was dropped. Nothing was done.".into(),
+        )),
+    }
+}
+
 pub fn confirm_inner(state: &mut UiState) -> UiReply {
     let t = std::time::Instant::now();
     let pending_user = state.online_pending.take();
@@ -1293,6 +2128,19 @@ pub fn confirm_inner(state: &mut UiState) -> UiReply {
 }
 
 fn finish(state: &mut UiState, r: UiReply, spent: std::time::Duration) -> UiReply {
+    // Offline mode: an online request never reaches a card (a card would promise a send). The gate in netgate still stops any sender.
+    if r.kind == "confirm" && pawline_core::netgate::is_offline() {
+        use pawline_core::plan::Operation as O;
+        let online = state.pending.as_ref().is_some_and(|p| p.ops.iter().any(|o| matches!(o, O::Search { .. } | O::Weather { .. } | O::AskOnline { .. } | O::ChatOnline { .. } | O::DeckDraft { .. } | O::GenerateImage { .. })));
+        if online {
+            state.pending = None;
+            state.pending_request = None;
+            pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
+            state.online_pending = None;
+            state.confirm_preview.clear();
+            return reply("message", "Offline mode is on, so I did not prepare this online request and nothing was sent. Turn offline mode off in Settings to use it.".into());
+        }
+    }
     if r.kind == "confirm" {
         state.carried += spent;
         return r;
@@ -1302,8 +2150,13 @@ fn finish(state: &mut UiState, r: UiReply, spent: std::time::Duration) -> UiRepl
     timed(r, total)
 }
 
+// ==== END OF PRODUCTION CODE: only test modules below this line (history.rs structural test splits here) ====
 #[cfg(test)]
 mod memory_tests {
+    /// The weather chooser is process-wide state, so tests that touch it run one at a time.
+    static WEATHER_PICK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Deck tests share the in-memory draft, so they run one at a time.
+    static DECK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use super::*;
     #[test]
     fn zi_command_uses_zoxide_then_own_list_and_ignores_other_text() {
@@ -1349,7 +2202,7 @@ mod memory_tests {
             O::AskOnline { text: "q".into() },
             O::Weather { place: "Cairo".into() },
             O::Undo { entry: 1, summary: "u".into() },
-            O::List { path: "/tmp".into() },
+            O::List { path: "/tmp".into(), page: 1, contains: None },
         ] {
             assert!(!remember_steps(&p, "other", &[bad.clone()], 1));
             assert!(!remember_steps(&p, "mixed", &[dir.clone(), bad], 1));
@@ -1381,7 +2234,242 @@ mod memory_tests {
     }
 
     #[test]
+    fn turning_offline_on_after_a_card_or_between_weather_requests_stops_the_next_request() {
+        use pawline_core::netgate;
+        use pawline_core::weather::Place;
+        let _wp = WEATHER_PICK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        netgate::set_offline_for_this_thread(Some(false));
+        let mut st = new_state(org_root("offline14b"));
+        // 1. a disclosure card is already pending, then offline is switched on: Do it sends nothing
+        let r = handle_text(&mut st, "what's the weather in Cairo?");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        netgate::set_offline_for_this_thread(Some(true));
+        let before = netgate::attempts();
+        let d = confirm_exec(&mut st);
+        assert!(d.kind == "failed" || d.kind == "error", "{} {}", d.kind, d.text);
+        assert!(d.text.contains("Offline mode is on"), "{}", d.text);
+        assert_eq!(netgate::attempts(), before, "no request passed the gate after the switch");
+        assert!(st.pending.is_none(), "the card is consumed, not left to be approved again");
+        // 2. multi-request weather: the place list was fetched while online; offline is switched on before the pick
+        netgate::set_offline_for_this_thread(Some(false));
+        *WEATHER_PICK.lock().unwrap() = Some(vec![Place { label: "A, X".into(), lat: 1.0, lon: 2.0 }, Place { label: "A, Y".into(), lat: 3.0, lon: 4.0 }]);
+        netgate::set_offline_for_this_thread(Some(true));
+        let before = netgate::attempts();
+        let r = weather_pick("2").expect("a number is a pick while the chooser is open");
+        assert!(r.kind == "failed" && r.text.contains("Offline mode is on"), "{} {}", r.kind, r.text);
+        assert_eq!(netgate::attempts(), before, "the forecast request was not made");
+        assert!(!weather_pick_open(), "the chooser is closed, a later number is plain text");
+        netgate::set_offline_for_this_thread(None);
+    }
+
+    #[test]
+    #[ignore = "slow timing probe, run explicitly with --ignored --nocapture"]
+    fn assist_load_and_propose_timing() {
+        let t0 = std::time::Instant::now();
+        let raw = pawline_needle::assist::NeedleAssist::embedded().expect("embedded load");
+        println!("TIMING embedded() load: {:?}", t0.elapsed());
+        let a = pawline_core::assist::TimedAssist::new(std::sync::Arc::new(raw), ASSIST_LIMIT);
+        for inp in ["asdf qwer zxcv", "could you maybe tidy my stuff somehow please", "please would you tidy things up a bit"] {
+            let t = std::time::Instant::now();
+            let r = pawline_core::assist::Assist::propose(&a, inp);
+            let n = r.as_ref().map(|v| v.len()).unwrap_or(999);
+            println!("TIMING propose({:?}): ok={} n={} in {:?}", &inp[..inp.len().min(25)], r.is_ok(), n, t.elapsed());
+        }
+    }
+
+    #[test]
+    fn over_long_input_skips_the_assist_and_says_so() {
+        // boundary on the predicate, without waking the 35 MB model
+        assert!(assist_len_ok(&"x".repeat(ASSIST_INPUT_MAX)));
+        assert!(!assist_len_ok(&"x".repeat(ASSIST_INPUT_MAX + 1)));
+        let mut st = new_state(org_root("lengate"));
+        let long = "x".repeat(10_000);
+        let t0 = std::time::Instant::now();
+        let r = handle_text(&mut st, &long);
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "no 30s assist timeout burn: {:?}", t0.elapsed());
+        assert!(r.text.contains("too long for the local AI reader"), "{}", r.text);
+        assert!(!st.assist_tried, "the assist was never woken");
+    }
+
+    #[test]
+    fn ai_suggestions_off_never_wakes_the_model() {
+        set_assist_enabled_for_this_thread(Some(false));
+        let mut st = new_state(org_root("assistoff"));
+        let t0 = std::time::Instant::now();
+        let r = handle_text(&mut st, &"x".repeat(100));
+        set_assist_enabled_for_this_thread(None);
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "no 35 MB model load, no 30s timeout: {:?}", t0.elapsed());
+        assert!(!st.assist_tried, "the assist was never woken");
+        assert!(st.assist.is_none(), "no model was loaded");
+        assert!(!r.text.is_empty(), "the plain parse-error reply still reaches the user");
+    }
+
+    #[test]
+    fn offline_mode_prepares_no_online_request_and_keeps_local_work_working() {
+        use pawline_core::netgate;
+        netgate::set_offline_for_this_thread(Some(true));
+        let root = org_root("offline14");
+        let mut st = new_state(root.clone());
+        for q in ["what's the weather in Cairo?", "search the web for niri compositor", "wiki tux the penguin", "what is a strong password", "generate a picture of a fox with pollinations", "write a presentation about cats"] {
+            let before = netgate::attempts();
+            let r = handle_text(&mut st, q);
+            assert!(r.kind == "message" && r.text.contains("Offline mode is on") && r.text.contains("nothing was sent"), "{q}: {} {}", r.kind, r.text);
+            assert!(st.pending.is_none(), "{q}");
+            assert_eq!(netgate::attempts(), before, "{q}");
+        }
+        // local work is unaffected: a delete still shows its card
+        std::fs::create_dir_all(root.join("kp")).unwrap();
+        let r = handle_text(&mut st, "delete the folder kp");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        let _ = cancel(&mut st);
+        netgate::set_offline_for_this_thread(None);
+    }
+
+    #[test]
+    fn saved_actions_full_lifecycle_with_drift_refusal_and_delete_card() {
+        let root = org_root("actions1");
+        let mut st = new_state(root.clone());
+        // nothing ran yet
+        let r = handle_text(&mut st, "save that as demo");
+        assert!(r.text.contains("nothing to save yet"), "{}", r.text);
+        // run a saveable command (explicit path); creates run without a card
+        let cmd = format!("make a folder called kk in {}", root.display());
+        let r = handle_text(&mut st, &cmd);
+        assert!(r.text.contains("kk"), "{}", r.text);
+        assert!(root.join("kk").is_dir());
+        // save it
+        let r = handle_text(&mut st, "save that as demo");
+        assert!(r.text.contains("Saved as \"demo\"") && r.text.contains("never runs by itself"), "{}", r.text);
+        // list + show
+        let r = handle_text(&mut st, "list saved actions");
+        assert!(r.text.contains("demo") && r.text.contains(&cmd), "{}", r.text);
+        let r = handle_text(&mut st, "show saved action demo");
+        assert!(r.text.contains("Create folder"), "{}", r.text);
+        // delete the folder on disk, then re-run the saved action through its card
+        std::fs::remove_dir(root.join("kk")).unwrap();
+        let r = handle_text(&mut st, "run saved action demo");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(r.text.contains("re-checked against the disk"), "{}", r.text);
+        let r = confirm_inner(&mut st);
+        assert!(root.join("kk").is_dir(), "the saved action ran after its card: {}", r.text);
+        // drift: tamper with the stored steps; the run must refuse and show both plans
+        let p = root.join(pawline_core::actions::ACTIONS);
+        let t = std::fs::read_to_string(&p).unwrap().replace("Create folder", "Create file");
+        std::fs::write(&p, t).unwrap();
+        std::fs::remove_dir(root.join("kk")).unwrap(); // disk as the action expects: the step comparison, not validation, must catch the tampering
+        let r = handle_text(&mut st, "run saved action demo");
+        assert_eq!(r.kind, "failed", "{}", r.text);
+        assert!(r.text.contains("NOT run") && r.text.contains("Saved:") && r.text.contains("Now:"), "{}", r.text);
+        assert!(!root.join("kk").exists(), "a refused run creates nothing");
+        // restore the store, then delete via its card (cancel keeps it, approve removes it)
+        let t = std::fs::read_to_string(&p).unwrap().replace("Create file", "Create folder");
+        std::fs::write(&p, t).unwrap();
+        let r = handle_text(&mut st, "delete saved action demo");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        let r = cancel(&mut st);
+        assert!(r.text.contains("Nothing was done"));
+        let r = handle_text(&mut st, "list saved actions");
+        assert!(r.text.contains("demo"), "cancel kept it: {}", r.text);
+        let r = handle_text(&mut st, "delete saved action demo");
+        assert_eq!(r.kind, "confirm");
+        let r = confirm_inner(&mut st);
+        assert!(r.text.contains("Deleted saved action \"demo\""), "{}", r.text);
+        let r = handle_text(&mut st, "list saved actions");
+        assert!(r.text.contains("No saved actions yet"), "{}", r.text);
+    }
+
+    #[test]
+    fn unsaveable_commands_are_refused_at_save_time() {
+        let root = org_root("actions2");
+        let mut st = new_state(root.clone());
+        // a bare folder name depends on the session
+        let r = handle_text(&mut st, "make a folder called bb");
+        assert!(r.text.contains("bb"), "{}", r.text);
+        let r = handle_text(&mut st, "save that as b1");
+        assert!(r.text.contains("depends on this session") || r.text.contains("full path"), "{}", r.text);
+        // a delete is not a saveable kind
+        std::fs::create_dir_all(root.join("dd")).unwrap();
+        let r = handle_text(&mut st, "delete the folder dd");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        let rr = confirm_inner(&mut st);
+        assert!(rr.text.contains("dd") || rr.kind == "executed", "{}", rr.text);
+        let r = handle_text(&mut st, "save that as d1");
+        assert!(r.text.contains("only create-folder, create-file and copy"), "{}", r.text);
+    }
+
+    #[test]
+    fn checking_the_draft_against_a_web_page_needs_the_disclosure_card_first() {
+        let _deck_guard = DECK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = org_root("deckcheckurl");
+        let mut st = new_state(root.clone());
+        *DECK_DRAFT.lock().unwrap() = None;
+        *DECK_CHECK.lock().unwrap() = None;
+        pawline_core::netgate::set_offline_for_this_thread(Some(false));
+        // no draft: refused, no card, no request
+        let r = handle_text(&mut st, "check the draft against https://example.com/rain");
+        assert!(r.text.contains("no reviewed draft to check") && st.check_url_pending.is_none(), "{}", r.text);
+        // offline: refused before any card, nothing fetched
+        *DECK_DRAFT.lock().unwrap() = Some("# Water\n## Rain\n- Falls from clouds\n".into());
+        pawline_core::netgate::set_offline_for_this_thread(Some(true));
+        let r = handle_text(&mut st, "check the draft against https://example.com/rain");
+        assert!(r.kind == "failed" && r.text.contains("Offline mode is on"), "{}", r.text);
+        assert!(st.check_url_pending.is_none(), "offline never stages a request");
+        pawline_core::netgate::set_offline_for_this_thread(Some(false));
+        // online: a disclosure card names what is sent; typing never approves it
+        let r = handle_text(&mut st, "check the draft against https://example.com/rain");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(r.text.contains("https://example.com/rain") && r.text.contains("IP address") && r.text.contains("never saved to disk"), "{}", r.text);
+        assert!(st.check_url_pending.is_some(), "the card holds the exact address");
+        // a bad scheme never reaches a card
+        let r = handle_text(&mut st, "check the draft against http://example.com/rain");
+        assert!(r.kind != "confirm", "{}", r.text);
+        // cancel clears the staged request; confirm then has nothing to run
+        assert!(cancel(&mut st).text.contains("Nothing was done"));
+        assert!(st.check_url_pending.is_none(), "cancel clears the staged check");
+        pawline_core::netgate::set_offline_for_this_thread(None);
+    }
+
+    #[test]
+    fn checking_the_draft_against_a_local_file_names_missing_words_and_repeats_on_the_save_card() {
+        let _deck_guard = DECK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = org_root("deckcheck");
+        let mut st = new_state(root.clone());
+        *DECK_DRAFT.lock().unwrap() = None;
+        *DECK_CHECK.lock().unwrap() = None;
+        // no draft: refused, nothing read
+        let r = handle_text(&mut st, "check the draft against facts.txt");
+        assert!(r.text.contains("no reviewed draft to check") && st.pending.is_none(), "{}", r.text);
+        // with a draft and a source file: per-line review, invented number named
+        std::fs::write(root.join("facts.txt"), "Rain falls from clouds. Rivers flow to the sea. The sun lifts water up.
+").unwrap();
+        *DECK_DRAFT.lock().unwrap() = Some("# Water\n## Rain\n- Falls from clouds\n- 42 percent of rain is purple\n".into());
+        let r = handle_text(&mut st, "check the draft against facts.txt");
+        assert_eq!(r.kind, "message", "{}", r.text);
+        assert!(r.text.contains("word-level match, not understanding"), "{}", r.text);
+        assert!(r.text.contains("found: Falls from clouds"), "{}", r.text);
+        assert!(r.text.contains("NOT found: 42 percent of rain is purple"), "{}", r.text);
+        assert!(r.text.contains("missing: 42") && r.text.contains("percent") && r.text.contains("purple"), "{}", r.text);
+        assert!(st.pending.is_none(), "a check never creates a card");
+        // the save card repeats the count
+        let r = handle_text(&mut st, "save the presentation");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(r.text.contains("Checked against facts.txt: 1 of 4 lines were NOT found there"), "{}", r.text);
+        assert!(cancel(&mut st).text.contains("Nothing was done"));
+        // after an edit the stale check is dropped from the card
+        let r = handle_text(&mut st, "change slide 2 line 1 to Rain falls from clouds");
+        assert!(r.text.contains("Changed the draft"), "{}", r.text);
+        let r = handle_text(&mut st, "save the presentation");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(!r.text.contains("Checked against"), "stale check must not be repeated: {}", r.text);
+        let _ = cancel(&mut st);
+        // a source outside home is refused
+        let r = handle_text(&mut st, "check the draft against /etc/hostname");
+        assert!(r.text.contains("outside your home folder"), "{}", r.text);
+    }
+
+    #[test]
     fn written_presentation_needs_disclosure_then_review_then_a_second_card_to_save() {
+        let _deck_guard = DECK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = org_root("deckwrite");
         let mut st = new_state(root.clone());
         *DECK_DRAFT.lock().unwrap() = None;
@@ -1405,7 +2493,32 @@ mod memory_tests {
     }
 
     #[test]
+    fn editing_the_draft_shows_it_again_drops_the_old_save_card_and_saves_the_edited_text() {
+        let _deck_guard = DECK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = org_root("deckedit");
+        let mut st = new_state(root.clone());
+        *DECK_DRAFT.lock().unwrap() = None;
+        assert_ne!(handle_text(&mut st, "delete slide 2").text, "", "no draft: falls through to normal handling");
+        *DECK_DRAFT.lock().unwrap() = Some("# Water\n## Rain\n- Falls from clouds\n## Rivers\n- Flow to the sea\n## Sun\n- Lifts water up\n".into());
+        assert_eq!(handle_text(&mut st, "save the presentation").kind, "confirm");
+        let r = handle_text(&mut st, "change slide 2 line 1 to Falls from the sky");
+        assert!(r.text.contains("Falls from the sky") && r.text.contains("NOTHING IS SAVED") && st.pending.is_none(), "{}", r.text);
+        let r = handle_text(&mut st, "delete slide 9");
+        assert!(r.text.contains("no slide 9"), "{}", r.text);
+        assert!(DECK_DRAFT.lock().unwrap().as_ref().unwrap().contains("Falls from the sky"));
+        let r = handle_text(&mut st, "save the presentation");
+        assert!(r.kind == "confirm" && r.text.contains("Falls from the sky") && !r.text.contains("Falls from clouds"), "{}", r.text);
+        assert!(cancel(&mut st).text.contains("Nothing was done"));
+        let n = std::fs::read_dir(&root).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "pptx")).count();
+        assert_eq!(n, 0);
+        // a new request still wipes the edited draft
+        deck_draft_begin();
+        assert!(handle_text(&mut st, "save the presentation").text.contains("no reviewed draft"));
+    }
+
+    #[test]
     fn stale_or_failed_drafts_are_never_savable() {
+        let _deck_guard = DECK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut st = new_state(org_root("deckstale"));
         *DECK_DRAFT.lock().unwrap() = Some("# Old\n## A\n- x\n## B\n- y\n## C\n- z\n".into());
         let g1 = deck_draft_begin();
@@ -1524,6 +2637,337 @@ mod memory_tests {
         assert!(root.join("tidy please").exists());
     }
 
+    /// Behavioural: restored conversation text (the optional history file, loaded the way the UI loads it) never appears in
+    /// an online chat card or in the online context. Only the exchange of this session's confirmed turns can.
+    #[test]
+    fn saved_history_never_reaches_the_online_chat_payload() {
+        let root = org_root("histiso");
+        let hist = root.join("history.txt");
+        crate::history::save(&hist, &[
+            crate::history::Line { user: true, text: "SAVEDSECRETMARK my earlier private line".into() },
+            crate::history::Line { user: false, text: "SAVEDREPLYMARK earlier reply".into() },
+        ]).unwrap();
+        let restored = crate::history::load(&hist);
+        assert_eq!(restored.len(), 2, "the file loaded the way the UI loads it");
+        let mut st = new_state(root.clone());
+        assert!(st.online_ctx.is_empty(), "a new session starts with no online context even when a history file exists");
+        handle_text(&mut st, "chat online");
+        let r = handle_text(&mut st, "I think clouds look like sheep");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(!r.text.contains("SAVEDSECRETMARK") && !r.text.contains("SAVEDREPLYMARK"), "{}", r.text);
+        assert!(st.online_ctx.is_empty());
+        cancel(&mut st);
+        assert!(st.online_ctx.iter().all(|c| !c.contains("MARK")));
+    }
+
+    #[test]
+    fn assist_off_notice_is_shown_once_and_says_it_is_not_ai_and_may_still_run() {
+        let root = org_root("assistoff");
+        let mut st = new_state(root);
+        st.assist_notice = true;
+        let r = with_notes(&mut st, reply("message", "plain parser answer".into()));
+        assert!(r.text.starts_with(ASSIST_OFF_NOTE) && r.text.ends_with("plain parser answer"));
+        assert!(ASSIST_OFF_NOTE.contains("switched off") && ASSIST_OFF_NOTE.contains("not an AI answer") && ASSIST_OFF_NOTE.contains("may still be using your CPU"));
+        let again = with_notes(&mut st, reply("message", "next".into()));
+        assert_eq!(again.text, "next", "only once");
+    }
+
+    #[test]
+    fn generated_content_is_labelled_on_every_online_result_path() {
+        use pawline_core::plan::Operation as O;
+        let o = |op: O, d: &str| OpOutcome { op, detail: d.into() };
+        let chat = online_md(&[o(O::ChatOnline { context: vec![], text: "q".into() }, "x\nhello")]).unwrap();
+        assert!(chat.contains("AI-written") && chat.contains("not checked") && chat.contains("may be wrong"), "{chat}");
+        let ask = online_md(&[o(O::AskOnline { text: "q".into() }, "x\nhello")]).unwrap();
+        assert!(ask.contains("not checked") && ask.contains("may be wrong"), "{ask}");
+        let wiki = online_md(&[o(O::Search { engine: SearchEngine::Wiki, query: "q".into() }, "text")]).unwrap();
+        assert!(wiki.contains("Wikipedia (online)"), "{wiki}");
+        let web = online_md(&[o(O::Search { engine: SearchEngine::Web, query: "q".into() }, "text")]).unwrap();
+        assert!(web.contains("may be out of date"), "{web}");
+    }
+
+    #[test]
+    fn history_search_query_is_verbatim_and_only_history_phrases_match() {
+        let root = org_root("histsearch");
+        let mut st = new_state(root);
+        let r = handle_text(&mut st, "search history for CMake Lists");
+        assert_eq!(r.kind, "histsearch", "{}", r.text);
+        assert_eq!(r.plan.as_deref(), Some("CMake Lists"), "case and words byte for byte");
+        let r = handle_text(&mut st, "SEARCH HISTORY FOR x");
+        assert_eq!(r.kind, "histsearch");
+        assert_eq!(r.plan.as_deref(), Some("x"));
+        let r = handle_text(&mut st, "find my cmake note in my history");
+        assert_eq!(r.kind, "histsearch");
+        assert_eq!(r.plan.as_deref(), Some("my cmake note"));
+        let r = handle_text(&mut st, "find report 2024. in saved history");
+        assert_eq!(r.plan.as_deref(), Some("report 2024."), "mid-phrase punctuation stays verbatim");
+        let r = handle_text(&mut st, "search history for cmake.");
+        assert_eq!(r.plan.as_deref(), Some("cmake"), "sentence-final punctuation belongs to the command, not the query");
+        let r = handle_text(&mut st, "search history for  spaced  query");
+        assert_eq!(r.plan.as_deref(), Some("spaced  query"), "inner spacing preserved");
+        let r = handle_text(&mut st, "search history for");
+        assert_eq!(r.kind, "message", "empty query asks instead of searching: {}", r.text);
+        let r = handle_text(&mut st, "search my files for cmake");
+        assert_ne!(r.kind, "histsearch", "ordinary file search is untouched");
+    }
+
+    #[test]
+    fn export_history_phrases_are_app_level_and_file_export_is_untouched() {
+        let root = org_root("exphist");
+        let mut st = new_state(root);
+        for p in ["export history", "export my saved conversations", "export chat history", "EXPORT HISTORY"] {
+            let r = handle_text(&mut st, p);
+            assert_eq!(r.kind, "exphist", "{p}: {}", r.text);
+        }
+        let r = handle_text(&mut st, "export my files to usb");
+        assert_ne!(r.kind, "exphist", "not a history phrase: {}", r.text);
+    }
+
+    #[test]
+    fn new_conversation_never_creates_a_file() {
+        // Regression (2026-11-26): "new" is a create verb, so a fall-through made a file called
+        // "conversation". The command must only clear conversation state.
+        let root = org_root("newconv");
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "new conversation");
+        assert_eq!(r.kind, "clearchat", "{}", r.text);
+        assert!(r.text.contains("Nothing was sent or deleted"), "{}", r.text);
+        let mut names: Vec<String> = std::fs::read_dir(&root).unwrap().flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+        names.sort();
+        assert_eq!(names, vec!["Downloads"], "nothing may be created: {names:?}");
+        assert!(st.pending.is_none(), "no plan may be pending");
+        let r = handle_text(&mut st, "forget our chat");
+        assert_eq!(r.kind, "message", "{}", r.text);
+        assert!(r.text.contains("forgotten"), "{}", r.text);
+        let mut names: Vec<String> = std::fs::read_dir(&root).unwrap().flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+        names.sort();
+        assert_eq!(names, vec!["Downloads"], "nothing may be created: {names:?}");
+    }
+
+    #[test]
+    fn delete_saved_history_asks_and_deletes_nothing_by_itself() {
+        let root = org_root("delhist");
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "delete saved history");
+        assert_eq!(r.kind, "delhist", "{}", r.text);
+        assert!(st.pending.is_none(), "no engine plan may pend: deletion is app-level and confirmed there");
+        let names: Vec<String> = std::fs::read_dir(&root).unwrap().flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+        assert_eq!(names, vec!["Downloads"], "nothing deleted or created: {names:?}");
+    }
+
+    #[test]
+    fn list_conversations_phrases_are_app_level() {
+        let root = org_root("listconv");
+        let mut st = new_state(root.clone());
+        for p in ["list conversations", "List my conversations.", "what conversations are saved", "show my saved conversations"] {
+            let r = handle_text(&mut st, p);
+            assert_eq!(r.kind, "listconv", "{p}: {}", r.text);
+        }
+        assert!(st.pending.is_none(), "listing is app-level, never an engine plan");
+    }
+
+    #[test]
+    fn delete_conversation_number_is_app_level_and_only_numbers_delete() {
+        let root = org_root("delconv");
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "delete conversation 2");
+        assert_eq!(r.kind, "delconv", "{}", r.text);
+        assert_eq!(r.plan.as_deref(), Some("2"), "the number travels to the window's fresh listing");
+        assert!(st.pending.is_none(), "no engine plan may pend: deletion is app-level and confirmed there");
+        let r = handle_text(&mut st, "Delete archived conversation 12.");
+        assert_eq!(r.kind, "delconv");
+        assert_eq!(r.plan.as_deref(), Some("12"));
+        for p in ["delete conversation", "delete that conversation", "delete conversation abc", "delete conversation 0", "delete conversation -1"] {
+            let r = handle_text(&mut st, p);
+            assert_eq!(r.kind, "message", "{p} gets a hint, never a deletion: {}", r.text);
+            assert!(r.text.contains("list conversations"), "{p}: {}", r.text);
+            assert!(r.text.contains("Nothing was deleted"), "{p}: {}", r.text);
+        }
+        let names: Vec<String> = std::fs::read_dir(&root).unwrap().flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+        assert_eq!(names, vec!["Downloads"], "nothing deleted or created: {names:?}");
+    }
+
+    #[test]
+    fn whole_history_delete_phrases_stay_whole_history() {
+        let root = org_root("delhist-stays");
+        let mut st = new_state(root);
+        for p in ["delete saved history", "delete my saved conversation", "delete saved conversations", "delete saved conversation"] {
+            let r = handle_text(&mut st, p);
+            assert_eq!(r.kind, "delhist", "{p}: {}", r.text);
+        }
+    }
+
+    #[test]
+    fn named_conversation_phrases_are_app_level_and_names_are_verbatim() {
+        let root = org_root("namedconv");
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "name this conversation Trip Planning");
+        assert_eq!(r.kind, "nameconv", "{}", r.text);
+        assert_eq!(r.plan.as_deref(), Some("Trip Planning"), "the name travels byte for byte");
+        let r = handle_text(&mut st, "new conversation called trip planning");
+        assert_eq!(r.kind, "newconv", "{}", r.text);
+        assert_eq!(r.plan.as_deref(), Some("trip planning"));
+        let r = handle_text(&mut st, "switch to conversation Trip Planning");
+        assert_eq!(r.kind, "switchconv", "{}", r.text);
+        assert_eq!(r.plan.as_deref(), Some("Trip Planning"));
+        for p in ["name this conversation", "new conversation called", "switch to conversation"] {
+            let r = handle_text(&mut st, p);
+            assert_eq!(r.kind, "message", "{p} asks for the missing name: {}", r.text);
+        }
+        // Existing neighbours are untouched.
+        let r = handle_text(&mut st, "new conversation");
+        assert_eq!(r.kind, "clearchat", "plain new conversation still clears: {}", r.text);
+        assert!(st.pending.is_none(), "no engine plan may pend from any of these");
+        let names: Vec<String> = std::fs::read_dir(&root).unwrap().flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+        assert_eq!(names, vec!["Downloads"], "nothing created or deleted: {names:?}");
+    }
+
+    #[test]
+    fn slugify_makes_safe_file_names() {
+        assert_eq!(crate::history::slugify("Trip Planning"), Some("trip-planning".to_string()));
+        assert_eq!(crate::history::slugify("  my  notes!! "), Some("my-notes".to_string()));
+        assert_eq!(crate::history::slugify("c/d\\e\\f"), Some("c-d-e-f".to_string()), "no path separators survive");
+        assert_eq!(crate::history::slugify("..."), None, "nothing usable is an honest error, not an invented name");
+        let slug = crate::history::slugify("averyveryveryverylongconversationname").unwrap();
+        assert_eq!(slug, "averyveryveryverylongcon");
+        assert_eq!(slug.len(), 24, "capped at 24");
+    }
+
+    #[test]
+    fn generated_pictures_are_labelled_ai_and_unchecked() {
+        // Unit test of the exact formatter both completion arms use (behavioural coverage of the
+        // full generate flow would need a stubbed HTTP engine; the consent card is tested separately).
+        for p in [pawline_core::imagegen::ImageProvider::Pollinations, pawline_core::imagegen::ImageProvider::Horde] {
+            let line = picture_ready_label(&p, "/home/u/Pictures/x.png");
+            assert!(line.contains("AI-generated") && line.contains("unchecked"), "{line}");
+            assert!(line.contains("/home/u/Pictures/x.png"), "detail kept: {line}");
+        }
+    }
+
+    #[cfg(all(feature = "laya", not(windows)))]
+    #[test]
+    fn laya_is_session_opt_in_and_never_acts_alone() {
+        let root = org_root("laya1");
+        let mut st = new_state(root.clone());
+        // off by default: an unrecognised sentence gets the plain parse reply, no suggestion
+        let r = handle_text(&mut st, "zzqq nothingness");
+        assert!(!r.text.contains("Laya"), "{}", r.text);
+        // with no model installed, "laya on" offers the one-time setup card and turns nothing on
+        let r = handle_text(&mut st, "laya on");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(r.text.contains("288 MB") && r.text.contains("huggingface.co") && r.text.contains("Apache-2.0"), "{}", r.text);
+        assert!(r.text.contains("EXPERIMENTAL") && r.text.contains("stays off until then"), "{}", r.text);
+        assert!(st.laya_setup_pending && !st.laya_on, "flag {:?} on {:?}", st.laya_setup_pending, st.laya_on);
+        // typing never approves the card: the next message drops it
+        st.laya_setup_pending = false; // (the window clears it on any new input; cancel does too)
+        // cancel path: card shown, Cancel clears it and nothing happens
+        let r = handle_text(&mut st, "laya on");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        let r = cancel(&mut st);
+        assert!(r.text.contains("Cancelled") && !st.laya_setup_pending, "{}", r.text);
+        // offline mode refuses the download instead of showing the card
+        pawline_core::netgate::set_offline_for_this_thread(Some(true));
+        let r = handle_text(&mut st, "laya on");
+        pawline_core::netgate::set_offline_for_this_thread(Some(false));
+        assert!(r.kind == "message" && r.text.contains("Offline mode") && r.text.contains("stays off"), "{}", r.text);
+        assert!(!st.laya_setup_pending && !st.laya_on, "{}", r.text);
+        // off again clears it (simulate an enabled session)
+        st.laya_on = true;
+        let r = handle_text(&mut st, "laya off");
+        assert!(r.text.contains("OFF") && !st.laya_on && st.laya.is_none(), "{}", r.text);
+    }
+
+    #[test]
+    fn pending_card_is_restored_after_a_crash_and_still_needs_the_real_confirm() {
+        let root = org_root("pend1");
+        std::fs::create_dir(root.join("kp")).unwrap();
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "delete the folder kp");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(pawline_core::pending::load(&root).is_some(), "showing card is remembered");
+        drop(st); // crashed or closed with the card up: no cancel, no confirm
+
+        let mut st2 = new_state(root.clone());
+        let r = restore_pending_confirm(&mut st2).expect("card offered again");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(r.text.contains("Before Pawline closed"), "{}", r.text);
+        assert!(root.join("kp").exists(), "nothing was done by the restore itself");
+        let r = confirm_inner(&mut st2);
+        assert!(r.kind == "executed" || r.kind == "md", "{}", r.text);
+        assert!(!root.join("kp").exists(), "approving the restored card runs it");
+        assert!(pawline_core::pending::load(&root).is_none(), "record consumed");
+    }
+
+    #[test]
+    fn pending_card_is_dropped_when_a_touched_file_changed() {
+        let root = org_root("pend2");
+        std::fs::write(root.join("v.txt"), b"before").unwrap();
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "delete the file v.txt");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        drop(st);
+        std::fs::write(root.join("v.txt"), b"someone changed it").unwrap();
+
+        let mut st2 = new_state(root.clone());
+        let r = restore_pending_confirm(&mut st2).expect("an answer");
+        assert_eq!(r.kind, "message", "{}", r.text);
+        assert!(r.text.contains("changed since"), "{}", r.text);
+        assert!(st2.pending.is_none(), "stale card is not offered");
+        assert_eq!(std::fs::read(root.join("v.txt")).unwrap(), b"someone changed it", "file untouched");
+        assert!(pawline_core::pending::load(&root).is_none(), "record dropped");
+    }
+
+    #[test]
+    fn pending_card_record_is_cleared_on_cancel_and_on_replacement() {
+        let root = org_root("pend3");
+        std::fs::create_dir(root.join("kp")).unwrap();
+        std::fs::create_dir(root.join("zz")).unwrap();
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "delete the folder kp");
+        assert_eq!(r.kind, "confirm");
+        assert!(pawline_core::pending::load(&root).is_some());
+        let _ = cancel(&mut st);
+        assert!(pawline_core::pending::load(&root).is_none(), "cancel forgets the card");
+
+        // a new card replaces the remembered one atomically: the newest card is what survives
+        let r = handle_text(&mut st, "delete the folder kp");
+        assert_eq!(r.kind, "confirm");
+        let r2 = handle_text(&mut st, "delete the folder zz");
+        assert_eq!(r2.kind, "confirm");
+        let _ = cancel(&mut st);
+        let r3 = restore_pending_confirm(&mut st);
+        assert!(r3.is_none(), "cancelled replacement leaves nothing to restore");
+    }
+
+    #[test]
+    fn wait_ticks_passes_a_prompt_answer_through() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let _ = tx.send(42);
+        });
+        assert_eq!(wait_ticks(rx, std::time::Duration::from_secs(5), &|| false), Some(42));
+    }
+
+    #[test]
+    fn wait_ticks_times_out_instead_of_hanging() {
+        let (_tx, rx) = std::sync::mpsc::channel::<u8>(); // never sent: the slow-machine case
+        let t = std::time::Instant::now();
+        let r = wait_ticks(rx, std::time::Duration::from_millis(300), &|| false);
+        let e = t.elapsed();
+        assert!(r.is_none(), "timed-out wait must give up, got {r:?}");
+        assert!(e >= std::time::Duration::from_millis(300) && e < std::time::Duration::from_secs(3), "elapsed {e:?}");
+    }
+
+    #[test]
+    fn wait_ticks_cancel_wins_mid_wait() {
+        let (_tx, rx) = std::sync::mpsc::channel::<u8>();
+        let t = std::time::Instant::now();
+        let r = wait_ticks(rx, std::time::Duration::from_secs(60), &|| true);
+        assert!(r.is_none(), "cancelled wait must give up, got {r:?}");
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "cancel must be prompt");
+    }
+
     #[test]
     fn online_chat_is_off_by_default_and_only_shows_a_card() {
         let root = org_root("chat4");
@@ -1559,6 +3003,31 @@ mod memory_tests {
     }
 
     #[test]
+    fn weather_chooser_typed_name_picks_and_ambiguity_keeps_the_list() {
+        let _wp = WEATHER_PICK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let opts = vec![
+            pawline_core::weather::Place { label: "Cairo, Cairo Governorate, Egypt".into(), lat: 30.0, lon: 31.0 },
+            pawline_core::weather::Place { label: "Cairo, Illinois, United States".into(), lat: 37.0, lon: -89.1 },
+            pawline_core::weather::Place { label: "Paris, Ile-de-France, France".into(), lat: 48.8, lon: 2.3 },
+        ];
+        // A typed name matching several listed places asks for the number and keeps the chooser open.
+        *WEATHER_PICK.lock().unwrap() = Some(opts.clone());
+        let r = weather_pick("cairo").expect("ambig answer");
+        assert_eq!(r.kind, "message");
+        assert!(r.text.contains("More than one listed place") && r.text.contains("2. Cairo, Illinois"), "{}", r.text);
+        assert!(weather_pick_open(), "chooser stays open on ambiguity");
+        // A name not in the list cancels the chooser and is treated as a new request (None).
+        let r = weather_pick("london");
+        assert!(r.is_none());
+        assert!(!weather_pick_open(), "chooser is cancelled by an unrelated reply");
+        // Cancel words still cancel.
+        *WEATHER_PICK.lock().unwrap() = Some(opts);
+        let r = weather_pick("cancel").expect("cancel answer");
+        assert!(r.text.contains("Cancelled"));
+        assert!(!weather_pick_open());
+    }
+
+    #[test]
     fn trailing_please_is_not_part_of_a_name() {
         let root = org_root("chat2");
         let mut st = new_state(root.clone());
@@ -1572,6 +3041,7 @@ mod memory_tests {
 
     #[test]
     fn weather_chooser_pick_and_cancel_state() {
+        let _wp = WEATHER_PICK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use pawline_core::weather::Place;
         let mut st = new_state(org_root("wpick"));
         let opts = vec![Place { label: "A, X".into(), lat: 1.0, lon: 2.0 }, Place { label: "A, Y".into(), lat: 3.0, lon: 4.0 }];
@@ -1870,7 +3340,28 @@ mod memory_tests {
         let mut st = new_state(root.clone());
         assert_eq!(handle_text(&mut st, "shrink long.mp4").kind, "confirm");
         let h = std::thread::spawn(move || confirm_exec(&mut st));
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Cancel must land DURING the encode, not during the probe that precedes it: a fixed sleep
+        // races the probe on loaded machines and flaked (2026-11-26). The encode's output is an
+        // unnamed (O_TMPFILE) file by design, so nothing appears in the folder; watch /proc for the
+        // encode's own ffmpeg child (the libx264 one, not mkvideo's mpeg4 one) instead.
+        let our_pid = std::process::id().to_string();
+        let encode_running = || {
+            std::fs::read_dir("/proc").into_iter().flatten().flatten().any(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                if !name.chars().all(|c| c.is_ascii_digit()) {
+                    return false;
+                }
+                let ppid_ok = std::fs::read_to_string(format!("/proc/{name}/stat"))
+                    .map(|st| st.rsplit(") ").next().and_then(|rest| rest.split_whitespace().nth(1).map(|p| p == our_pid)).unwrap_or(false))
+                    .unwrap_or(false);
+                ppid_ok && std::fs::read_to_string(format!("/proc/{name}/cmdline")).map(|c| c.contains("libx264")).unwrap_or(false)
+            })
+        };
+        let started = (0..2000).find(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            encode_running()
+        });
+        assert!(started.is_some(), "the encode never started (no libx264 ffmpeg child seen)");
         request_cancel();
         let r = h.join().unwrap();
         assert!(r.text.contains("Cancelled"), "{}", r.text);
@@ -1920,6 +3411,7 @@ mod memory_tests {
 
     #[test]
     fn presentation_from_outline_previews_publishes_without_overwrite_and_undoes() {
+        let _deck_guard = DECK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = org_root("deck");
         let dl = root.join("Downloads");
         let md = dl.join("talk.md");
@@ -1952,6 +3444,76 @@ mod memory_tests {
         let r = handle_text(&mut st, "make a presentation from bad.txt");
         assert!(r.kind == "failed" && r.text.contains("headings") && st.pending.is_none(), "{}", r.text);
         assert!(handle_text(&mut st, "make a presentation from a.png").kind == "message");
+    }
+
+    #[test]
+    fn presentation_with_a_picture_previews_it_reads_only_inside_home_and_writes_nothing_on_refusal() {
+        let _deck_guard = DECK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = org_root("deckpic");
+        let dl = root.join("Downloads");
+        let png: Vec<u8> = vec![137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 0, 0, 3, 1, 1, 0, 201, 254, 146, 239, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130];
+        std::fs::write(dl.join("dot.png"), &png).unwrap();
+        std::fs::write(dl.join("pic.md"), "# Talk\n## Dot\nimage: dot.png\n- a dot\n").unwrap();
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "make a presentation from pic");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(r.text.contains("[picture from dot.png: PNG 1x1 px") && r.text.contains("original file is untouched"), "{}", r.text);
+        assert!(!dl.join("pic.pptx").exists());
+        // the card's picture bytes belong to this state and this card only (per-state, not global)
+        assert_eq!(st.confirm_preview, vec![png.clone()]);
+        let other_root = org_root("deckpic-other");
+        let other = new_state(other_root);
+        assert!(other.confirm_preview.is_empty(), "another window/state never sees this card's picture");
+        // a new request replaces the card: the old picture is gone, and a cancelled card leaves none
+        let _ = handle_text(&mut st, "help");
+        assert!(st.confirm_preview.is_empty(), "a new request clears the picture slot");
+        let r = handle_text(&mut st, "make a presentation from pic");
+        assert_eq!(r.kind, "confirm");
+        assert_eq!(st.confirm_preview.len(), 1);
+        st.confirm_preview.clear();
+        let r = handle_text(&mut st, "make a presentation from pic");
+        assert_eq!(r.kind, "confirm");
+        let _ = cancel(&mut st);
+        let r = handle_text(&mut st, "make a presentation from pic");
+        assert_eq!(r.kind, "confirm");
+        let d = confirm_exec(&mut st);
+        assert_eq!(d.kind, "executed", "{}", d.text);
+        let b = std::fs::read(dl.join("pic.pptx")).unwrap();
+        assert!(b.windows(png.len()).any(|w| w == &png[..]), "picture bytes are inside the pptx");
+        assert_eq!(std::fs::read(dl.join("dot.png")).unwrap(), png);
+        // outside home, missing, and not-a-picture: refused at preview, nothing planned or written
+        for (name, line) in [("out", "image: /etc/hostname"), ("gone", "image: nothere.png"), ("txt", "image: pic.md")] {
+            std::fs::write(dl.join(format!("{name}.md")), format!("# Talk\n## Dot\n{line}\n")).unwrap();
+            let r = handle_text(&mut st, &format!("make a presentation from {name}.md"));
+            assert!(r.kind == "failed" && r.text.contains("picture"), "{name}: {}", r.text);
+            assert!(!dl.join(format!("{name}.pptx")).exists());
+        }
+    }
+
+    #[test]
+    fn arabic_requests_become_visible_english_commands_and_still_need_the_card() {
+        let root = org_root("arabic11");
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "اعمل مجلد اسمه مشاريع");
+        // creating a plain folder in the home area needs no card in the English path either; the same rule applies here
+        assert_eq!(r.kind, "executed", "{}", r.text);
+        assert!(r.text.contains("Understood from your Arabic request as: make a folder called مشاريع"), "{}", r.text);
+        assert!(r.text.contains("تم."), "{}", r.text);
+        assert!(root.join("مشاريع").is_dir());
+        // a question and a negation run nothing and plan nothing
+        for q in ["كيف احذف مجلد مشاريع؟", "لا تحذف مجلد مشاريع"] {
+            let r = handle_text(&mut st, q);
+            assert!(r.kind == "message" && st.pending.is_none() && root.join("مشاريع").is_dir(), "{q}: {}", r.text);
+        }
+        // a misspelled command word is only suggested; the pick still goes through the card
+        let r = handle_text(&mut st, "احزف المجلد مشاريع");
+        assert!(r.kind == "message" && r.text.contains("Did you mean") && r.text.contains("delete the folder مشاريع") && st.pending.is_none(), "{}", r.text);
+        assert!(root.join("مشاريع").is_dir());
+        let r = handle_text(&mut st, "احذف المجلد مشاريع");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(cancel(&mut st).text.contains("Nothing was done") && root.join("مشاريع").is_dir());
+        // help is static Arabic
+        assert!(handle_text(&mut st, "مساعدة").text.contains("اعمل مجلد"));
     }
 
     #[test]

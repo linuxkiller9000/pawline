@@ -19,8 +19,10 @@ impl Keysym {
     pub const End: Keysym = Keysym(0xff57);
     pub const Insert: Keysym = Keysym(0xff63);
     pub const KP_Enter: Keysym = Keysym(0xff8d);
+    pub const F2: Keysym = Keysym(0xffbf);
     pub const Delete: Keysym = Keysym(0xffff);
     pub const space: Keysym = Keysym(0x20);
+    pub const comma: Keysym = Keysym(0x2c);
     pub const A: Keysym = Keysym(b'A' as u32);
     pub const C: Keysym = Keysym(b'C' as u32);
     pub const R: Keysym = Keysym(b'R' as u32);

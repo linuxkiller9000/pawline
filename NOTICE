@@ -14,7 +14,23 @@ cactus runtime, prebuilt static library (libcactus.a)
 Both are used under the terms of the Apache License, Version 2.0
 (http://www.apache.org/licenses/LICENSE-2.0).
 
-pawline-native (0.2.1-beta) statically links LLVM libc++, libc++abi and libunwind
+pawline-native (0.2.1-beta and later) statically links LLVM libc++, libc++abi and libunwind
 (Apache License 2.0 with LLVM Exceptions, https://llvm.org/LICENSE.txt) and embeds
-the Liberation Sans font (SIL Open Font License 1.1, https://openfontlicense.org/).
+the Liberation Sans font, version 1.07.4 (pawline-native/assets/font.ttf, sha256
+36efda825bcd7d1de846...; identical to LiberationSans-Regular.ttf in Debian/Ubuntu fonts-liberation
+1:1.07.4-11). Correction: earlier text here said this font is under the SIL Open Font License.
+It is not: Liberation 1.07.x is licensed by Red Hat under the GNU General Public License v.2
+with the font exceptions reproduced in licenses/LIBERATION-1.07.4-COPYRIGHT.txt (the same
+text also ships as pawline-native/assets/LICENSE-LiberationFonts.txt). All releases so far,
+and current source, embed this 1.07.4 font; replacing it with Liberation Sans 2.1.5 under the
+SIL Open Font License 1.1 is planned. No compatibility conclusion between these
+font terms and Pawline's GPL-3.0 licence is claimed here.
 Rust dependencies: smithay-client-toolkit (MIT), tiny-skia (BSD-3-Clause), fontdue (MIT/Apache-2.0), png (MIT/Apache-2.0), jpeg-decoder (MIT/Apache-2.0), image-webp (MIT/Apache-2.0).
+
+Design reference (no code or assets copied)
+Pawline's window and orb design was inspired by Nus Companion
+(https://github.com/potlakai/nus-companion, Apache License 2.0). Nus Companion is a
+Windows Electron app (JavaScript, CSS); Pawline is Rust drawn with tiny-skia, uses its own
+palette, and contains no source files, images or fonts from that project (checked by file hash
+and colour values at 3128b19). If code or assets from it are ever adapted, its licence text and
+copyright notices (including those in its THIRD-PARTY.md) must be added here first.

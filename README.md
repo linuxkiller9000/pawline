@@ -56,6 +56,38 @@ Unreleased (in source, not in any beta yet):
   wallpaper) after confirming. Delete no longer destroys data: it moves the
   item into ~/.local/share/pawline/trash. Nothing empties the trash yet.
 
+## Experimental: Laya suggestions (opt-in, off by default)
+
+When the normal parser does not understand a message, Pawline can ask a small
+local model (Laya intent router, 150M, Apache-2.0, by vrajnotviraj) what you
+probably meant and SUGGEST a command. The suggestion never runs by itself: it
+only refills the input, and pressing Enter sends it through the normal parser
+and the usual confirmation cards. The model makes no decisions about your
+files; it runs fully offline after setup, in English only.
+
+Setup is one command inside the app: say "laya on". Pawline first shows a
+consent card with the exact costs; only a click on "Do it" starts anything.
+It then downloads the model (288 MB) and tokenizer (2 MB) from
+huggingface.co (free, no account; huggingface.co sees your IP address),
+converts the model on your machine, and loads it. The downloads are size-
+and checksum-pinned, so a changed or corrupted file is refused, and you can
+cancel while it runs (nothing is installed until everything finishes).
+Offline mode refuses the download instead of showing the card.
+
+Honest costs: about 290 MB to download once; about 950 MB of free disk
+during setup and about 640 MB kept afterwards (the download itself is
+removed); about 700 MB RAM while the model is loaded; a suggestion takes
+about a second on a fast desktop and several seconds on an old CPU. It is a
+fallback for messages the parser misses; normal commands never touch it.
+Linux only for now.
+
+The manual setup still works as a fallback (needs python3 and about 2 GB
+free during conversion):
+
+    sh tools/laya-setup.sh
+
+Then say "laya on" inside Pawline (session only; "laya off" unloads it).
+
 Planned, in stages: named reusable actions through
 the same safety checks, KDE Plasma integration and KDE Connect, theme matching.
 

@@ -135,6 +135,7 @@ fn one_call(v: &Value) -> Result<Directive, PawError> {
             kind: CreateKind::Dir,
             names: vec![arg(&args, "path")?.to_string()],
             parent: LocationRef::CurrentDir,
+            parents: false,
         }),
         "create_file" => Ok(Directive::Create {
             kind: CreateKind::File {
@@ -145,6 +146,7 @@ fn one_call(v: &Value) -> Result<Directive, PawError> {
             },
             names: vec![arg(&args, "path")?.to_string()],
             parent: LocationRef::CurrentDir,
+            parents: false,
         }),
         "delete" => Ok(Directive::Delete {
             target: to_location(arg(&args, "path")?),
@@ -163,6 +165,8 @@ fn one_call(v: &Value) -> Result<Directive, PawError> {
         }),
         "list_items" => Ok(Directive::List {
             target: to_location(arg(&args, "path")?),
+            page: 1,
+            contains: None,
         }),
         "open_app" => Ok(Directive::OpenApp {
             name: arg(&args, "name")?.to_string(),

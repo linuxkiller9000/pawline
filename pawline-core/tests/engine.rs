@@ -189,3 +189,35 @@ fn duplicate_create_is_a_validation_error() {
     assert!(err.to_string().contains("already exists"), "got: {err}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn missing_parent_is_a_friendly_offer_not_an_os_error() {
+    let root = sandbox("parent");
+    let mut engine = Engine::new(root.clone());
+    // "make a folder called pics in old/stuff" where neither exists: the reply names the nearest
+    // missing folder and offers the parents variant; no raw OS error text, nothing created.
+    let text = match engine.handle("make a folder called pics in old/stuff", &DirectFsBackend::new(&root).unwrap(), false) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("expected a validation error"),
+    };
+    assert!(text.contains("does not exist yet"), "{text}");
+    assert!(text.contains("with parent folders"), "{text}");
+    assert!(!text.contains("os error"), "{text}");
+    assert!(!root.join("old").exists());
+
+    // With the parents ask, the missing folders are created as their own confirmed steps.
+    let r = engine
+        .handle("make a folder called pics in old/stuff with parent folders", &DirectFsBackend::new(&root).unwrap(), true)
+        .unwrap();
+    assert!(matches!(r, Response::Executed(_)));
+    assert!(root.join("old/stuff/pics").is_dir());
+
+    // Undo reverses one journaled step at a time, newest first; three undos remove all three.
+    let be = DirectFsBackend::new(&root).unwrap();
+    for expect_gone in ["old/stuff/pics", "old/stuff", "old"] {
+        let r = engine.handle("undo", &be, true).unwrap();
+        assert!(matches!(r, Response::Executed(_)), "undo of {expect_gone}");
+        assert!(!root.join(expect_gone).exists(), "{expect_gone} still there after undo");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

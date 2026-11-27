@@ -6,3 +6,18 @@ resolver = "2"
 opt-level = 2
 lto = "thin"
 strip = true
+
+# Single-codegen-unit optimization for Pawline's own crates only: dependencies
+# stay at the default 16 because tract-core at 1 needs more RAM than a 2 GB
+# build box has (SIGKILL during codegen, observed 2026-11-27).
+[profile.release.package.pawline-native]
+codegen-units = 1
+
+[profile.release.package.pawline-core]
+codegen-units = 1
+
+[profile.release.package.pawline-needle]
+codegen-units = 1
+
+[profile.release.package.pawline-needle-native]
+codegen-units = 1

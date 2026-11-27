@@ -1,0 +1,40 @@
+# Source fetch only. No build, no release, no secrets, no publish. Manual only.
+# Resolves the upstream onnxruntime tag to a commit and uploads the source (with submodules)
+# as a short-lived workflow artifact, plus the pin list. Free GitHub-hosted runner, read-only token.
+name: fetch-ort-source
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "onnxruntime tag"
+        required: false
+        default: "v1.23.2"
+permissions:
+  contents: read
+jobs:
+  fetch:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Resolve tag
+        run: |
+          git ls-remote --tags https://github.com/microsoft/onnxruntime "refs/tags/${{ inputs.tag }}" "refs/tags/${{ inputs.tag }}^{}" | tee "$RUNNER_TEMP/tagrefs.txt"
+      - name: Clone with submodules
+        run: |
+          git clone --depth 1 --branch "${{ inputs.tag }}" --recurse-submodules --shallow-submodules https://github.com/microsoft/onnxruntime "$RUNNER_TEMP/ort"
+          cd "$RUNNER_TEMP/ort"
+          echo "COMMIT $(git rev-parse HEAD)"
+          git submodule status --recursive | tee "$RUNNER_TEMP/submodules.txt"
+          cp cmake/deps.txt "$RUNNER_TEMP/deps.txt"
+      - name: Package
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          cp "$RUNNER_TEMP/tagrefs.txt" "$RUNNER_TEMP/submodules.txt" "$RUNNER_TEMP/deps.txt" "$RUNNER_TEMP/out/"
+          (cd "$RUNNER_TEMP/ort" && echo "$(git rev-parse HEAD)" > "$RUNNER_TEMP/out/COMMIT.txt")
+          tar --exclude-vcs -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/out/onnxruntime-src.tar.gz" ort
+          ls -l "$RUNNER_TEMP/out"; sha256sum "$RUNNER_TEMP/out/"* | tee "$RUNNER_TEMP/out/SHA256SUMS" || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ort-source-${{ inputs.tag }}
+          path: ${{ runner.temp }}/out
+          retention-days: 7

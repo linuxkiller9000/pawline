@@ -49,9 +49,25 @@ pub fn try_answer(input: &str) -> Option<String> {
     if expr.is_empty() || !expr.chars().any(|c| c.is_ascii_digit()) {
         return None;
     }
+    // An equation in x after any trigger ("what is 88+50-90 = x * (8)^2", "calculate 2x = 8"):
+    // it IS math - solve it offline or refuse plainly; it never reaches the online model.
+    if expr.contains('=') && expr.contains('x') {
+        return Some(match solve_linear(&format!("solve {expr}")) {
+            Some(ans) => ans,
+            None => "I can only solve linear equations in x so far (like \"solve 2x + 4 = 10\")."
+                .into(),
+        });
+    }
+    // An expression in x with no equals sign is algebra, not arithmetic: say so, never guess.
+    if expr.contains('x') {
+        return Some(
+            "That has an x but no equals sign, so there is nothing to solve. Give me an equation, like \"2x + 4 = 10\"."
+                .into(),
+        );
+    }
     if !expr
         .chars()
-        .all(|c| c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | '*' | '/' | '^' | '%' | '(' | ')' | ' ' | 'x'))
+        .all(|c| c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | '*' | '/' | '^' | '%' | '(' | ')' | ' '))
     {
         return None;
     }
@@ -145,59 +161,160 @@ fn solve_linear(lower: &str) -> Option<String> {
     Some(format!("{eq}  =>  x = {}", fmt_num(b / a)))
 }
 
-/// Parse one side of a linear equation into (x_coefficient, constant).
-/// Terms: numbers, kx, k*x, x, -x; joined by + or -. Anything else is not
-/// linear-for-us and is refused.
+/// Parse one side of a linear equation into (x_coefficient, constant) with the full expression
+/// grammar: parentheses, *, /, ^ and % all work as long as the side stays linear in x after
+/// simplification ("x * (8)^2" -> 64x; "(x + 2) * 3 - 4" -> 3x + 2). x^2 and x*x are refused.
 fn linear_side(s: &str) -> Option<(f64, f64)> {
     let s = s.replace(' ', "");
-    // a side with no x is a plain constant expression: evaluate it fully
-    // (parentheses, *, /, ^), e.g. "19 - 8 * (4)"
-    if !s.is_empty() && !s.contains('x') && s.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | '*' | '/' | '^' | '%' | '(' | ')')) {
-        let mut p = Parser { chars: s.as_bytes(), pos: 0, div_zero: false };
-        let v = p.expr().ok()?;
-        p.skip_ws();
-        return if p.pos == p.chars.len() { Some((0.0, v)) } else { None };
-    }
     if s.is_empty()
         || !s
             .chars()
-            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | '*' | 'x'))
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | '*' | '/' | '^' | '%' | '(' | ')' | 'x'))
     {
         return None;
     }
-    // split into signed terms without regex
-    let mut terms: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if (c == '+' || c == '-') && i > 0 {
-            terms.push(std::mem::take(&mut cur));
-        }
-        cur.push(c);
+    let mut p = AParser { chars: s.as_bytes(), pos: 0, bad: false };
+    let v = p.expr().ok()?;
+    if p.pos == p.chars.len() && !p.bad { Some(v) } else { None }
+}
+
+/// Affine value: a*x + b.
+struct AParser<'a> {
+    chars: &'a [u8],
+    pos: usize,
+    bad: bool,
+}
+
+impl AParser<'_> {
+    fn peek(&mut self) -> Option<u8> {
+        self.chars.get(self.pos).copied()
     }
-    terms.push(cur);
-    let (mut a, mut b) = (0.0, 0.0);
-    for term in terms {
-        if term.is_empty() || term == "+" || term == "-" {
-            return None;
-        }
-        let (sign, t) = match term.strip_prefix('-') {
-            Some(r) => (-1.0, r),
-            None => (1.0, term.strip_prefix('+').unwrap_or(&term)),
-        };
-        if let Some(coeff) = t.strip_suffix('x') {
-            let k = if coeff.is_empty() {
-                1.0
-            } else if let Some(c) = coeff.strip_suffix('*') {
-                c.parse().ok()?
-            } else {
-                coeff.parse().ok()?
-            };
-            a += sign * k;
+    fn eat(&mut self, b: u8) -> bool {
+        if self.peek() == Some(b) {
+            self.pos += 1;
+            true
         } else {
-            b += sign * t.parse::<f64>().ok()?;
+            false
         }
     }
-    Some((a, b))
+    fn mul((a1, b1): (f64, f64), (a2, b2): (f64, f64), bad: &mut bool) -> (f64, f64) {
+        if a1 == 0.0 {
+            (b1 * a2, b1 * b2)
+        } else if a2 == 0.0 {
+            (a1 * b2, b1 * b2)
+        } else {
+            *bad = true; // x * x is not linear
+            (0.0, 0.0)
+        }
+    }
+    fn expr(&mut self) -> Result<(f64, f64), ()> {
+        let mut v = self.term()?;
+        loop {
+            if self.eat(b'+') {
+                let (a, b) = self.term()?;
+                v = (v.0 + a, v.1 + b);
+            } else if self.eat(b'-') {
+                let (a, b) = self.term()?;
+                v = (v.0 - a, v.1 - b);
+            } else {
+                return Ok(v);
+            }
+        }
+    }
+    fn term(&mut self) -> Result<(f64, f64), ()> {
+        let mut v = self.unary()?;
+        loop {
+            if self.eat(b'*') {
+                let u = self.unary()?;
+                v = Self::mul(v, u, &mut self.bad);
+            } else if self.eat(b'/') {
+                let (a, b) = self.unary()?;
+                if a != 0.0 {
+                    self.bad = true; // dividing by an x-term is not linear
+                    return Err(());
+                }
+                if b == 0.0 {
+                    return Err(());
+                }
+                v = (v.0 / b, v.1 / b);
+            } else if matches!(self.peek(), Some(b'x') | Some(b'(')) {
+                // implicit multiplication: "2x", "2(x+1)", "(x+1)(x-1)"
+                let u = self.unary()?;
+                v = Self::mul(v, u, &mut self.bad);
+            } else {
+                return Ok(v);
+            }
+        }
+    }
+    fn unary(&mut self) -> Result<(f64, f64), ()> {
+        if self.eat(b'-') {
+            let (a, b) = self.unary()?;
+            Ok((-a, -b))
+        } else {
+            self.pow()
+        }
+    }
+    fn pow(&mut self) -> Result<(f64, f64), ()> {
+        let base = self.primary()?;
+        if self.eat(b'^') {
+            let (ea, eb) = self.unary()?; // right-associative
+            if ea != 0.0 || eb.abs() > 10_000.0 {
+                self.bad = true; // x in the exponent, or absurd
+                return Err(());
+            }
+            if eb == 0.0 {
+                return Ok((0.0, 1.0));
+            }
+            if eb == 1.0 {
+                return Ok(base);
+            }
+            if base.0 != 0.0 {
+                self.bad = true; // x^2, x^0.5, ... not linear
+                return Err(());
+            }
+            Ok((0.0, base.1.powf(eb)))
+        } else {
+            Ok(base)
+        }
+    }
+    fn primary(&mut self) -> Result<(f64, f64), ()> {
+        if self.eat(b'(') {
+            let v = self.expr()?;
+            if !self.eat(b')') {
+                return Err(());
+            }
+            return self.postfix_pct(v);
+        }
+        if self.eat(b'x') {
+            return Ok((1.0, 0.0));
+        }
+        let start = self.pos;
+        let mut seen_dot = false;
+        while self.pos < self.chars.len() {
+            let c = self.chars[self.pos];
+            if c.is_ascii_digit() {
+                self.pos += 1;
+            } else if c == b'.' && !seen_dot {
+                seen_dot = true;
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        if start == self.pos {
+            return Err(());
+        }
+        let text = std::str::from_utf8(&self.chars[start..self.pos]).map_err(|_| ())?;
+        let v: f64 = text.parse().map_err(|_| ())?;
+        self.postfix_pct((0.0, v))
+    }
+    fn postfix_pct(&mut self, (a, b): (f64, f64)) -> Result<(f64, f64), ()> {
+        if self.eat(b'%') {
+            Ok((a / 100.0, b / 100.0))
+        } else {
+            Ok((a, b))
+        }
+    }
 }
 
 fn fmt_num(v: f64) -> String {
@@ -355,6 +472,36 @@ mod tests {
     fn negatives_and_decimals() {
         assert_eq!(a("-5 + 3").as_deref(), Some("-5 + 3 = -2"));
         assert_eq!(a("0.1 + 0.2").as_deref(), Some("0.1 + 0.2 = 0.3"));
+    }
+
+    #[test]
+    fn equations_linear_after_simplification() {
+        // his case: 88+50-90 = 48 and x*(8)^2 = 64x, so x = 0.75
+        assert_eq!(
+            a("what is 88+50 - 90 = x * (8)^2").as_deref(),
+            Some("88+50 - 90 = x * (8)^2  =>  x = 0.75")
+        );
+        assert_eq!(
+            a("solve 88+50 - 90 = x * (8)^2").as_deref(),
+            Some("88+50 - 90 = x * (8)^2  =>  x = 0.75")
+        );
+        assert_eq!(a("solve 2x + 4 = 10").as_deref(), Some("2x + 4 = 10  =>  x = 3"));
+        assert_eq!(a("solve (x + 2) * 3 - 4 = 10").as_deref(), Some("(x + 2) * 3 - 4 = 10  =>  x = 2.666667"));
+        assert_eq!(a("solve x / 4 + 1 = 3").as_deref(), Some("x / 4 + 1 = 3  =>  x = 8"));
+        assert_eq!(a("solve 2(x + 1) = x + 5").as_deref(), Some("2(x + 1) = x + 5  =>  x = 3"));
+        assert_eq!(a("solve 3x = x * 2 ^ 2").as_deref(), Some("3x = x * 2 ^ 2  =>  x = 0"));
+    }
+
+    #[test]
+    fn equations_we_cannot_solve_are_plain_refusals_never_online() {
+        // quadratic or x in the denominator: a clear offline answer, never None (no model fallback)
+        for q in ["solve x^2 = 4", "solve x * x = 9", "solve 1 / x = 2", "what is x ^ 2 + 1 = 10"] {
+            let r = a(q).expect(q);
+            assert!(r.contains("linear"), "{q}: {r}");
+        }
+        // an expression in x with no equals sign: explained, not sent to the model
+        let r = a("what is 2x + 3").expect("x expression");
+        assert!(r.contains("no equals sign"), "{r}");
     }
 
     #[test]

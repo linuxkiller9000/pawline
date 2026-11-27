@@ -147,3 +147,104 @@ fn first_wallpaper_change_captures_baseline_so_undo_restores_it() {
     // user's original file untouched
     assert_eq!(std::fs::read(outside.join("old.png")).unwrap(), b"OLD");
 }
+
+/// Restart: a brand-new Engine and backend over the same home (the app was closed and reopened).
+#[test]
+fn undo_survives_an_application_restart_for_delete_and_create_dir() {
+    let (root, mut e) = setup("restart");
+    let be = DirectFsBackend::new(&root).unwrap();
+    std::fs::write(root.join("a.txt"), b"alpha").unwrap();
+    std::fs::write(root.join("b.txt"), b"beta").unwrap();
+    assert!(matches!(go(&mut e, &be, "delete a.txt"), Response::Executed(_)), "delete");
+    assert!(!root.join("a.txt").exists());
+    drop(e);
+    drop(be);
+
+    let mut e2 = Engine::new(root.clone());
+    let be2 = DirectFsBackend::new(&root).unwrap();
+    assert!(be2.recovery_notes().is_empty(), "a clean exit leaves nothing to recover");
+    assert!(matches!(go(&mut e2, &be2, "undo"), Response::Executed(_)), "undo after restart");
+    assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"alpha");
+
+    assert!(matches!(go(&mut e2, &be2, "make a folder called pics"), Response::Executed(_)));
+    drop(e2);
+    drop(be2);
+    let mut e3 = Engine::new(root.clone());
+    let be3 = DirectFsBackend::new(&root).unwrap();
+    assert!(matches!(go(&mut e3, &be3, "undo"), Response::Executed(_)));
+    assert!(!root.join("pics").exists(), "empty folder created before the restart is removed by undo");
+    assert_eq!(std::fs::read(root.join("b.txt")).unwrap(), b"beta", "unrelated file untouched");
+}
+
+/// Restart: rename, move and copy undone from the journal by a brand-new Engine (15a).
+#[test]
+fn undo_survives_an_application_restart_for_rename_move_and_copy() {
+    let (root, mut e) = setup("restart-rmc");
+    let be = DirectFsBackend::new(&root).unwrap();
+    std::fs::write(root.join("old.txt"), b"rename-me").unwrap();
+    std::fs::create_dir(root.join("inbox")).unwrap();
+    std::fs::create_dir(root.join("dest")).unwrap();
+    std::fs::write(root.join("inbox/m.txt"), b"move-me").unwrap();
+    std::fs::write(root.join("c.txt"), b"copy-me").unwrap();
+    assert!(matches!(go(&mut e, &be, "rename old.txt to new.txt"), Response::Executed(_)), "rename");
+    assert!(matches!(go(&mut e, &be, "move inbox/m.txt to dest"), Response::Executed(_)), "move");
+    assert!(matches!(go(&mut e, &be, "copy c.txt to dest"), Response::Executed(_)), "copy");
+    assert!(root.join("new.txt").exists() && root.join("dest/m.txt").exists() && root.join("dest/c.txt").exists());
+    drop(e);
+    drop(be);
+
+    // New app instance over the same home: undo walks the journal newest-first.
+    let mut e2 = Engine::new(root.clone());
+    let be2 = DirectFsBackend::new(&root).unwrap();
+    assert!(be2.recovery_notes().is_empty(), "a clean exit leaves nothing to recover");
+    assert!(matches!(go(&mut e2, &be2, "undo"), Response::Executed(_)), "undo copy after restart");
+    assert!(!root.join("dest/c.txt").exists(), "copy removed");
+    assert_eq!(std::fs::read(root.join("c.txt")).unwrap(), b"copy-me", "copy source untouched");
+    assert!(matches!(go(&mut e2, &be2, "undo"), Response::Executed(_)), "undo move after restart");
+    assert_eq!(std::fs::read(root.join("inbox/m.txt")).unwrap(), b"move-me", "moved file put back");
+    assert!(!root.join("dest/m.txt").exists());
+    assert!(matches!(go(&mut e2, &be2, "undo"), Response::Executed(_)), "undo rename after restart");
+    assert_eq!(std::fs::read(root.join("old.txt")).unwrap(), b"rename-me", "renamed file put back");
+    assert!(!root.join("new.txt").exists());
+    let spent = e2.handle("undo", &be2, false);
+    assert!(matches!(&spent, Err(PawError::Validation(m)) if m.contains("nothing to undo")), "nothing left to undo says so");
+}
+
+/// A crash after the intent line but before the change: the next start settles it and says so.
+#[test]
+fn crash_after_intent_before_change_is_reported_at_next_start_and_leaves_no_partial_state() {
+    let (root, _e) = setup("crashintent");
+    let store = root.join(".local/share/pawline");
+    std::fs::create_dir_all(&store).unwrap();
+    let be0 = DirectFsBackend::new(&root).unwrap();
+    drop(be0);
+    let line = pawline_core::journal::Entry { id: 1, kind: "create_dir".into(), a: "half".into(), b: None, meta: None }.intent_line();
+    std::fs::write(store.join("journal.jsonl"), format!("{line}\n")).unwrap();
+    let be = DirectFsBackend::new(&root).unwrap();
+    assert_eq!(be.recovery_notes().len(), 1, "{:?}", be.recovery_notes());
+    assert!(be.recovery_notes()[0].contains("had not completed"));
+    assert!(!root.join("half").exists());
+    // settled once: a second start has nothing left to report
+    assert!(DirectFsBackend::new(&root).unwrap().recovery_notes().is_empty());
+}
+
+/// A move into a folder that cannot be written fails: the source stays, nothing half-made is left, and the journal shows the attempt as not done.
+#[test]
+fn failed_move_leaves_source_in_place_no_stray_files_and_nothing_to_undo() {
+    let (root, mut e) = setup("midfail");
+    let be = DirectFsBackend::new(&root).unwrap();
+    std::fs::write(root.join("a.txt"), b"alpha").unwrap();
+    std::fs::create_dir(root.join("locked")).unwrap();
+    std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let r = go(&mut e, &be, "move a.txt to locked");
+    std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    match r {
+        Response::Failed { error, .. } => assert!(!error.is_empty()),
+        Response::Executed(_) => panic!("must not report success into a read-only folder (running as root?)"),
+        _ => panic!("unexpected response variant"),
+    }
+    assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"alpha");
+    assert_eq!(std::fs::read_dir(root.join("locked")).unwrap().count(), 0, "nothing half-made in the target");
+    let j = std::fs::read_to_string(root.join(".local/share/pawline/journal.jsonl")).unwrap_or_default();
+    assert!(pawline_core::journal::pending(&j).is_empty(), "no intent left dangling: {j}");
+}

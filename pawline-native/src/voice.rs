@@ -122,7 +122,16 @@ pub fn stt(env_override: Option<&str>, has: &dyn Fn(&str) -> bool, setup: &SttSe
     match (bin, &setup.whisper_model) {
         (Some(b), Some(m)) => Ok(Cmd { program: b.into(), args: vec!["-m".into(), m.to_string_lossy().to_string(), "-f".into(), w, "-nt".into(), "-np".into()], env: vec![] }),
         _ => Err(format!(
-            "No speech-to-text set up. Pawline's default is Moonshine through sherpa-onnx: install sherpa-onnx-offline (on PATH, or in ~/.local/share/pawline/sherpa/) and put a Moonshine model folder named moonshine-* in ~/.local/share/pawline/models/. Alternatives: whisper.cpp (whisper-cli plus a ggml .bin model in that models folder), or PAWLINE_STT_CMD. Pawline downloads nothing and never uses an online service for this. Found: sherpa-onnx {}, Moonshine model {}, whisper {}.",
+            "No speech-to-text is set up yet, so nothing was recorded.\n\
+            On Arch Linux:\n\
+            1. Install sherpa-onnx from the AUR (it provides the sherpa-onnx-offline command): yay -S sherpa-onnx\n\
+            2. Get the free MIT Moonshine model (runs on your CPU, about 240 MB unpacked):\n\
+            mkdir -p ~/.local/share/pawline/models && cd ~/.local/share/pawline/models\n\
+            wget https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-moonshine-tiny-en-int8.tar.bz2\n\
+            tar xf sherpa-onnx-moonshine-tiny-en-int8.tar.bz2\n\
+            mv sherpa-onnx-moonshine-tiny-en-int8 moonshine-tiny-en-int8\n\
+            Then press the mic again. Pawline downloads nothing itself and never uses an online service for this.\n\
+            (Found: sherpa-onnx {}, Moonshine model {}, whisper {}. Not on Arch? The same two pieces work: sherpa-onnx-offline on PATH, and the model folder in ~/.local/share/pawline/models/. Whisper.cpp with a ggml .bin model there, or PAWLINE_STT_CMD, also work.)",
             if setup.sherpa.is_some() { "yes" } else { "no" },
             if setup.moonshine.is_some() { "yes" } else { "no" },
             if bin.is_some() { "yes" } else { "no" }
@@ -143,18 +152,32 @@ pub fn find_model(env: Option<&str>, home: &Path) -> Option<PathBuf> {
 }
 
 /// The text-to-speech command; the text is written to its stdin. `PAWLINE_TTS_CMD` overrides detection.
-pub fn tts(env_override: Option<&str>, has: &dyn Fn(&str) -> bool) -> Result<Cmd, String> {
+/// `rate_wpm` is the words-per-minute the settings row chose (item 20); a custom PAWLINE_TTS_CMD
+/// is passed through unchanged, because its own flags are the user's to set. flite has no wpm
+/// flag, so it gets duration_stretch relative to espeak's 175 default.
+/// `voice` is the espeak voice name from the settings row ("" = engine default, no -v flag; item 20).
+/// It applies to espeak/espeak-ng only: flite keeps its own default voice and a custom
+/// PAWLINE_TTS_CMD is passed through unchanged, because its own flags are the user's to set.
+pub fn tts(env_override: Option<&str>, has: &dyn Fn(&str) -> bool, rate_wpm: u32, voice: &str) -> Result<Cmd, String> {
     if let Some(c) = env_override.and_then(split_env) {
         return Ok(c);
     }
+    let wpm = rate_wpm.max(1);
+    let mut vargs: Vec<String> = Vec::new();
+    if !voice.is_empty() {
+        vargs.push("-v".into());
+        vargs.push(voice.into());
+    }
     if has("espeak-ng") {
-        return Ok(Cmd { program: "espeak-ng".into(), args: vec!["--stdin".into()], env: vec![] });
+        vargs.extend(["-s".into(), wpm.to_string(), "--stdin".into()]);
+        return Ok(Cmd { program: "espeak-ng".into(), args: vargs, env: vec![] });
     }
     if has("espeak") {
-        return Ok(Cmd { program: "espeak".into(), args: vec!["--stdin".into()], env: vec![] });
+        vargs.extend(["-s".into(), wpm.to_string(), "--stdin".into()]);
+        return Ok(Cmd { program: "espeak".into(), args: vargs, env: vec![] });
     }
     if has("flite") {
-        return Ok(Cmd { program: "flite".into(), args: vec!["-f".into(), "/dev/stdin".into()], env: vec![] });
+        return Ok(Cmd { program: "flite".into(), args: vec!["-f".into(), "/dev/stdin".into(), "-setf".into(), format!("duration_stretch={:.2}", 175.0 / wpm as f64)], env: vec![] });
     }
     Err("No local text-to-speech engine found. Install espeak-ng (or flite), or set PAWLINE_TTS_CMD to a local command that reads text on stdin and speaks it.".into())
 }
@@ -202,6 +225,45 @@ pub fn clean_for_speech(text: &str) -> String {
 
 pub fn has_in_path(bin: &str) -> bool {
     std::env::var_os("PATH").map_or(false, |p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
+}
+
+/// Shown once per session before the first recording. Local/deleted claims are made only for the built-in route.
+pub fn mic_notice(custom_rec: bool, custom_stt: bool) -> String {
+    if !custom_rec && !custom_stt {
+        return "Microphone on while the bar shows listening. The built-in route writes the audio to a private temporary file on this computer, turns it into text here, and deletes the file afterwards. The text only goes into the box: Pawline sends nothing to its chat until you press Enter. You can block the microphone in Settings.".to_string();
+    }
+    let tail = " The text goes into the box, and Pawline submits nothing to its chat until you press Enter. Your command may already have sent audio or text elsewhere. You can block the microphone in Settings.";
+    let which = match (custom_rec, custom_stt) {
+        (true, true) => "your own recorder and speech commands (PAWLINE_REC_CMD, PAWLINE_STT_CMD)",
+        (true, false) => "your own recorder command (PAWLINE_REC_CMD)",
+        _ => "your own speech command (PAWLINE_STT_CMD)",
+    };
+    format!("Microphone on while the bar shows listening. You set {which}. Pawline cannot check where that command sends or keeps audio or text, so no local-only promise is made for it. Pawline tries to delete its temporary audio file afterwards.{tail}")
+}
+
+/// The Settings block switch for the microphone. Err carries the message to show; nothing records.
+pub fn mic_gate(blocked: bool) -> Result<(), String> {
+    if blocked {
+        Err("Microphone is blocked in Settings, so nothing was recorded. Turn it back on there to use voice input.".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// Whether a finished transcript may reach the input box: it must belong to the current job, the
+/// app must still be waiting for it, and the microphone must not have been blocked meanwhile.
+pub fn accept_transcript(job: u64, current_job: u64, waiting: bool, mic_blocked: bool) -> bool {
+    job == current_job && waiting && !mic_blocked
+}
+
+/// Status-bar wording. Only the built-in route may claim local handling; a custom command may do anything.
+pub fn listening_label(secs: u64, custom_rec: bool) -> String {
+    let t = format!("Listening {}:{:02}", secs / 60, secs % 60);
+    if custom_rec { format!("{t}  (custom recorder, unchecked)") } else { format!("{t}  (on this computer, not uploaded)") }
+}
+
+pub fn working_label(custom_stt: bool) -> &'static str {
+    if custom_stt { "Speech to text: custom command, unchecked..." } else { "Turning speech into text on this computer..." }
 }
 
 /// A private temp WAV path (not created yet): runtime dir if present, else temp dir.
@@ -415,9 +477,51 @@ pub fn speak(cmd: &Cmd, text: &str) -> Result<Child, String> {
     Ok(child)
 }
 
+#[test]
+fn stt_setup_message_names_the_exact_arch_steps_and_model() {
+    let setup = SttSetup { sherpa: None, moonshine: None, whisper_model: None };
+    let e = stt(None, &|_| false, &setup, Path::new("/tmp/x.wav")).unwrap_err();
+    assert!(e.contains("yay -S sherpa-onnx"), "{e}");
+    assert!(e.contains("sherpa-onnx-moonshine-tiny-en-int8.tar.bz2"), "{e}");
+    assert!(e.contains("~/.local/share/pawline/models"), "{e}");
+    assert!(e.contains("nothing was recorded"), "{e}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_cancelled_or_revoked_transcripts_never_reach_the_input() {
+        assert!(accept_transcript(3, 3, true, false));
+        assert!(!accept_transcript(2, 3, true, false), "older job");
+        assert!(!accept_transcript(3, 3, false, false), "cancelled (no longer waiting)");
+        assert!(!accept_transcript(3, 3, true, true), "mic blocked while transcribing");
+    }
+
+    #[test]
+    fn status_labels_claim_local_only_for_the_built_in_route() {
+        assert!(listening_label(61, false).contains("1:01") && listening_label(61, false).contains("not uploaded"));
+        assert!(!listening_label(5, true).contains("not uploaded") && listening_label(5, true).contains("unchecked"));
+        assert!(working_label(false).contains("on this computer"));
+        assert!(!working_label(true).contains("on this computer") && working_label(true).contains("unchecked"));
+    }
+
+    #[test]
+    fn microphone_block_refuses_before_any_recorder_starts() {
+        assert!(mic_gate(false).is_ok());
+        let e = mic_gate(true).unwrap_err();
+        assert!(e.contains("blocked") && e.contains("nothing was recorded"));
+        let b = mic_notice(false, false);
+        assert!(b.contains("on this computer") && b.contains("deletes the file") && b.contains("sends nothing to its chat until you press Enter") && !b.contains("cannot check"));
+        for (r, t) in [(true, false), (false, true), (true, true)] {
+            let c = mic_notice(r, t);
+            assert!(!c.contains("on this computer") && !c.contains("deletes the file"), "no local claim on a custom route");
+            assert!(c.contains("cannot check where") && c.contains("submits nothing to its chat until you press Enter") && c.contains("may already have sent audio or text elsewhere"));
+            assert!(!c.contains("nothing is sent until"), "no absolute claim on a custom route");
+        }
+        assert!(mic_notice(true, false).contains("PAWLINE_REC_CMD") && !mic_notice(true, false).contains("PAWLINE_STT_CMD"));
+    }
 
     #[test]
     fn recorder_detection_order_and_missing_message() {
@@ -537,10 +641,46 @@ mod tests {
 
     #[test]
     fn tts_detection_and_missing_message() {
-        assert_eq!(tts(None, &|b| b == "espeak-ng").unwrap().program, "espeak-ng");
-        assert_eq!(tts(None, &|b| b == "flite").unwrap().program, "flite");
-        assert!(tts(None, &|_| false).unwrap_err().contains("espeak-ng"));
-        assert_eq!(tts(Some("say-it"), &|_| false).unwrap().program, "say-it");
+        assert_eq!(tts(None, &|b| b == "espeak-ng", 175, "").unwrap().program, "espeak-ng");
+        assert_eq!(tts(None, &|b| b == "flite", 175, "").unwrap().program, "flite");
+        assert!(tts(None, &|_| false, 175, "").unwrap_err().contains("espeak-ng"));
+        assert_eq!(tts(Some("say-it"), &|_| false, 175, "").unwrap().program, "say-it");
+    }
+
+    #[test]
+    #[test]
+    fn tts_voice_flag_only_for_espeak_and_never_for_custom_or_default() {
+        // espeak-ng gets -v before -s
+        let c = tts(None, &|b| b == "espeak-ng", 175, "en-us").unwrap();
+        assert_eq!(c.args, vec!["-v", "en-us", "-s", "175", "--stdin"]);
+        let c = tts(None, &|b| b == "espeak", 120, "en+f3").unwrap();
+        assert_eq!(c.args, vec!["-v", "en+f3", "-s", "120", "--stdin"]);
+        // the default voice passes no -v flag at all
+        let c = tts(None, &|b| b == "espeak", 175, "").unwrap();
+        assert_eq!(c.args, vec!["-s", "175", "--stdin"]);
+        // flite keeps its own default voice (its voices are a different set)
+        let c = tts(None, &|b| b == "flite", 175, "en-us").unwrap();
+        assert!(!c.args.iter().any(|a| a == "-v"), "flite args: {:?}", c.args);
+        // a custom command is passed through unchanged
+        let c = tts(Some("say-it --flag"), &|_| false, 175, "en-us").unwrap();
+        assert_eq!(c.program, "say-it");
+        assert_eq!(c.args, vec!["--flag"]);
+    }
+
+    #[test]
+    fn tts_rate_flags_per_engine_and_custom_untouched() {
+        let c = tts(None, &|b| b == "espeak-ng", 120, "").unwrap();
+        assert_eq!(c.args, vec!["-s", "120", "--stdin"], "espeak-ng takes -s wpm");
+        let c = tts(None, &|b| b == "espeak", 260, "").unwrap();
+        assert_eq!(c.args, vec!["-s", "260", "--stdin"]);
+        let c = tts(None, &|b| b == "flite", 120, "").unwrap();
+        assert_eq!(c.args, vec!["-f", "/dev/stdin", "-setf", "duration_stretch=1.46"], "flite slows by stretch");
+        let c = tts(None, &|b| b == "flite", 260, "").unwrap();
+        assert_eq!(c.args, vec!["-f", "/dev/stdin", "-setf", "duration_stretch=0.67"]);
+        let c = tts(Some("say-it --flag"), &|_| false, 120, "").unwrap();
+        assert_eq!(c.args, vec!["--flag"], "a custom command keeps exactly its own flags");
+        let c = tts(None, &|b| b == "espeak-ng", 0, "").unwrap();
+        assert_eq!(c.args[1], "1", "a zero rate can never reach the engine");
     }
 
     #[test]
@@ -581,7 +721,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         let t = Instant::now();
         stop_recording(child);
-        assert!(t.elapsed() < Duration::from_secs(2), "stopped promptly");
+        // stop_recording escalates to a group kill after 3s by design, so it always
+        // returns in ~3s; the assertion only proves the stop did not hang. On a
+        // loaded 1-CPU CI sandbox the graceful SIGINT path alone can exceed 2s.
+        assert!(t.elapsed() < Duration::from_secs(5), "stopped without hanging");
         let sc = stt(Some(&stt_s.to_string_lossy()), &|_| false, &SttSetup { sherpa: None, moonshine: None, whisper_model: None }, &wav).unwrap();
         let text = transcribe(&sc, &wav, Duration::from_secs(5), &std::sync::atomic::AtomicBool::new(false)).unwrap();
         assert_eq!(text, "make a folder called kitten");
@@ -625,7 +768,7 @@ mod tests {
         let out = std::env::temp_dir().join(format!("pawline-spoken-{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&out);
         let s = script("spk", &format!("cat > {}", out.display()));
-        let c = tts(Some(&s.to_string_lossy()), &|_| false).unwrap();
+        let c = tts(Some(&s.to_string_lossy()), &|_| false, 175, "").unwrap();
         let mut ch = speak(&c, "hello there").unwrap();
         ch.wait().unwrap();
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "hello there");

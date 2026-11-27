@@ -59,6 +59,9 @@ impl UreqHttp {
     pub fn new(timeout: Duration) -> Self {
         let cfg = ureq::Agent::config_builder()
             .http_status_as_error(false)
+            // A redirect chain can bounce the request to a host Pawline did not choose;
+            // cap it short so a compromised or confused API cannot relay far (audit item 21).
+            .max_redirects(3)
             .timeout_global(Some(timeout))
             .build();
         UreqHttp { agent: ureq::Agent::new_with_config(cfg) }
@@ -79,6 +82,7 @@ impl UreqHttp {
 
 impl Http for UreqHttp {
     fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpReply, PawError> {
+        crate::netgate::check()?;
         let mut r = self.agent.get(url).header("User-Agent", UA);
         for (k, v) in headers {
             r = r.header(*k, *v);
@@ -86,6 +90,7 @@ impl Http for UreqHttp {
         Self::finish(r.call().map_err(|e| PawError::Exec(format!("network problem: {e}")))?)
     }
     fn post(&self, url: &str, headers: &[(&str, &str)], body: &str) -> Result<HttpReply, PawError> {
+        crate::netgate::check()?;
         let mut r = self.agent.post(url).header("User-Agent", UA).header("Content-Type", "application/json");
         for (k, v) in headers {
             r = r.header(*k, *v);

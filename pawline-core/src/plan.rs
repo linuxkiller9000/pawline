@@ -21,12 +21,12 @@ pub enum SearchEngine {
 /// One parsed directive before paths are resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Directive {
-    Create { kind: CreateKind, names: Vec<String>, parent: LocationRef },
+    Create { kind: CreateKind, names: Vec<String>, parent: LocationRef, parents: bool },
     Delete { target: LocationRef },
     Rename { target: LocationRef, new_name: String },
     Move { target: LocationRef, dest: LocationRef },
     Copy { target: LocationRef, dest: LocationRef },
-    List { target: LocationRef },
+    List { target: LocationRef, page: usize, contains: Option<String> },
     OpenApp { name: String },
     /// Undo the most recent journaled change.
     Undo,
@@ -70,7 +70,7 @@ pub enum Operation {
     Rename { from: PathBuf, to: PathBuf },
     Move { from: PathBuf, to: PathBuf },
     Copy { from: PathBuf, to: PathBuf },
-    List { path: PathBuf },
+    List { path: PathBuf, page: usize, contains: Option<String> },
     /// Make a smaller copy of one video with ffmpeg at `to`. The original is never touched.
     Shrink { from: PathBuf, to: PathBuf },
     /// Build a .pptx presentation at `to` from the outline file `from`. Local only; the outline is not changed.
@@ -106,9 +106,9 @@ impl Operation {
             }
             Operation::Move { from, to } => format!("Move {} to {}", from.display(), to.display()),
             Operation::Copy { from, to } => format!("Copy {} to {}", from.display(), to.display()),
-            Operation::List { path } => format!("List {}", path.display()),
+            Operation::List { path, .. } => format!("List {}", path.display()),
             Operation::DeckDraft { topic } => format!(
-                "Write a presentation outline about \"{topic}\" with the free online model (Pollinations \"Classic\": no account, best effort, about one request per 45 seconds per IP address). Pawline sends exactly this request text in the web address it asks text.pollinations.ai for, plus the usual web details (your IP address, a \"Pawline\" user-agent): \"{}\" Nothing from your files, chat history or location is sent. Pollinations says the same address returns the same cached answer to anyone who has it, and what it keeps is its own policy. Do not put passwords, secrets or private information in the topic. The reply is only shown to you as a draft, nothing is saved, and it is AI-written text that may contain mistakes: check every fact before you use it.",
+                "Write a presentation outline about \"{topic}\" with the free online model (Pollinations \"Classic\": no account, best effort, about one request per 45 seconds per IP address). Pawline sends exactly this request text in the web address it asks text.pollinations.ai for, plus the usual web details (your IP address, a \"Pawline\" user-agent): \"{}\" Nothing from your files, chat history or location is sent. Pollinations' privacy policy (updated 2026-11-17) says answers can be cached, typically up to 30 days, so the same address can return a saved answer; what it keeps is its own policy. Do not put passwords, secrets or private information in the topic. The reply is only shown to you as a draft, nothing is saved, and it is AI-written text that may contain mistakes: check every fact before you use it.",
                 crate::deck::author_prompt(topic)
             ),
             Operation::DeckText { to, .. } => format!("Save the reviewed presentation draft as {}. Nothing is sent anywhere. The slides are exactly the draft you were shown.", to.display()),
@@ -127,7 +127,7 @@ impl Operation {
                 provider.disclosure()
             ),
             Operation::AskOnline { text } => format!(
-                "Ask Pollinations (online) \"{text}\": this is the free \"Classic\" service: no account, best effort, about one request per 45 seconds per IP address. Pawline puts your question text in the web address it requests from text.pollinations.ai, plus the usual web details (your IP address, a \"Pawline\" user-agent). Pollinations says the same address returns the same cached answer to anyone who has it. Pawline does not send your files, chat history or location. What Pollinations keeps is its own policy. Do not put passwords, secrets or private information in this question. The answer is only shown, never run, and may be wrong."
+                "Ask Pollinations (online) \"{text}\": this is the free \"Classic\" service: no account, best effort, about one request per 45 seconds per IP address. Pawline puts your question text in the web address it requests from text.pollinations.ai, plus the usual web details (your IP address, a \"Pawline\" user-agent). Its privacy policy (updated 2026-11-17) says answers can be cached, typically up to 30 days, so the same address can return a saved answer. Pawline does not send your files, chat history or location. What Pollinations keeps is its own policy. Do not put passwords, secrets or private information in this question. The answer is only shown, never run, and may be wrong."
             ),
             Operation::LookAtImage { provider, path, prompt } => {
                 let destination = if provider.local {
@@ -165,7 +165,7 @@ impl Operation {
                     )
                 } else {
                     format!(
-                        "The request also carries the usual web details (your IP address, a \"Pawline\" user-agent, no cookies, no account). Free \"Classic\" tier: best effort, one request per 45 seconds per IP address. What Pollinations says in its privacy policy (updated 2026-11-17): prompts are processed transiently and not used to train models without opt-in; replies may be cached for up to about 30 days; free usage logs keep a keyed hash and network prefix of the IP address, the country and timestamps; the service is for people 16 or older; some data may reach its service providers."
+                        "The request also carries the usual web details (your IP address, a \"Pawline\" user-agent, no cookies, no account). Free \"Classic\" tier: best effort, one request per 45 seconds per IP address. What Pollinations says in its privacy policy (updated 2026-11-17): prompts are processed transiently and not used to train models without opt-in; replies may be cached for up to about 30 days; free usage logs keep a keyed hash and network prefix of the IP address, the country and timestamps; some data may reach its service providers, and externally hosted community models follow their own providers' policies."
                     )
                 };
                 format!(

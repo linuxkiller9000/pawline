@@ -360,6 +360,7 @@ impl Validator {
         crate::journal::last_open_of(&text, "wallpaper").is_some()
             || crate::journal::last_open_of(&text, "wallpaper_base").is_some()
             || crate::wallpaper::current_swaybg_image().is_some()
+            || crate::wallpaper::current_awww_image().is_some()
     }
 
     /// A rename, move or copy needs something to act on: it must exist on
@@ -390,7 +391,7 @@ impl Validator {
 
         for d in directives {
             match d {
-                Directive::Create { kind, names, parent } => {
+                Directive::Create { kind, names, parent, parents } => {
                     // "make a folder called a in models": if "models" is a real folder, that is where it goes
                     // (the plan asks for a yes). Nothing found: the whole text stays the name, as before.
                     let (names_split, base_split) = self.split_in_destination(names, parent, &sim)?;
@@ -408,23 +409,48 @@ impl Validator {
                         if n == "." || n == ".." {
                             return Err(PawError::UnsafePath(format!("bad name \"{n}\"")));
                         }
+                        if cfg!(windows) {
+                            if let Some(why) = crate::platform::windows_name_problem(n) {
+                                return Err(PawError::UnsafePath(format!("\"{n}\" {why}")));
+                            }
+                        }
                         let name = Self::apply_ext_hint(n, kind);
                         let path = self.normalize(&base.join(&name))?;
                         let path = self.real_confine(&path)?;
-                        // parent must exist on disk or earlier in this plan
+                        // The parent must exist on disk or earlier in this plan. Missing parents are
+                        // a friendly message naming the nearest missing folder, never a raw OS error;
+                        // "with parent folders" creates them as their own confirmed steps.
+                        let mut missing: Vec<PathBuf> = vec![];
                         let mut anc = path.parent().map(|p| p.to_path_buf());
                         while let Some(a) = anc {
                             if a.exists() || will_exist.contains(&a) || a == self.root {
                                 break;
                             }
+                            missing.push(a.clone());
                             let next = a.parent().map(|p| p.to_path_buf());
                             if next.as_deref() == Some(a.as_path()) || next.is_none() {
-                                return Err(PawError::Validation(format!(
-                                    "no such place: {}",
-                                    a.display()
-                                )));
+                                break;
                             }
                             anc = next;
+                        }
+                        if !missing.is_empty() && !parents {
+                            let kind_word = match kind {
+                                CreateKind::Dir => "folder",
+                                CreateKind::File { .. } => "file",
+                            };
+                            return Err(PawError::Validation(format!(
+                                "The folder {} does not exist yet, so nothing was created. To make the missing folder{} too, say: \"make a {} called {} in {} with parent folders\".",
+                                missing[0].display(),
+                                if missing.len() > 1 { "s" } else { "" },
+                                kind_word,
+                                n,
+                                missing[0].display()
+                            )));
+                        }
+                        for a in missing.iter().rev() {
+                            ops.push(Operation::CreateDir { path: a.clone() });
+                            sim.remember(a);
+                            will_exist.insert(a.clone());
                         }
                         if path.exists() && !will_exist.contains(&path) {
                             return Err(PawError::Validation(format!(
@@ -478,12 +504,21 @@ impl Validator {
                     if matches!(d, Directive::Move { .. }) {
                         ops.push(Operation::Move { from, to });
                     } else {
+                        // Copying reads the content; special files (FIFOs, sockets, devices) can block or
+                        // misbehave, so refuse them up front. Moving only renames the entry and stays allowed.
+                        let m = std::fs::metadata(&from).map_err(|_| PawError::Validation(format!("{} doesn't exist", from.display())))?;
+                        if !m.is_file() && !m.is_dir() {
+                            return Err(PawError::Validation(format!(
+                                "I can only copy files and folders, not {} (it is a special file). Nothing was changed.",
+                                from.display()
+                            )));
+                        }
                         ops.push(Operation::Copy { from, to });
                     }
                 }
-                Directive::List { target } => {
+                Directive::List { target, page, contains } => {
                     let path = self.resolve_location(target, &sim)?;
-                    ops.push(Operation::List { path });
+                    ops.push(Operation::List { path, page: *page, contains: contains.clone() });
                 }
                 Directive::Undo => {
                     let text = std::fs::read_to_string(self.root.join(crate::journal::JOURNAL))
@@ -525,10 +560,10 @@ impl Validator {
                     };
                     let known = self.wallpaper_backup_known();
                     if !known && !*no_backup_ok {
-                        return Err(PawError::Validation(
-                            "I can't see your current wallpaper, so I can't back it up and Undo couldn't restore it. Nothing was changed. To go ahead anyway, say the same thing again ending with \"anyway\"."
-                                .into(),
-                        ));
+                        return Err(PawError::Validation(format!(
+                            "I can't see your current wallpaper, so I can't back it up and Undo couldn't restore it. I checked: whether I set a wallpaper before (no), a running swaybg showing one, and an awww/swww daemon to ask. {} Nothing was changed. To go ahead anyway, say the same thing again ending with \"anyway\".",
+                            crate::wallpaper::backup_check_note()
+                        )));
                     }
                     ops.push(Operation::SetWallpaper { image: path, via, no_backup_ok: *no_backup_ok && !known });
                 }
@@ -577,5 +612,42 @@ impl Validator {
             confirmation_reasons: reasons,
             ops,
         })
+    }
+}
+
+
+#[cfg(all(test, unix))]
+mod fifo_copy_tests {
+    use super::*;
+
+    #[test]
+    fn copy_of_a_fifo_is_refused_at_plan_time() {
+        let d = std::env::temp_dir().join(format!("pawline-vfifo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("dest")).unwrap();
+        let c = std::ffi::CString::new(d.join("pipe").to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let v = Validator::new(d.clone());
+        let ctx = ContextManager::new();
+        let plan = v.build_plan(
+            &[Directive::Copy {
+                target: LocationRef::Explicit(d.join("pipe").to_string_lossy().into()),
+                dest: LocationRef::Explicit(d.join("dest").to_string_lossy().into()),
+            }],
+            &ctx,
+        );
+        match plan {
+            Err(PawError::Validation(m)) => assert!(m.contains("special file"), "{m}"),
+            other => panic!("expected a validation refusal, got {other:?}"),
+        }
+        // moving the same pipe is fine: it never opens the content
+        let plan = v.build_plan(
+            &[Directive::Move {
+                target: LocationRef::Explicit(d.join("pipe").to_string_lossy().into()),
+                dest: LocationRef::Explicit(d.join("dest").to_string_lossy().into()),
+            }],
+            &ctx,
+        );
+        assert!(plan.is_ok(), "move of a pipe stays allowed: {plan:?}");
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "pawline-native"
-version = "0.2.1-beta"
+version = "0.3.0-test.1"
 edition = "2021"
 description = "Pawline native Wayland UI: CPU-rendered (no OpenGL, no GTK, no WebKit)"
 license = "GPL-3.0-only"
@@ -20,10 +20,20 @@ image-webp = { version = "0.2", default-features = false }
 rustybuzz = "0.20"
 unicode-bidi = "0.3"
 
-calloop = "0.13"
+calloop = "0.14"
+
+[features]
+default = ["laya"]
+# Experimental Laya intent router (Linux only): tract + tokenizers never build for Windows.
+laya = ["dep:tract-onnx", "dep:tokenizers", "dep:regex"]
+
+[target.'cfg(not(windows))'.dependencies]
+tract-onnx = { version = "0.23", optional = true }
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"], optional = true }
+regex = { version = "1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
-smithay-client-toolkit = "0.19"
+smithay-client-toolkit = "0.21"
 x11rb = { version = "0.14", default-features = false, features = ["shape"] }
 
 [target.'cfg(windows)'.dependencies]

@@ -19,3 +19,9 @@ Online chat (opt-in, per session):
 Window title shows [online chat ON] while it is on.
 
 Known gaps: history persistence is item 15/19 and is not built; English only.
+
+## Help text refresh (2026-11-26)
+The `help` text now lists weather (sends the place name to open-meteo.com), presentations (local review first; online topic drafts need a consent card, AI-written and not fact-checked), pictures (online, asks first), chat (offline English, opt-in online chat per session with a card per turn), the fixed Arabic command set, and the limits (not a general chat assistant, voice English only). Still not shown in help: settings, the folder chip, zi/frequent folders, voice, deck editing commands, image/chart/table/theme/source lines. Not translated into Arabic.
+
+### Network route audit (2026-11-26, privacy gap kept open under item 14)
+Verified by the bridge test `every_online_ask_shows_a_disclosure_card_first_and_cancel_sends_nothing`: weather, web search, Wikipedia and general questions each show a disclosure card with the host before anything is sent; cancel sends nothing. Deck drafts, pictures and online chat have their own cards (separate tests). Weather has two requests (place lookup, then the forecast for the picked place); one card discloses both, and the pick is not a second card. Exceptions and gaps: (1) the older Tauri UI (pawline-ui) executes Weather/Search in its own backend; its card flow was NOT audited here, so no claim for that app. (2) Not every route was exercised live in the real window today. (3) The Arabic route reuses the same path (tested for the plan/card step only). (4) Provider privacy pages were skimmed, not fully read (items 21/25). Help copy lists the routes by name instead of claiming "every online feature".

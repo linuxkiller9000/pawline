@@ -73,16 +73,27 @@ fn is_verb(word: &str) -> bool {
     VERBS.contains(&word)
 }
 
+/// Case-insensitive prefix check over only the separator's bytes - never lowercase the
+/// whole remaining string (that made clause scanning O(n^2): audit item 21 fuzz finding).
+fn starts_with_ci(s: &str, sep: &str) -> bool {
+    let b = s.as_bytes();
+    let p = sep.as_bytes();
+    b.len() >= p.len() && b[..p.len()].eq_ignore_ascii_case(p)
+}
+
 fn parse_sentence(s: &str, out: &mut Vec<Directive>) -> Result<(), PawError> {
     let mut rest = s.trim().trim_end_matches('.');
     // "inside <ref>, <command>" / "in <ref> <command>" prefixes re-target the clause.
     let mut base: Option<LocationRef> = None;
     loop {
-        let lower = rest.to_ascii_lowercase();
-        let stripped = lower.strip_prefix("inside ").or_else(|| lower.strip_prefix("in "));
-        let Some(after) = stripped else { break };
-        // find where the location words end: a comma, or the next command verb.
-        let prefix_len = rest.len() - after.len();
+        // Only the prefix bytes are compared (see starts_with_ci).
+        let prefix_len = if starts_with_ci(rest, "inside ") {
+            7
+        } else if starts_with_ci(rest, "in ") {
+            3
+        } else {
+            break;
+        };
         let body = &rest[prefix_len..];
         let (loc_words, remainder) = split_location_prefix(body);
         if loc_words.is_empty() {
@@ -154,7 +165,7 @@ fn split_clauses(s: &str) -> Vec<&str> {
             continue;
         }
         for sep in [" then ", " and then ", " and "] {
-            if s[i..].to_ascii_lowercase().starts_with(sep) {
+            if starts_with_ci(&s[i..], sep) {
                 let after = &s[i + sep.len()..];
                 let next_word = after.split_whitespace().next().unwrap_or("").to_lowercase();
                 if is_verb(&next_word) {
@@ -278,12 +289,22 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
     if first == "rename" {
         // "rename <target> to <new name>"
         let body = cmd.splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim();
-        let (t, n) = body
-            .split_once(" to ")
-            .ok_or_else(|| PawError::Parse("rename needs \"... to <new name>\"".into()))?;
+        let (t, n) = split_rename(body).ok_or_else(|| PawError::Parse("rename needs \"... to <new name>\"".into()))?;
+        let t = t.trim();
+        // Filler before a quoted name: "rename the folder \"a b\" to c" - the quoted part is the name.
+        // Only stripped when what follows is quoted, so a real folder called "folder x" is untouched.
+        let lt = t.to_lowercase();
+        let t = ["the folder ", "the file ", "folder ", "file ", "the "]
+            .iter()
+            .find(|p| lt.starts_with(**p))
+            .and_then(|p| {
+                let rest = t[p.len()..].trim_start();
+                rest.starts_with(['"', '\'', '\u{201c}', '\u{2018}']).then_some(rest)
+            })
+            .unwrap_or(t);
         return Ok(Directive::Rename {
             target: place_ref(t),
-            new_name: n.trim().to_string(),
+            new_name: unwrap_quotes(n.trim()),
         });
     }
     if first == "move" || first == "copy" {
@@ -308,6 +329,27 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
     }
     if first == "list" || first == "show" {
         let body = lower.splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim();
+        // optional tails: "... containing X" and "... page N" (names beyond the first 300).
+        let mut body = body.to_string();
+        let mut page = 1usize;
+        let mut contains = None;
+        if let Some(i) = body.rfind(" containing ").or_else(|| body.rfind(" matching ")) {
+            let skip = if body[i..].starts_with(" containing ") { 12 } else { 10 };
+            let word = body[i + skip..].trim().to_string();
+            if !word.is_empty() {
+                contains = Some(word);
+                body.truncate(i);
+            }
+        }
+        if let Some(i) = body.rfind(" page ") {
+            if let Ok(n) = body[i + 6..].trim().parse::<usize>() {
+                if n >= 1 {
+                    page = n;
+                    body.truncate(i);
+                }
+            }
+        }
+        let body = body.trim();
         let target = if body.is_empty() {
             LocationRef::CurrentDir
         } else {
@@ -315,14 +357,38 @@ fn parse_command(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawE
             let b = original_case(cmd, &lower, b);
             parse_location(b).unwrap_or_else(|| place_ref(b))
         };
-        return Ok(Directive::List { target });
+        return Ok(Directive::List { target, page, contains });
     }
     if matches!(first, "generate" | "draw" | "paint" | "imagine" | "render")
         || ((lower.contains("image of") || lower.contains("picture of")) && !lower.contains("wallpaper"))
     {
         return Ok(image_request(cmd, &lower, first));
     }
-    Err(PawError::Parse(format!("I don't know how to \"{first}\" yet. Say \"help\" to see what I can do.")))
+    Err(PawError::Parse(unknown_command_message(cmd, first)))
+}
+
+/// The parting message when nothing understood the input. A lone unknown word gets the closest
+/// command words (same first letter, one or two edits away) plus two concrete ways forward;
+/// longer input keeps the plain message.
+fn unknown_command_message(cmd: &str, first: &str) -> String {
+    if cmd.trim().split_whitespace().count() == 1 {
+        let mut close: Vec<&str> = crate::typo::RISKY_VERBS
+            .iter()
+            .chain(crate::typo::SAFE_VERBS)
+            .copied()
+            .chain(["search", "weather", "joke", "remind", "time", "scroll", "hint"])
+            .filter(|v| v.starts_with(first.chars().next().unwrap_or('\0')) && crate::typo::distance(&first.to_lowercase(), v) <= 2)
+            .collect();
+        close.sort_by_key(|v| crate::typo::distance(&first.to_lowercase(), v));
+        close.dedup();
+        close.truncate(3);
+        if !close.is_empty() {
+            let list = close.iter().map(|v| format!("\"{v}\"")).collect::<Vec<_>>().join(", ");
+            return format!("I don't know \"{first}\" as a command. Closest commands: {list}. Say \"hint\" for examples, or \"search {first}\" to look it up.");
+        }
+        return format!("I don't know \"{first}\" as a command. Say \"hint\" for examples of what I can do, or \"search {first}\" to look it up.");
+    }
+    format!("I don't know how to \"{first}\" yet. Say \"help\" to see what I can do.")
 }
 
 /// A picture request. The provider must be named; nothing is sent until the
@@ -383,7 +449,7 @@ fn small_talk(lower: &str) -> Option<String> {
     const HELLO: &[&str] = &["hello", "hi", "hey", "hiya", "yo", "good morning", "good evening", "good afternoon", "hello there", "hi there", "hey there", "salam", "assalamu alaikum"];
     const THANKS: &[&str] = &["thanks", "thank you", "thx", "ty"];
     const HELP: &[&str] = &["help", "what can you do", "what do you do", "how do i use this", "how does this work", "commands", "examples"];
-    const HELP_TEXT: &str = "## What I can do\n- **Files and folders**: `make a folder called kitten paws`. I can also delete, rename, move, copy and list them (deleting and moving ask first).\n- **Apps**: `open mpv`. I show the exact command and ask first.\n- **Wallpaper**: `set wallpaper to ~/Pictures/a.png`\n- **Search**: `search for what is a cat`, or `search wikipedia for cats`\n- **Math**: `what is 12 * 7`\n- **Undo** the last change: `undo`\n> Tip: Ctrl+C / Ctrl+V copy and paste, click a reply to copy it.\nI can't generate images or chat in depth yet.";
+    const HELP_TEXT: &str = "## What I can do\n- **Files and folders**: `make a folder called kitten paws`. I can also delete, rename, move, copy and list them (deleting and moving ask first).\n- **Apps**: `open mpv`. I show the exact command and ask first.\n- **Wallpaper**: `set wallpaper to ~/Pictures/a.png`\n- **Search**: `search for what is a cat`, or `search wikipedia for cats`\n- **Math**: `what is 12 * 7`\n- **Weather**: `weather in Cairo`. A card asks first. If several places match, your pick sends only that place's coordinates for the forecast (open-meteo.com, covered by the same card).\n- **Presentations**: `make a presentation from notes.md` (local .pptx, you review it first). `write a presentation about the water cycle` asks an online model and shows a consent card first. The text is AI-written and not fact-checked.\n- **Pictures**: `generate a picture of a lighthouse with pollinations` (online, asks first).\n- **Chat**: small talk and jokes work offline, in English. `chat online` turns on online chat for this session only, and every turn shows a card with the exact text that would be sent.\n- **Arabic**: a fixed set of Arabic commands works (type `مساعدة`). Replies and cards are mostly English.\n- **Undo** the last change: `undo`\n> Tip: Ctrl+C copies my last reply (or the text you selected in the box), `copy the conversation` or `copy the last 5 messages` copies more, Ctrl+V pastes, Ctrl+, opens Settings, F2 starts or stops voice input, and clicking a reply copies it.\nLimits: I am not a general chat assistant, voice is English only, and the online routes I know of (weather, search, questions, presentations, pictures, chat) show a card first and send nothing until you say yes. Settings has an offline mode that stops Pawline's own online requests (not apps you open or custom speech commands you set).";
     if HELLO.contains(&t.as_str()) {
         return Some("Hi! I can work with files and folders, open apps, search and do math. Say \"help\" for examples.".into());
     }
@@ -433,6 +499,13 @@ fn clean_loc_words(s: &str) -> String {
 /// "make a file inside pawline", "create files a.py, b.py in pawline": no "called".
 /// Explicit dotted file names are taken as typed. Anything else asks a specific question;
 /// names and contents are never invented.
+fn with_parents(parents: bool) -> impl Fn(Directive) -> Directive {
+    move |d| match d {
+        Directive::Create { kind, names, parent, .. } => Directive::Create { kind, names, parent, parents },
+        other => other,
+    }
+}
+
 fn parse_create_bare(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawError> {
     let words: Vec<&str> = cmd.split_whitespace().collect();
     let mut i = 1;
@@ -470,6 +543,7 @@ fn parse_create_bare(cmd: &str, base: Option<LocationRef>) -> Result<Directive, 
             kind: CreateKind::File { ext_hint: None },
             names,
             parent: loc.or(base).unwrap_or(LocationRef::CurrentDir),
+            parents: false,
         });
     }
     let place = match loc.as_ref().or(base.as_ref()) {
@@ -483,14 +557,27 @@ fn parse_create_bare(cmd: &str, base: Option<LocationRef>) -> Result<Directive, 
 }
 
 /// Parse a create clause: "<verb> [a] [kind] [in <loc>] called|named <names>"
+/// Strip a trailing "with parent folders" style ask: create the missing folders above too.
+fn strip_parents_suffix(cmd: &str) -> (&str, bool) {
+    let t = cmd.trim_end_matches(['.', '!', ' ']);
+    let l = t.to_ascii_lowercase();
+    for s in [" with parent folders", " with parent directories", " with parents", " and parent folders", " and parents"] {
+        if let Some(p) = l.strip_suffix(s) {
+            return (&cmd[..p.len()], true);
+        }
+    }
+    (cmd, false)
+}
+
 fn parse_create(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawError> {
+    let (cmd, parents) = strip_parents_suffix(cmd);
     let lc = cmd.to_ascii_lowercase();
     // Split on the keyword found case-insensitively, but keep the user's own
     // letters on both sides (a folder called "Pets" is not "pets").
     let split_at = |kw: &str| lc.find(kw).map(|i| (cmd[..i].to_string(), cmd[i + kw.len()..].to_string()));
     let (names_part, before_names) = match split_at(" called ").or_else(|| split_at(" named ")) {
         Some((b, n)) => (n, b),
-        None => return parse_create_bare(cmd, base),
+        None => return parse_create_bare(cmd, base).map(with_parents(parents)),
     };
 
     // Kind and optional inline location live in the part before "called".
@@ -553,6 +640,7 @@ fn parse_create(cmd: &str, base: Option<LocationRef>) -> Result<Directive, PawEr
         kind,
         names,
         parent: loc.or(trailing_loc.take()).or(base).unwrap_or(LocationRef::CurrentDir),
+        parents,
     })
 }
 
@@ -577,6 +665,39 @@ fn split_name_list(s: &str) -> Vec<String> {
 /// Names and paths are case-sensitive on Linux: "Pets" and "pets" are
 /// different files. Every name keeps exactly the letters the user typed and
 /// is looked up that way; there is no case-insensitive nearest match.
+/// "name" or 'name' or `name` (or curly quotes) around a whole new name are the quoting syntax, not part of the name.
+/// Anything else, including quotes inside the name, is kept exactly.
+/// Split "X to <new name>": the separator is the first " to " outside quotes, so a quoted
+/// name that itself contains " to " ("rename \"x to y\" to z") stays one name.
+fn split_rename(body: &str) -> Option<(&str, &str)> {
+    let mut close: Option<char> = None;
+    for (i, ch) in body.char_indices() {
+        match close {
+            Some(q) if ch == q => close = None,
+            None => match ch {
+                '"' | '\'' | '`' => close = Some(ch),
+                '\u{201c}' => close = Some('\u{201d}'),
+                '\u{2018}' => close = Some('\u{2019}'),
+                _ if body[i..].starts_with(" to ") => return Some((&body[..i], &body[i + 4..])),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    None
+}
+
+fn unwrap_quotes(s: &str) -> String {
+    let c: Vec<char> = s.chars().collect();
+    if c.len() >= 2 {
+        let pair = matches!((c[0], c[c.len() - 1]), ('"', '"') | ('\'', '\'') | ('`', '`') | ('\u{201c}', '\u{201d}') | ('\u{2018}', '\u{2019}'));
+        if pair && !c[1..c.len() - 1].iter().any(|x| matches!(x, '"' | '`' | '\u{201c}' | '\u{201d}')) {
+            return c[1..c.len() - 1].iter().collect();
+        }
+    }
+    s.to_string()
+}
+
 fn place_ref(s: &str) -> LocationRef {
     name_to_location(s)
 }
@@ -702,6 +823,41 @@ fn parse_wallpaper(cmd: &str) -> Option<Result<Directive, PawError>> {
 }
 
 #[cfg(test)]
+mod unknown_word_tests {
+    fn err_of(input: &str) -> String {
+        match crate::intent::parse(input) {
+            Err(crate::error::PawError::Parse(m)) => m,
+            other => panic!("{input}: expected parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lone_unknown_word_offers_ways_forward() {
+        let m = err_of("say");
+        assert!(m.contains("\"say\""), "{m}");
+        assert!(m.contains("hint"), "{m}");
+        assert!(m.contains("search say"), "{m}");
+        let m = err_of("a");
+        assert!(m.contains("hint"), "{m}");
+        assert!(!m.contains("Closest commands"), "{m}");
+    }
+
+    #[test]
+    fn lone_typo_suggests_close_commands() {
+        let m = err_of("lst");
+        assert!(m.contains("Closest commands"), "{m}");
+        assert!(m.contains("\"list\""), "{m}");
+    }
+
+    #[test]
+    fn multi_word_keeps_plain_message() {
+        let m = err_of("florp the things");
+        assert!(m.contains("don't know how to \"florp\""), "{m}");
+        assert!(!m.contains("Closest commands"), "{m}");
+    }
+}
+
+#[cfg(test)]
 mod case_tests {
     use super::*;
     fn one(s: &str) -> Directive {
@@ -732,10 +888,64 @@ mod case_tests {
             d => panic!("{d:?}"),
         }
         match one("list /Tmp/Foo") {
-            Directive::List { target } => assert_eq!(target, LocationRef::Explicit("/Tmp/Foo".into())),
+            Directive::List { target, .. } => assert_eq!(target, LocationRef::Explicit("/Tmp/Foo".into())),
             d => panic!("{d:?}"),
         }
     }
+    #[test]
+    fn quotes_around_a_new_name_are_syntax_not_part_of_the_name() {
+        for (inp, want) in [
+            ("rename a.txt to \"new name.txt\"", "new name.txt"),
+            ("rename a.txt to 'new name.txt'", "new name.txt"),
+            ("rename a.txt to \u{201c}new name.txt\u{201d}", "new name.txt"),
+            ("rename a.txt to plain.txt", "plain.txt"),
+            ("rename a.txt to it's.txt", "it's.txt"),
+            ("rename a.txt to \"a\"b\"", "\"a\"b\""),
+        ] {
+            match one(inp) {
+                Directive::Rename { new_name, .. } => assert_eq!(new_name, want, "{inp}"),
+                d => panic!("{d:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn quoted_rename_target_with_filler_or_separator_inside() {
+        // filler words before a quoted name: the quoted part is the target
+        match one("rename the folder \"a b\" to c") {
+            Directive::Rename { target, new_name } => {
+                assert_eq!(target, LocationRef::Named("a b".into()));
+                assert_eq!(new_name, "c");
+            }
+            d => panic!("{d:?}"),
+        }
+        match one("rename the file 'x y' to z") {
+            Directive::Rename { target, .. } => assert_eq!(target, LocationRef::Named("x y".into())),
+            d => panic!("{d:?}"),
+        }
+        // a quoted target may itself contain " to "
+        match one("rename \"x to y\" to z") {
+            Directive::Rename { target, new_name } => {
+                assert_eq!(target, LocationRef::Named("x to y".into()));
+                assert_eq!(new_name, "z");
+            }
+            d => panic!("{d:?}"),
+        }
+        // unquoted shapes unchanged: first " to " separates
+        match one("rename a b to c") {
+            Directive::Rename { target, new_name } => {
+                assert_eq!(target, LocationRef::Named("a b".into()));
+                assert_eq!(new_name, "c");
+            }
+            d => panic!("{d:?}"),
+        }
+        // filler without quotes is NOT stripped: "folder x" can be a real name
+        match one("rename folder x to y") {
+            Directive::Rename { target, .. } => assert_eq!(target, LocationRef::Named("folder x".into())),
+            d => panic!("{d:?}"),
+        }
+    }
+
     #[test]
     fn bare_names_keep_their_exact_case() {
         match one("delete Pics") {
@@ -764,14 +974,14 @@ mod file_request_tests {
     #[test]
     fn explicit_names_inside_a_folder() {
         for s in ["make a file called a.py inside pawline", "inside pawline make a file called a.py", "make a file a.py in pawline"] {
-            assert_eq!(parse(s).unwrap(), vec![Directive::Create { kind: CreateKind::File { ext_hint: None }, names: vec!["a.py".into()], parent: LocationRef::Named("pawline".into()) }], "{s}");
+            assert_eq!(parse(s).unwrap(), vec![Directive::Create { kind: CreateKind::File { ext_hint: None }, names: vec!["a.py".into()], parent: LocationRef::Named("pawline".into()), parents: false }], "{s}");
         }
-        assert_eq!(parse("create files a.py, b.py in pawline").unwrap(), vec![Directive::Create { kind: CreateKind::File { ext_hint: None }, names: vec!["a.py".into(), "b.py".into()], parent: LocationRef::Named("pawline".into()) }]);
+        assert_eq!(parse("create files a.py, b.py in pawline").unwrap(), vec![Directive::Create { kind: CreateKind::File { ext_hint: None }, names: vec!["a.py".into(), "b.py".into()], parent: LocationRef::Named("pawline".into()), parents: false }]);
         assert_eq!(parse("make files a.py, b.py inside the pawline folder").unwrap().len(), 1);
     }
     #[test]
     fn names_with_in_stay_names() {
-        assert_eq!(parse("make a folder called lost in space").unwrap(), vec![Directive::Create { kind: CreateKind::Dir, names: vec!["lost in space".into()], parent: LocationRef::CurrentDir }]);
+        assert_eq!(parse("make a folder called lost in space").unwrap(), vec![Directive::Create { kind: CreateKind::Dir, names: vec!["lost in space".into()], parent: LocationRef::CurrentDir, parents: false }]);
     }
     #[test]
     fn nameless_file_asks_and_invents_nothing() {
@@ -821,5 +1031,107 @@ mod skills_tests {
                 o => panic!("{o:?}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod fuzz_tests {
+    //! Audit item 21: throw mutated and random input at the parser; it must always return
+    //! (Ok or Err), never panic, never wedge. Deterministic seeds, so a failure reproduces.
+    use super::parse;
+
+    fn xorshift(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    const SEEDS: &[&str] = &[
+        "make a folder called kitten paws",
+        "delete the file notes.txt",
+        "rename a.txt to b.txt",
+        "move Pics to Documents",
+        "copy /tmp/a.txt to /tmp",
+        "weather in Cairo",
+        "wiki tux",
+        "undo",
+        "open mpv",
+        "مساعدة",
+        "make a folder called \"quoted name\"",
+        "rename \"old name\" to \"new name\"",
+    ];
+
+    #[test]
+    fn fuzz_parse_never_panics_or_wedges() {
+        let mut state = 0x243F6A8885A308D3u64;
+        let pieces: Vec<String> = (0..64)
+            .map(|_| {
+                let n = (xorshift(&mut state) % 12 + 1) as usize;
+                (0..n)
+                    .map(|_| {
+                        let c = (xorshift(&mut state) % 40) as u8;
+                        match c {
+                            0..=25 => (b'a' + c) as char,
+                            26 => ' ',
+                            27 => '"',
+                            28 => '\\',
+                            29 => '/',
+                            30 => '.',
+                            31 => '~',
+                            32 => '-',
+                            33 => '\u{0644}', // Arabic lam
+                            34 => '\u{0645}', // Arabic meem
+                            35 => '\u{0}',
+                            36 => '\n',
+                            37 => '\'',
+                            38 => '%',
+                            _ => '9',
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let started = std::time::Instant::now();
+        let mut checked = 0u32;
+        for round in 0..2500 {
+            let seed = SEEDS[(round % SEEDS.len()) as usize];
+            // Mutations: splice random pieces into the seed, or a pure random string.
+            let mut input = String::new();
+            let parts = (xorshift(&mut state) % 5 + 1) as usize;
+            for i in 0..parts {
+                if i == 0 && round % 3 != 0 {
+                    input.push_str(seed);
+                }
+                input.push_str(&pieces[(xorshift(&mut state) % 64) as usize]);
+            }
+            if round % 100 == 0 {
+                eprintln!("fuzz round {round}");
+            }
+            let seen = input.clone();
+            let r = std::panic::catch_unwind(|| {
+                let _ = parse(&seen);
+            });
+            assert!(r.is_ok(), "parser panicked on input #{round}: {input:?}");
+            checked += 1;
+        }
+        // A few very long inputs must also return promptly.
+        for n in [10_000usize, 100_000, 500_000] {
+            eprintln!("fuzz big input {n}");
+            let big = "delete ".repeat(n / 7 + 1);
+            let seen = big.clone();
+            let t = std::time::Instant::now();
+            let r = std::panic::catch_unwind(|| {
+                let _ = parse(&seen);
+            });
+            assert!(r.is_ok(), "parser panicked on a {n}-byte input");
+            assert!(t.elapsed() < std::time::Duration::from_secs(5), "parser took {:?} on a {n}-byte input", t.elapsed());
+            checked += 1;
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(60), "fuzz run too slow: {:?}", started.elapsed());
+        eprintln!("fuzz: {checked} inputs, no panic, in {:?}", started.elapsed());
     }
 }

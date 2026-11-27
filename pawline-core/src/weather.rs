@@ -92,32 +92,52 @@ pub fn geocode(http: &dyn Http, place: &str) -> Result<Found, PawError> {
     if place.is_empty() {
         return Err(PawError::Exec("Which place? For example: weather in Cairo".into()));
     }
-    let mut parts = place.split(',').map(|p| p.trim()).filter(|p| !p.is_empty());
-    let name = parts.next().unwrap_or(place).to_string();
-    let hints: Vec<String> = parts.map(|p| p.to_lowercase()).collect();
-    let g = get(http, &format!("https://{GEO_HOST}/v1/search?name={}&count=10&language=en&format=json", enc(&name)))?;
-    let all = g.get("results").and_then(|r| r.as_array()).cloned().unwrap_or_default();
-    let mut hits: Vec<&serde_json::Value> = all
-        .iter()
-        .filter(|h| {
-            let l = label(h).to_lowercase();
-            hints.iter().all(|x| l.contains(x.as_str()))
-        })
-        .collect();
-    if let Some(first) = hits.first().map(|h| h.get("name").and_then(|x| x.as_str()).unwrap_or("").to_lowercase()) {
-        hits.retain(|h| h.get("name").and_then(|x| x.as_str()).unwrap_or("").to_lowercase() == first);
-    }
-    let mut seen = std::collections::HashSet::new();
-    let mut places = vec![];
-    for h in hits {
-        let (Some(lat), Some(lon)) = (h.get("latitude").and_then(|x| x.as_f64()), h.get("longitude").and_then(|x| x.as_f64())) else { continue };
-        let l = label(h);
-        if seen.insert(l.clone()) {
-            places.push(Place { label: l, lat, lon });
+    // "Cairo, Egypt" splits on the comma; "cairo in egypt" splits on the last " in ";
+    // "cairo egypt" is tried whole first, then one trailing word at a time moves into the
+    // region hints until something matches or only one word is left.
+    let (mut name, mut hints): (String, Vec<String>) = if place.contains(',') {
+        let mut parts = place.split(',').map(|p| p.trim()).filter(|p| !p.is_empty());
+        (parts.next().unwrap_or(place).to_string(), parts.map(|p| p.to_lowercase()).collect())
+    } else if let Some(at) = place.rfind(" in ") {
+        (place[..at].trim().to_string(), vec![place[at + 4..].trim().to_lowercase()])
+    } else {
+        (place.to_string(), vec![])
+    };
+    let mut places: Vec<Place> = vec![];
+    loop {
+        // The geocoder finds nothing for an Arabic name when asked in English (checked live 2026-11-26), so an Arabic name is looked up with language=ar.
+        let lang = if crate::arabic::has_arabic(&name) { "ar" } else { "en" };
+        let g = get(http, &format!("https://{GEO_HOST}/v1/search?name={}&count=10&language={lang}&format=json", enc(&name)))?;
+        let all = g.get("results").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+        let mut hits: Vec<&serde_json::Value> = all
+            .iter()
+            .filter(|h| {
+                let l = label(h).to_lowercase();
+                hints.iter().all(|x| l.contains(x.as_str()))
+            })
+            .collect();
+        if let Some(first) = hits.first().map(|h| h.get("name").and_then(|x| x.as_str()).unwrap_or("").to_lowercase()) {
+            hits.retain(|h| h.get("name").and_then(|x| x.as_str()).unwrap_or("").to_lowercase() == first);
         }
-        if places.len() == 5 {
+        let mut seen = std::collections::HashSet::new();
+        places.clear();
+        for h in hits {
+            let (Some(lat), Some(lon)) = (h.get("latitude").and_then(|x| x.as_f64()), h.get("longitude").and_then(|x| x.as_f64())) else { continue };
+            let l = label(h);
+            if seen.insert(l.clone()) {
+                places.push(Place { label: l, lat, lon });
+            }
+            if places.len() == 5 {
+                break;
+            }
+        }
+        if !places.is_empty() || !name.contains(' ') {
             break;
         }
+        // Nothing matched: move the last word of the name into the region hints and retry.
+        let at = name.rfind(' ').unwrap();
+        hints.insert(0, name[at + 1..].to_lowercase());
+        name = name[..at].to_string();
     }
     match places.len() {
         0 => Err(PawError::Exec(format!("I could not find a place called \"{place}\". Try the city and country, like \"weather in Cairo, Egypt\"."))),
@@ -261,8 +281,32 @@ mod tests {
         assert!(!r.contains("Observed"));
         assert!(r.contains("Source: Open-Meteo.com, https://open-meteo.com/"));
         let u = f.urls.borrow();
-        assert!(u[0].starts_with("https://geocoding-api.open-meteo.com/") && u[0].contains("name=Cairo"));
+        assert!(u[0].starts_with("https://geocoding-api.open-meteo.com/") && u[0].contains("name=Cairo") && u[0].contains("language=en"));
         assert!(u[1].starts_with("https://api.open-meteo.com/") && u[1].contains("latitude=30.0626") && !u[1].contains("Cairo"));
+    }
+
+    #[test]
+    fn space_separated_region_hint_retries_with_the_last_word_as_hint() {
+        // "cairo egypt": the whole string finds nothing, then "cairo" with hint "egypt" keeps only the Egyptian Cairo.
+        let f = fake(vec![ok(r#"{"results":[]}"#), ok(GEO), ok(FC)]);
+        let mut pending = None;
+        let r = weather(&f, "cairo egypt", &mut pending).unwrap();
+        assert!(r.contains("Weather for Cairo, Cairo Governorate, Egypt"));
+        let u = f.urls.borrow();
+        assert!(u[0].contains("name=cairo%20egypt"), "{}", u[0]);
+        assert!(u[1].contains("name=cairo"), "{}", u[1]);
+    }
+
+    #[test]
+    fn in_separated_region_hint_filters_the_matches() {
+        // "cairo in egypt" asks for "cairo" once and keeps only matches whose label contains "egypt".
+        let f = fake(vec![ok(GEO), ok(FC)]);
+        let mut pending = None;
+        let r = weather(&f, "cairo in egypt", &mut pending).unwrap();
+        assert!(r.contains("Weather for Cairo, Cairo Governorate, Egypt"));
+        let u = f.urls.borrow();
+        assert_eq!(u.len(), 2, "one geocode + one forecast, no retries");
+        assert!(u[0].contains("name=cairo"), "{}", u[0]);
     }
 
     #[test]
@@ -279,6 +323,23 @@ mod tests {
         let r = forecast(&f2, &opts[1]).unwrap();
         assert!(r.contains("Weather for Cairo, Illinois, United States"));
         assert!(f2.urls.borrow()[0].contains("latitude=37.0000") && f2.urls.borrow()[0].contains("longitude=-89.1000"));
+    }
+
+    #[test]
+    fn an_arabic_place_is_looked_up_in_arabic_and_never_rewritten() {
+        let geo = r#"{"results":[{"name":"القاهرة","latitude":30.06263,"longitude":31.24967,"country":"مصر","admin1":"محافظة القاهرة"}]}"#;
+        let f = fake(vec![ok(geo)]);
+        match geocode(&f, "القاهرة").unwrap() {
+            Found::One(p) => assert!(p.label.contains("القاهرة")),
+            Found::Many(_) => panic!("one result"),
+        }
+        let u = f.urls.borrow();
+        assert!(u[0].contains("language=ar") && u[0].contains("name=%D8%A7%D9%84%D9%82%D8%A7%D9%87%D8%B1%D8%A9"), "{}", u[0]);
+        // a different spelling is NOT silently swapped for the one the geocoder knows
+        let f = fake(vec![ok(r#"{"generationtime_ms":0.1}"#)]);
+        let e = geocode(&f, "القاهره").unwrap_err().to_string();
+        assert!(e.contains("could not find"), "{e}");
+        assert!(f.urls.borrow().len() == 1);
     }
 
     #[test]

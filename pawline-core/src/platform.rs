@@ -203,3 +203,94 @@ pub fn link_anon(root: &Dir, dir: &Path, file: &std::fs::File, name: &std::ffi::
 pub fn link_anon(_root: &Dir, _dir: &Path, _file: &std::fs::File, _name: &std::ffi::OsStr) -> Result<(), PawError> {
     Err(PawError::Exec("saving new files is not implemented on this system yet; nothing was changed".into()))
 }
+
+/// The user's home folder from environment values. `windows` selects the Windows rule: USERPROFILE when HOME is
+/// absent (Windows has no HOME by default). The Unix rule never looks at USERPROFILE.
+pub fn home_from(get: &dyn Fn(&str) -> Option<std::ffi::OsString>, windows: bool) -> Option<std::path::PathBuf> {
+    let pick = |k: &str| get(k).filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
+    pick("HOME").or_else(|| if windows { pick("USERPROFILE") } else { None })
+}
+
+/// Home folder of the running process (HOME; on Windows also USERPROFILE).
+pub fn home_dir() -> Option<std::path::PathBuf> {
+    home_from(&|k| std::env::var_os(k), cfg!(windows))
+}
+
+/// Per-user data folder when PAWLINE_DATA is unset: XDG_DATA_HOME/pawline, else on Windows %LOCALAPPDATA%\pawline,
+/// else ~/.local/share/pawline.
+pub fn data_dir_from(get: &dyn Fn(&str) -> Option<std::ffi::OsString>, windows: bool) -> Option<std::path::PathBuf> {
+    let pick = |k: &str| get(k).filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
+    if let Some(d) = pick("PAWLINE_DATA") {
+        return Some(d);
+    }
+    if let Some(d) = pick("XDG_DATA_HOME") {
+        return Some(d.join("pawline"));
+    }
+    if windows {
+        if let Some(d) = pick("LOCALAPPDATA") {
+            return Some(d.join("pawline"));
+        }
+    }
+    home_from(get, windows).map(|h| h.join(".local/share/pawline"))
+}
+
+#[cfg(test)]
+mod home_tests {
+    use super::*;
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<std::ffi::OsString> + 'a {
+        move |k| pairs.iter().find(|(a, _)| *a == k).map(|(_, v)| std::ffi::OsString::from(*v))
+    }
+    #[test]
+    fn windows_falls_back_to_userprofile_and_unix_does_not() {
+        let e = env(&[("USERPROFILE", "C:\\Users\\a")]);
+        assert_eq!(home_from(&e, true), Some("C:\\Users\\a".into()));
+        assert_eq!(home_from(&e, false), None);
+        let e = env(&[("HOME", "/home/a"), ("USERPROFILE", "C:\\Users\\a")]);
+        assert_eq!(home_from(&e, true), Some("/home/a".into()));
+        assert_eq!(home_from(&env(&[("HOME", "")]), true), None);
+    }
+    #[test]
+    fn data_dir_order() {
+        let e = env(&[("PAWLINE_DATA", "/d"), ("XDG_DATA_HOME", "/x"), ("HOME", "/h")]);
+        assert_eq!(data_dir_from(&e, false), Some("/d".into()));
+        let e = env(&[("XDG_DATA_HOME", "/x"), ("HOME", "/h")]);
+        assert_eq!(data_dir_from(&e, false), Some("/x/pawline".into()));
+        let e = env(&[("LOCALAPPDATA", "C:\\L"), ("USERPROFILE", "C:\\U")]);
+        assert_eq!(data_dir_from(&e, true), Some(std::path::PathBuf::from("C:\\L").join("pawline")));
+        assert_eq!(data_dir_from(&e, false), None);
+        assert_eq!(data_dir_from(&env(&[("HOME", "/h")]), false), Some("/h/.local/share/pawline".into()));
+    }
+}
+
+/// Why a file name cannot be created on Windows, or None. Pure rule: Windows device names (CON, PRN, AUX, NUL,
+/// COM1-9, LPT1-9, with or without an extension), the characters < > : " | ? * and control characters, and names
+/// ending in a dot or space. Enforced only when running on Windows (Linux allows all of these).
+pub fn windows_name_problem(name: &str) -> Option<&'static str> {
+    if name.chars().any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') || (c as u32) < 32) {
+        return Some("contains a character Windows does not allow in names");
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Some("ends with a dot or a space, which Windows drops");
+    }
+    let stem = name.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    let dev = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT")) && stem.len() == 4 && stem.as_bytes()[3].is_ascii_digit() && stem.as_bytes()[3] != b'0');
+    if dev {
+        return Some("is a reserved Windows device name");
+    }
+    None
+}
+
+#[cfg(test)]
+mod winname_tests {
+    use super::windows_name_problem as p;
+    #[test]
+    fn reserved_and_bad_names() {
+        for bad in ["CON", "nul", "Aux.txt", "com1", "LPT9.log", "a:b", "x?", "end.", "sp ", "q\"r", "t\u{1}"] {
+            assert!(p(bad).is_some(), "{bad}");
+        }
+        for ok in ["kitten paws", "console", "COM0", "com10", "notes.txt", "اسم", "a.b.c"] {
+            assert!(p(ok).is_none(), "{ok}");
+        }
+    }
+}

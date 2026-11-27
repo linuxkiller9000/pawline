@@ -48,6 +48,9 @@ pub struct DirectFsBackend {
     recovery_notes: Vec<String>,
 }
 
+/// A listing longer than this is cut, so one reply cannot make every redraw slow
+/// (measured: a 20k-name reply cost ~232 ms per redraw, release build).
+const MAX_LIST_SHOWN: usize = 300;
 const MAX_PICTURE: u64 = 64 * 1024 * 1024;
 
 impl DirectFsBackend {
@@ -146,20 +149,22 @@ impl DirectFsBackend {
         }
         let mut text = String::new();
         Read::take(&mut src, crate::deck::MAX_SOURCE + 1).read_to_string(&mut text).map_err(|_| PawError::Validation("the outline is not readable UTF-8 text".into()))?;
-        let (slides, _) = crate::deck::compose(&text).map_err(PawError::Validation)?;
-        self.publish_deck(&slides, to, "The outline is untouched.")
+        let rd = crate::deck::confined_image_reader(&self.root_path, from.parent().unwrap_or(&self.root_path));
+        let (slides, rep) = crate::deck::compose_with(&text, &rd).map_err(PawError::Validation)?;
+        self.publish_deck(&slides, rep.theme, to, "The outline is untouched.")
     }
 
     /// The reviewed draft text (held in memory by the UI) as a new deck: same build and no-replace publish as `deck`.
     pub fn deck_text(&self, text: &str, to: &Path) -> Result<String, PawError> {
-        let (slides, _) = crate::deck::compose(text).map_err(PawError::Validation)?;
-        self.publish_deck(&slides, to, "It was written from the draft you reviewed.")
+        let rd = crate::deck::confined_image_reader(&self.root_path, &self.root_path);
+        let (slides, rep) = crate::deck::compose_with(text, &rd).map_err(PawError::Validation)?;
+        self.publish_deck(&slides, rep.theme, to, "It was written from the draft you reviewed.")
     }
 
-    fn publish_deck(&self, slides: &[crate::deck::Slide], to: &Path, note: &str) -> Result<String, PawError> {
+    fn publish_deck(&self, slides: &[crate::deck::Slide], theme: crate::deck::Theme, to: &Path, note: &str) -> Result<String, PawError> {
         use std::io::Write;
         let rt = self.rel(to)?;
-        let bytes = crate::deck::build_pptx(slides);
+        let bytes = crate::deck::build_pptx_themed(slides, theme);
         refuse_clobber(&self.root, &rt)?;
         self.tracked("copy", self.rel_str(to)?, None, |id| {
             let nf = NewFile::create(&self.root, &rt)?;
@@ -445,7 +450,15 @@ impl ExecutionBackend for DirectFsBackend {
             Operation::CreateDir { path } => {
                 let rel = self.rel(path)?;
                 self.tracked("create_dir", self.rel_str(path)?, None, |_| {
-                    self.root.create_dir(&rel)?;
+                    self.root.create_dir(&rel).map_err(|e| match e.kind() {
+                        // Backstop: the validator already names a missing parent; a race (removed
+                        // between plan and run) still never shows a raw OS error.
+                        std::io::ErrorKind::NotFound => PawError::Validation(format!(
+                            "The folder {} does not exist yet, so nothing was created.",
+                            path.parent().map(|p| p.display().to_string()).unwrap_or_else(|| "?".into())
+                        )),
+                        _ => PawError::Exec(e.to_string()),
+                    })?;
                     Ok(((), None))
                 })?;
                 Ok(done(op, "folder created"))
@@ -461,6 +474,11 @@ impl ExecutionBackend for DirectFsBackend {
                         .map_err(|e| {
                             if e.kind() == std::io::ErrorKind::AlreadyExists {
                                 PawError::Validation(format!("{} already exists", path.display()))
+                            } else if e.kind() == std::io::ErrorKind::NotFound {
+                                PawError::Validation(format!(
+                                    "The folder {} does not exist yet, so nothing was created.",
+                                    path.parent().map(|p| p.display().to_string()).unwrap_or_else(|| "?".into())
+                                ))
                             } else {
                                 PawError::Exec(e.to_string())
                             }
@@ -511,16 +529,37 @@ impl ExecutionBackend for DirectFsBackend {
                 })?;
                 Ok(done(op, "copied (undo moves the copy to the trash)"))
             }
-            Operation::List { path } => {
+            Operation::List { path, page, contains } => {
                 let mut names = Vec::new();
                 for e in self.root.read_dir(self.rel(path)?)? {
                     names.push(e?.file_name().to_string_lossy().to_string());
                 }
                 names.sort();
+                if let Some(word) = contains {
+                    let w = word.to_lowercase();
+                    names.retain(|n| n.to_lowercase().contains(&w));
+                }
+                let total = names.len();
+                let start = (page.max(&1) - 1).saturating_mul(MAX_LIST_SHOWN);
                 Ok(OpOutcome {
                     op: op.clone(),
-                    detail: if names.is_empty() {
-                        "(empty)".into()
+                    detail: if total == 0 {
+                        if contains.is_some() { "(no names match)".into() } else { "(empty)".into() }
+                    } else if start >= total {
+                        format!("(no page {}: only {} names, {} per page)", page, total, MAX_LIST_SHOWN)
+                    } else if total > MAX_LIST_SHOWN {
+                        let end = (start + MAX_LIST_SHOWN).min(total);
+                        let pages = (total + MAX_LIST_SHOWN - 1) / MAX_LIST_SHOWN;
+                        let more = if end < total {
+                            format!(" Say \"list ... page {}\" for the next, or \"list ... containing WORD\" to filter.", page + 1)
+                        } else {
+                            String::new()
+                        };
+                        format!(
+                            "{}\n(names {}-{} of {}, page {} of {}.{})",
+                            names[start..end].join(", "),
+                            start + 1, end, total, page, pages, more
+                        )
                     } else {
                         names.join(", ")
                     },
@@ -696,6 +735,13 @@ impl NewFile {
 }
 
 fn copy_file(dir: &Dir, from: &Path, to: &Path, after_create: &dyn Fn() -> std::io::Result<()>) -> Result<(), PawError> {
+    // Refuse special files before opening: opening a FIFO for reading blocks until a writer appears.
+    // Follows links within the root (a link to a regular file copies fine). A swap between this check
+    // and the open below is still possible; closing that needs a non-blocking open (tracked gap).
+    let meta = dir.metadata(from)?;
+    if !meta.is_file() {
+        return Err(PawError::Validation(format!("{} is not a regular file, so I did not copy it. Nothing was changed.", from.display())));
+    }
     let mut src = dir.open(from)?;
     let mut dst = dir.open_with(to, cap_std::fs::OpenOptions::new().write(true).create_new(true))?;
     let mine = dst.metadata().ok().and_then(|m| crate::platform::id_cap(&m));
@@ -962,5 +1008,30 @@ mod copy_failure_tests {
         // 3: success
         copy_file(&root, Path::new("src"), Path::new("dst3"), &|| Ok(())).unwrap();
         assert_eq!(std::fs::read_to_string(d.join("dst3")).unwrap(), "SRC");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copying_a_fifo_is_refused_without_hanging() {
+        let d = std::env::temp_dir().join(format!("pawline-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let d = std::fs::canonicalize(&d).unwrap();
+        let c = std::ffi::CString::new(d.join("pipe").to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let root = Dir::open_ambient_dir(&d, cap_std::ambient_authority()).unwrap();
+        let t0 = std::time::Instant::now();
+        // direct copy of the pipe
+        let r = copy_file(&root, Path::new("pipe"), Path::new("dst"), &|| Ok(()));
+        assert!(r.is_err() && !d.join("dst").exists(), "refused, no destination left");
+        // a folder tree containing the pipe: the pipe is refused, not hung on
+        std::fs::create_dir(d.join("tree")).unwrap();
+        std::fs::write(d.join("tree/ok.txt"), "OK").unwrap();
+        let c2 = std::ffi::CString::new(d.join("tree/pipe").to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c2.as_ptr(), 0o600) }, 0);
+        let r2 = copy_tree(&root, Path::new("tree"), Path::new("tree2"));
+        assert!(r2.is_err(), "tree copy stops at the pipe");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(2), "no blocking on the pipe: {:?}", t0.elapsed());
+        // moving (rename) a pipe stays allowed: it never opens the content
     }
 }

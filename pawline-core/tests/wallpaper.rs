@@ -156,3 +156,17 @@ fn second_change_needs_no_acknowledgment() {
     let p = e.plan("set wallpaper to ~/Pictures/two.jpg").unwrap();
     assert!(!p.summary().contains("without a backup"));
 }
+
+#[test]
+fn missing_backup_explains_what_was_checked_in_plain_words() {
+    let (_root, e, _be, _log) = setup();
+    // No journal entry, and this machine has no readable wallpaper process: the refusal must say
+    // what was checked and what was found, keep the anyway path, and never leak a raw OS error.
+    let err = e.plan("set wallpaper to ~/Pictures/sunset.png").unwrap_err().to_string();
+    assert!(err.contains("I checked:"), "{err}");
+    assert!(err.contains("What I found:"), "{err}");
+    assert!(err.contains("swaybg"), "{err}");
+    assert!(err.contains("awww"), "{err}");
+    assert!(err.contains("ending with \"anyway\""), "{err}");
+    assert!(!err.contains("os error"), "{err}");
+}

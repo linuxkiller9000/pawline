@@ -173,6 +173,37 @@ fn private_marker(input: &str, chat: bool) -> bool {
     input.split_whitespace().skip(1).any(|t| t.chars().next().is_some_and(|c| c.is_uppercase()) && t != "I")
 }
 
+/// Inputs the online offer would get wrong: questions only Pawline's offline features or the user
+/// themselves can answer. Returns the plain reply to give instead of any online card.
+/// Genuine open questions ("what is a black hole") return None and keep the normal gating.
+pub fn offline_answer_instead(input: &str) -> Option<&'static str> {
+    let lower = input.trim().to_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    // About the user: Pawline keeps no personal details, and a text service cannot know these either.
+    const PERSONAL: &[&str] = &[
+        "my name", "my age", "my birthday", "my birth date", "my address", "my phone", "my ip", "my location",
+        "where do i live", "where i live", "how old am i", "who am i", "when was i born", "what do i do for a living",
+    ];
+    if PERSONAL.iter().any(|p| lower.contains(p)) {
+        return Some("That is about you: I do not keep personal details about you, and an online text service cannot know them either. Nothing was sent.");
+    }
+    // Weather about now or a day, not weather as a school topic: route to the weather feature, which
+    // needs a place and asks its own way. "what is a storm" stays a general question.
+    const WEATHER_WORDS: &[&str] = &["weather", "forecast", "rain", "raining", "rainy", "snow", "snowing", "storm", "sunny", "cloudy", "temperature", "umbrella"];
+    const WEATHER_PHRASES: &[&str] = &["hot outside", "cold outside", "hot today", "cold today", "rain tomorrow", "snow tomorrow"];
+    const WHEN_WORDS: &[&str] = &["today", "tonight", "tomorrow", "this week", "this weekend", "outside", "here", "now", "later", "will it", "is it", "does it look"];
+    let w = words(&lower);
+    let weatherish = WEATHER_WORDS.iter().any(|x| w.iter().any(|t| t == x)) || WEATHER_PHRASES.iter().any(|p| lower.contains(p));
+    // "umbrella"/"jacket" advice is by nature about the weather right now.
+    let implies_now = w.iter().any(|t| t == "umbrella" || t == "jacket");
+    if weatherish && (implies_now || WHEN_WORDS.iter().any(|w| lower.contains(w))) {
+        return Some("That sounds like a weather question. I check the weather once you name a place, like \"weather in cairo\" (it uses Open-Meteo online, and asks you first). Nothing was sent.");
+    }
+    None
+}
+
 pub fn classify(input: &str) -> Class {
     let t = input.trim();
     if t.is_empty() {
@@ -437,6 +468,37 @@ pub fn chat(http: &dyn Http, provider: &crate::providers::ChatProvider, context:
         ))),
         413 => Err(PawError::Exec(format!("{} said the chat was too long (HTTP 413). Say \"forget our chat\" and try again.", provider.name))),
         s => Err(PawError::Exec(format!("{} answered HTTP {s}; no answer.", provider.name))),
+    }
+}
+
+#[cfg(test)]
+mod offline_instead_tests {
+    use super::offline_answer_instead as f;
+
+    #[test]
+    fn personal_questions_get_plain_reply() {
+        for q in ["what is my name", "how old am i", "where do i live", "what is my ip", "who am i", "when was i born?"] {
+            let m = f(q).unwrap_or_else(|| panic!("{q} should be answered offline"));
+            assert!(m.contains("Nothing was sent"), "{q}: {m}");
+        }
+    }
+
+    #[test]
+    fn immediate_weather_routes_to_weather_feature() {
+        for q in ["will it rain tomorrow", "is it hot outside today", "do i need an umbrella", "what is the weather like here"] {
+            let m = f(q).unwrap_or_else(|| panic!("{q} should route to weather"));
+            assert!(m.contains("weather in cairo"), "{q}: {m}");
+        }
+    }
+
+    #[test]
+    fn genuine_open_questions_still_reach_online_gating() {
+        for q in ["what is a black hole", "what is a storm", "why is the sky blue", "what is linux", "how does rain form"] {
+            assert!(f(q).is_none(), "{q} must stay on the normal online-gating path");
+        }
+        // weather words without a when/personal angle stay general
+        assert!(f("what is a forecast").is_none());
+        assert!(f("explain rain").is_none());
     }
 }
 
