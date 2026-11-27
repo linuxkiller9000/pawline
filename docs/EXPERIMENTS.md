@@ -915,7 +915,10 @@ part placed **before** the question text, the `[image]` prefix is shared:
 | fourth question, same screenshot | 10 | 138 | 0.38 s |
 
 Text first (what pawline sent until now) shares nothing: the same second
-question costs 7.24 s with `cache_n=0`. A prefill request carrying only the image
+question costs 7.24 s with `cache_n=0`. Re-measured through `tools/dell_bench.sh`'s
+probe shape on the same crop: image-first 6.63 s then 0.30 s and 0.24 s;
+text-first 6.78 s and 6.81 s on two different questions about one screenshot, so
+the old ordering paid the full encode on every question. A prefill request carrying only the image
 and a "." costs 7.06 s once, after which every real question is 0.15-0.35 s, so
 the encode can be paid while the user is still finishing a sentence.
 

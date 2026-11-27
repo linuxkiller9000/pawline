@@ -44,9 +44,12 @@ done
 # no server answers.
 echo "== vision timing (optional) ==" >> "$OUT"
 VISION_URL="${VISION_URL:-http://127.0.0.1:8080}"
-if ! curl -fsS -m 2 "$VISION_URL/health" >/dev/null 2>&1; then
+# Check /props, not /health: other local services answer /health with a 200,
+# and a probe pointed at one of those used to report "FAILED" instead of
+# "skipped". llama.cpp's server is the one that reports a model_path.
+if ! curl -fsS -m 2 "$VISION_URL/props" 2>/dev/null | grep -q '"model_path"'; then
     {
-    echo "skipped: no llama-server at $VISION_URL"
+    echo "skipped: nothing that looks like llama-server at $VISION_URL"
     echo "  to run: llama-server -m <SmolVLM GGUF> --mmproj <mmproj GGUF> -c 4096"
     echo "  then re-run this script (set VISION_URL=http://host:port if not :8080)"
     } >> "$OUT"
