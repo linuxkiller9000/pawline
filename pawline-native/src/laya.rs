@@ -62,7 +62,7 @@ const FAMILIES: &[(&str, &[&str])] = &[
     (r"\b(calculat|solve|equation|plus|minus|times|divided|math|percent)\w*|\bhow (much|many)\b|\d\s*[-+*/^=]\s*\d|\d+x", &["math"]),
     (r"\b(what|why|how|who|explain|mean|means|meaning|is a|are a)\b|\blook ?up\b|\btell me about\b", &["search", "chat_about_words"]),
     (r"\b(remind|remember|forget|nudge)\w*", &["remind"]),
-    (r"\b(volume|sound|hear|loud\w*|quiet|mute|muting|deaf)\b", &["volume"]),
+    (r"\b(volume|sound|hear|loud\w*|quiet\w*|mute\w*|deaf)\b", &["volume"]),
     (r"\b(help|examples|what can you do|use this|how do i use)\b", &["help"]),
 ];
 

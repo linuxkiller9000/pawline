@@ -39,7 +39,7 @@ const FAMILIES: &[(&str, &[&str])] = &[
     (r"\b(calculat|solve|equation|plus|minus|times|divided|math|percent)\w*|\bhow (much|many)\b|\d\s*[-+*/^=]\s*\d|\d+x", &["math"]),
     (r"\b(what|why|how|who|explain|mean|means|meaning|is a|are a)\b|\blook ?up\b|\btell me about\b", &["search", "chat_about_words"]),
     (r"\b(remind|remember|forget|nudge)\w*", &["remind"]),
-    (r"\b(volume|sound|hear|loud\w*|quiet|mute|muting|deaf)\b", &["volume"]),
+    (r"\b(volume|sound|hear|loud\w*|quiet\w*|mute\w*|deaf)\b", &["volume"]),
     (r"\b(help|examples|what can you do|use this|how do i use)\b", &["help"]),
 ];
 
@@ -168,6 +168,31 @@ fn main() {
         ("she reminded me of my grandmother", "__none__"),
         ("the search for the missing hiker continues", "__none__"),
         ("he opened up about his feelings", "__none__"),
+        // second extension: margin firming for the 0.96 threshold
+        ("create a folder for my invoices", "make_folder"),
+        ("delete these screenshots", "delete"),
+        ("rename this to vacation.jpg", "rename"),
+        ("what files are in my documents", "list_files"),
+        ("start the terminal", "open_app"),
+        ("run spotify", "open_app"),
+        ("is it windy outside", "weather"),
+        ("how warm is it today", "weather"),
+        ("temperature in london tomorrow", "weather"),
+        ("what is 20 percent of 50", "math"),
+        ("how much is 9 times 6", "math"),
+        ("tell me about the roman empire", "search"),
+        ("look up the population of tokyo", "search"),
+        ("remind me about the dentist tomorrow", "remind"),
+        ("make it quieter", "volume"),
+        ("my math teacher is strict", "__none__"),
+        ("the battery is at 20 percent", "__none__"),
+        ("i looked up and saw a plane", "__none__"),
+        ("the calculator app icon is ugly", "__none__"),
+        ("the door is open", "__none__"),
+        ("she has a loud personality", "__none__"),
+        ("the storm in the book was intense", "__none__"),
+        ("i remember my first day of school", "__none__"),
+        ("how many people came to the party", "__none__"),
     ];
 
     let mut pass = 0;

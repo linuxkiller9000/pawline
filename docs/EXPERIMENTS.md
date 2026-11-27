@@ -244,6 +244,24 @@ empty-window fast path (29 ms chatter answers, p=0.000 rows) is still
 deliberately kept: falling back to all intents there would cost chatter
 latency and re-introduce false-positive risk; revisit only with data.
 
+Bigger battery (66 messages: the 42 above + 15 harder paraphrase
+positives + 9 adversarial none-cases, same harness, measured live at
+0.96/0.96): 61/66 with ZERO false positives. One failure was a narrow()
+miss ("quieter" did not match quiet\b; fixed by widening to quiet\w*/
+mute\w*, verified passing at p=0.973). The other 5 are threshold-side
+misses: real commands scoring under 0.96 ("what files are in my
+documents" 0.626, "start the terminal" 0.957, "run spotify" 0.781, "tell
+me about the roman empire" 0.830, "look up the population of tokyo"
+0.921). Measured finding: the true-positive and false-positive bands
+overlap - "start the terminal" scores 0.957 while the worst false
+positive ("i deleted my ex's playlist yesterday") scores 0.954 - so no
+single threshold separates them. 0.96 buys zero false positives at the
+cost of rejecting some genuine paraphrases (they fall through to normal
+chat, no wrong card offered), which matches the refuse-rather-than-guess
+design. Per-intent thresholds (e.g. a lower bar for open_app, which has
+no observed false positives) are a possible follow-up but data-starved
+at 66 messages; not applied.
+
 Caveat on speed: per-message routing in this sandbox takes 3.5-6 s
 (fp32, tract, 2 GB RAM VM). That is a sandbox floor, not a Dell number;
 tools/dell_bench.sh is where the real timing comes from. A sub-second Dell
