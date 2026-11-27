@@ -79,3 +79,15 @@ Three fixes the notebook needed that the sandbox did not surface:
   `AutoModelForImageTextToText` - same class, new name.
 - The free T4 has no bf16. Load the base in fp16 (`dtype=torch.float16`) and
   set `fp16=True` in `SFTConfig`. bf16 errors or falls back to fp32 and OOMs.
+
+## Light Colab config (after the free session stalled)
+
+The first free-T4 run stalled at step 3 of 375 and disconnected. The notebook
+now runs a light config: 448px images (`_small()` in the data cell), ~3000 rows
+(1500 ScreenQA + 1500 synthetic), `dataloader_num_workers=2`, checkpoints every
+100 steps with `save_total_limit=2`. Two crashes fixed along the way:
+
+- `datasets.Image()` cast on both sides before `concatenate_datasets`; a
+  mismatched image feature type breaks the concat.
+- the fp16 GradScaler crash: trainable LoRA params are cast to fp32 after the
+  trainer is built, while the frozen base stays fp16.

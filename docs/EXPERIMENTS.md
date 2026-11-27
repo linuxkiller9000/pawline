@@ -349,7 +349,7 @@ eval2, 86 questions:
 | OCR hybrid | 29/86 | 1.4 | 793 |
 | stock 256M @960px | 13/86 | 9.7 | 534 |
 | stock 256M + crop + candidates + grammar | 36/86 | 16.2 | 539 |
-| stock 500M @960px | see note | - | - |
+| stock 500M @960px | 19/86 | 18.5 | 930 |
 
 | family | stock 256M | +crop+cand+gram | router |
 |--------|-----------|-----------------|--------|
@@ -384,6 +384,28 @@ Four findings:
    dot and a window progress bar), because those ask for colour in pixels that
    neither metadata nor OCR carries. It says so instead of guessing. OCR hybrid
    on eval3: 24/100.
+
+5. Stock 500M is better than 256M (19/86 vs 13/86) and the best of the stock
+   sizes on presence (6/8) and count (3/8), but it costs 18.5 s/question and
+   930 MiB, and it is still 0/8 on refusal, colour, focus and app. It does not
+   change the conclusion: the router beats it by 65 questions for a fraction of
+   the time and memory.
+
+The two genuinely visual families (eval3: top-bar status dot, window progress
+bar), 16 questions:
+
+| method | visual families |
+|--------|-----------------|
+| router | 0/16 (refuses, by design) |
+| OCR hybrid | 5/16 |
+| stock 256M | 5/16 |
+| stock 256M + crop + candidates + grammar | 6/16 |
+
+With eight possible colours, chance is 2/16. Every path is near chance and none
+of them knows it, which is why the router refuses: a colour question about a
+pixel it never looked at is exactly the question that produces a confident wrong
+answer. These families are what a trained fork is for, and they are the reason
+the Colab run is still worth one more attempt.
 
 Caveats: every timing here is this sandbox (1 vCPU, 2 GB), not the N5010. The
 router's window metadata comes from `scene_meta.py`, which supplies the same
