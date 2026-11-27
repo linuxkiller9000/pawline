@@ -267,7 +267,7 @@ pub fn generate(
 /// ends (an abandoned request still counts). Pollinations Classic also asks for
 /// at least 45 s between requests; asking sooner just earns a 402.
 pub struct Guard {
-    state: std::sync::Mutex<[(bool, Option<Instant>); 2]>,
+    state: std::sync::Mutex<[(bool, Option<Instant>); 3]>,
 }
 pub struct Ticket<'a> {
     guard: &'a Guard,
@@ -288,7 +288,7 @@ impl Drop for Ticket<'_> {
 pub const POLLINATIONS_SPACING: Duration = Duration::from_secs(45);
 impl Guard {
     pub const fn new() -> Self {
-        Guard { state: std::sync::Mutex::new([(false, None), (false, None)]) }
+        Guard { state: std::sync::Mutex::new([(false, None), (false, None), (false, None)]) }
     }
     pub fn begin(&self, provider: ImageProvider, now: Instant) -> Result<Ticket<'_>, PawError> {
         let slot = match provider { ImageProvider::Pollinations => 0, ImageProvider::Horde => 1 };
@@ -297,6 +297,25 @@ impl Guard {
             return Err(PawError::Exec(format!("An earlier {} request is still running (even if you cancelled it). I send one at a time. Try again in a moment; nothing was sent.", provider.label())));
         }
         if provider == ImageProvider::Pollinations {
+            if let Some(t) = s[slot].1 {
+                let since = now.saturating_duration_since(t);
+                if since < POLLINATIONS_SPACING {
+                    return Err(PawError::Exec(format!("Pollinations asks for about {} seconds between free requests. Try again in {} seconds; nothing was sent.", POLLINATIONS_SPACING.as_secs(), (POLLINATIONS_SPACING - since).as_secs() + 1)));
+                }
+            }
+        }
+        s[slot] = (true, Some(now));
+        Ok(Ticket { guard: self, slot })
+    }
+    /// One chat request at a time. Pollinations keeps the 45-second free-tier
+    /// spacing; a local provider on this computer has no such budget.
+    pub fn begin_chat(&self, local: bool, now: Instant) -> Result<Ticket<'_>, PawError> {
+        let slot = 2;
+        let mut s = self.state.lock().map_err(|_| PawError::Exec("internal lock problem".into()))?;
+        if s[slot].0 {
+            return Err(PawError::Exec("An earlier chat request is still running (even if you cancelled it). I send one at a time. Try again in a moment; nothing was sent.".into()));
+        }
+        if !local {
             if let Some(t) = s[slot].1 {
                 let since = now.saturating_duration_since(t);
                 if since < POLLINATIONS_SPACING {

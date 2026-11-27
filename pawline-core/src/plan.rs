@@ -91,7 +91,7 @@ pub enum Operation {
     /// Send one question to Pollinations text. Shown only, never run. Always confirmed when it comes from here.
     AskOnline { text: String },
     /// One online chat turn: `context` = earlier lines of THIS session (alternating you / assistant, oldest first), `text` = the new message.
-    ChatOnline { context: Vec<String>, text: String },
+    ChatOnline { provider: crate::providers::ProviderSpec, context: Vec<String>, text: String },
 }
 
 impl Operation {
@@ -128,17 +128,31 @@ impl Operation {
             Operation::AskOnline { text } => format!(
                 "Ask Pollinations (online) \"{text}\": this is the free \"Classic\" service: no account, best effort, about one request per 45 seconds per IP address. Pawline puts your question text in the web address it requests from text.pollinations.ai, plus the usual web details (your IP address, a \"Pawline\" user-agent). Pollinations says the same address returns the same cached answer to anyone who has it. Pawline does not send your files, chat history or location. What Pollinations keeps is its own policy. Do not put passwords, secrets or private information in this question. The answer is only shown, never run, and may be wrong."
             ),
-            Operation::ChatOnline { context, text } => {
+            Operation::ChatOnline { provider, context, text } => {
                 let mut lines = vec![format!("  system: {}", crate::textfallback::CHAT_SYSTEM)];
                 for (i, c) in context.iter().enumerate() {
                     lines.push(format!("  {}: {c}", if i % 2 == 0 { "user" } else { "assistant (an earlier answer)" }));
                 }
                 lines.push(format!("  user: {text}"));
+                let destination = if provider.local {
+                    format!(
+                        "The request goes to {} on this computer (loopback only): your text does not leave the machine. The runner is a separate program; its own downloads, updates or telemetry are its settings, not Pawline's.",
+                        provider.url
+                    )
+                } else {
+                    format!(
+                        "The request also carries the usual web details (your IP address, a \"Pawline\" user-agent, no cookies, no account). Free \"Classic\" tier: best effort, one request per 45 seconds per IP address. What Pollinations says in its privacy policy (updated 2026-11-17): prompts are processed transiently and not used to train models without opt-in; replies may be cached for up to about 30 days; free usage logs keep a keyed hash and network prefix of the IP address, the country and timestamps; the service is for people 16 or older; some data may reach its service providers."
+                    )
+                };
                 format!(
-                    "Online chat turn. Pawline will POST one JSON body to https://text.pollinations.ai/openai with two fields: model = \"openai\", and messages = the lines below (their text is sent word for word; JSON adds only quotes and escapes). Nothing else is in the body. The request also carries the usual web details (your IP address, a \"Pawline\" user-agent, no cookies, no account). Earlier lines of this session sent along: {} (memory only, cut to {} characters each).\n{}\nNever sent: your files, location or saved history. Free \"Classic\" tier: best effort, one request per 45 seconds per IP address. What Pollinations says in its privacy policy (updated 2026-11-17): prompts are processed transiently and not used to train models without opt-in; replies may be cached for up to about 30 days; free usage logs keep a keyed hash and network prefix of the IP address, the country and timestamps; the service is for people 16 or older; some data may reach its service providers. Do not put passwords or private information in the chat. The answer is only shown, never run, and is AI-written text that may be wrong. Say \"chat off\" or \"forget our chat\" to end it.",
+                    "Chat turn with {}. Pawline will POST one JSON body to {} with two fields: model = \"{}\", and messages = the lines below (their text is sent word for word; JSON adds only quotes and escapes). Nothing else is in the body. Earlier lines of this session sent along: {} (memory only, cut to {} characters each).\n{}\n{}\nNever sent: your files, location or saved history. Do not put passwords or private information in the chat. The answer is only shown, never run, and is AI-written text that may be wrong. Say \"chat off\" or \"forget our chat\" to end it.",
+                    provider.name,
+                    provider.url,
+                    provider.model,
                     context.len(),
                     crate::textfallback::CHAT_LINE_CHARS,
-                    lines.join("\n")
+                    lines.join("\n"),
+                    destination
                 )
             }
             Operation::Search { engine, query } => match engine {

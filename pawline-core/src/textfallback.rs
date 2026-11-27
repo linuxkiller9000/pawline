@@ -279,7 +279,9 @@ pub fn chat_block_reason(text: &str) -> Option<&'static str> {
 pub fn chat_clip(s: &str) -> String { s.chars().take(CHAT_LINE_CHARS).collect() }
 
 /// One chat turn: POST the exact messages shown on the card. Nothing else is sent.
-pub fn chat(http: &dyn Http, context: &[String], text: &str, cancelled: &dyn Fn() -> bool, commit: &dyn Fn() -> bool) -> Result<String, PawError> {
+/// The provider (chosen with "use ollama model ..." etc., default Pollinations)
+/// decides the endpoint, the model name and whether text leaves the machine.
+pub fn chat(http: &dyn Http, provider: &crate::providers::ChatProvider, context: &[String], text: &str, cancelled: &dyn Fn() -> bool, commit: &dyn Fn() -> bool) -> Result<String, PawError> {
     if let Some(why) = chat_block_reason(text) {
         return Err(PawError::Validation(format!("I did not send that: it {why}. Nothing was sent.")));
     }
@@ -288,10 +290,10 @@ pub fn chat(http: &dyn Http, context: &[String], text: &str, cancelled: &dyn Fn(
         msgs.push(serde_json::json!({"role": if i % 2 == 0 { "user" } else { "assistant" }, "content": chat_clip(c)}));
     }
     msgs.push(serde_json::json!({"role": "user", "content": text.trim()}));
-    let body = serde_json::json!({"model": "openai", "messages": msgs}).to_string();
-    let r = http.post("https://text.pollinations.ai/openai", &[], &body).map_err(|_| {
-        PawError::Exec("Pollinations could not be reached (offline, or the service is down). There is no answer, and Pawline did not retry. Offline help and commands still work; try again later or say \"chat off\".".into())
-    })?;
+    let body = serde_json::json!({"model": provider.model, "messages": msgs}).to_string();
+    let owned = provider.headers();
+    let headers: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let r = http.post(&provider.url, &headers, &body).map_err(|_| provider.unreachable_error())?;
     if cancelled() || !commit() {
         return Err(PawError::Exec("Cancelled. Nothing was kept, and a late answer will be discarded.".into()));
     }
@@ -301,23 +303,28 @@ pub fn chat(http: &dyn Http, context: &[String], text: &str, cancelled: &dyn Fn(
             let content = serde_json::from_str::<serde_json::Value>(&raw)
                 .ok()
                 .and_then(|v| v["choices"][0]["message"]["content"].as_str().map(|s| s.to_string()))
-                .ok_or_else(|| PawError::Exec("Pollinations sent a reply Pawline could not read; no answer.".into()))?;
+                .ok_or_else(|| PawError::Exec(format!("{} sent a reply Pawline could not read; no answer.", provider.name)))?;
             let clean: String = content.chars().filter(|c| !c.is_control() || *c == '\n').collect();
             let clean = clean.trim();
             if clean.is_empty() {
-                return Err(PawError::Exec("Pollinations sent an empty answer.".into()));
+                return Err(PawError::Exec(format!("{} sent an empty answer.", provider.name)));
             }
             let n = clean.chars().count();
             let shown: String = clean.chars().take(MAX_ANSWER_CHARS).collect();
             Ok(if n > MAX_ANSWER_CHARS { format!("{shown}\n(shortened: {n} characters received)") } else { shown })
         }
         402 | 429 => Err(PawError::Exec(format!(
-            "Pollinations said its free limit is reached right now (HTTP {}).{} I never pay or upgrade, so there is no answer.",
+            "{} said its free limit is reached right now (HTTP {}).{} I never pay or upgrade, so there is no answer.",
+            provider.name,
             r.status,
             r.retry_after.map(|s| format!(" Try again in about {s} seconds.")).unwrap_or_default()
         ))),
-        413 => Err(PawError::Exec("Pollinations said the chat was too long (HTTP 413). Say \"forget our chat\" and try again.".into())),
-        s => Err(PawError::Exec(format!("Pollinations answered HTTP {s}; no answer."))),
+        404 if provider.local => Err(PawError::Exec(format!(
+            "{} answered HTTP 404: the model \"{}\" is probably not loaded on the server (with Ollama, pull it first; with llama-server or LM Studio, load it there). Nothing was sent.",
+            provider.name, provider.model
+        ))),
+        413 => Err(PawError::Exec(format!("{} said the chat was too long (HTTP 413). Say \"forget our chat\" and try again.", provider.name))),
+        s => Err(PawError::Exec(format!("{} answered HTTP {s}; no answer.", provider.name))),
     }
 }
 
@@ -452,13 +459,15 @@ mod tests {
         struct P<'a>(&'a std::cell::RefCell<Vec<String>>, u16);
         impl Http for P<'_> {
             fn get(&self, u: &str, _: &[(&str, &str)]) -> Result<HttpReply, PawError> { self.0.borrow_mut().push(format!("GET {u}")); Err(PawError::Exec("no".into())) }
-            fn post(&self, u: &str, _: &[(&str, &str)], b: &str) -> Result<HttpReply, PawError> {
-                self.0.borrow_mut().push(format!("POST {u} {b}"));
+            fn post(&self, u: &str, h: &[(&str, &str)], b: &str) -> Result<HttpReply, PawError> {
+                let hs: Vec<String> = h.iter().map(|(k, v)| format!("{k}: {v}")).collect();
+                self.0.borrow_mut().push(format!("POST {u} [{hs}] {b}", hs = hs.join(", ")));
                 Ok(HttpReply { status: self.1, retry_after: None, content_type: String::new(), body: br#"{"choices":[{"message":{"content":"Hi there"}}]}"#.to_vec() })
             }
         }
+        let prov = crate::providers::ChatProvider::pollinations();
         let ctx = vec!["hello".to_string(), "hi".to_string()];
-        let r = chat(&P(&seen, 200), &ctx, "how are you today", &|| false, &|| true).unwrap();
+        let r = chat(&P(&seen, 200), &prov, &ctx, "how are you today", &|| false, &|| true).unwrap();
         assert_eq!(r, "Hi there");
         let s = seen.borrow();
         assert_eq!(s.len(), 1);
@@ -466,13 +475,53 @@ mod tests {
         drop(s);
         for bad in ["my password is hunter2", "read ~/notes.txt to me", "delete the folder kp", "email bob@example.com", &"x".repeat(301)] {
             let before = seen.borrow().len();
-            assert!(chat(&P(&seen, 200), &[], bad, &|| false, &|| true).is_err(), "{bad}");
+            assert!(chat(&P(&seen, 200), &prov, &[], bad, &|| false, &|| true).is_err(), "{bad}");
             assert_eq!(seen.borrow().len(), before, "nothing sent for {bad}");
         }
-        assert!(chat(&P(&seen, 402), &[], "tell me more", &|| false, &|| true).is_err());
+        assert!(chat(&P(&seen, 402), &prov, &[], "tell me more", &|| false, &|| true).is_err());
         let n = seen.borrow().len();
-        assert!(chat(&P(&seen, 200), &[], "tell me more", &|| true, &|| true).is_err());
+        assert!(chat(&P(&seen, 200), &prov, &[], "tell me more", &|| true, &|| true).is_err());
         assert_eq!(seen.borrow().len(), n + 1);
+    }
+
+    #[test]
+    fn chat_uses_the_configured_provider_endpoint_model_and_key() {
+        let seen = std::cell::RefCell::new(vec![]);
+        struct P<'a>(&'a std::cell::RefCell<Vec<String>>, u16);
+        impl Http for P<'_> {
+            fn get(&self, u: &str, _: &[(&str, &str)]) -> Result<HttpReply, PawError> { self.0.borrow_mut().push(format!("GET {u}")); Err(PawError::Exec("no".into())) }
+            fn post(&self, u: &str, h: &[(&str, &str)], b: &str) -> Result<HttpReply, PawError> {
+                let hs: Vec<String> = h.iter().map(|(k, v)| format!("{k}: {v}")).collect();
+                self.0.borrow_mut().push(format!("POST {u} [{hs}] {b}", hs = hs.join(", ")));
+                Ok(HttpReply { status: self.1, retry_after: None, content_type: String::new(), body: br#"{"choices":[{"message":{"content":"local hi"}}]}"#.to_vec() })
+            }
+        }
+        // Ollama on this machine: loopback URL, chosen model in the body, no key header.
+        let prov = crate::providers::ChatProvider::ollama("llama3.2");
+        let r = chat(&P(&seen, 200), &prov, &[], "hi there", &|| false, &|| true).unwrap();
+        assert_eq!(r, "local hi");
+        let s = seen.borrow();
+        assert!(s[0].starts_with("POST http://127.0.0.1:11434/v1/chat/completions "), "{}", s[0]);
+        assert!(s[0].contains(r#""model":"llama3.2""#), "{}", s[0]);
+        assert!(!s[0].contains("Authorization"), "no key configured, no auth header: {}", s[0]);
+        drop(s);
+        // A keyed custom endpoint sends the key in the header and nowhere else.
+        let prov = crate::providers::ChatProvider::openai_compatible("Hosted", "https://llm.example.com", "m", Some("sk-secret-999".into()));
+        let _ = chat(&P(&seen, 200), &prov, &[], "hi there", &|| false, &|| true).unwrap();
+        let s = seen.borrow();
+        assert!(s[1].contains("Authorization: Bearer sk-secret-999"), "{}", s[1]);
+        assert!(s[1].starts_with("POST https://llm.example.com/v1/chat/completions "), "{}", s[1]);
+        drop(s);
+        // Local 404 names the missing model; unreachable local server names the endpoint.
+        let e = chat(&P(&seen, 404), &crate::providers::ChatProvider::ollama("llama3.2"), &[], "hi there", &|| false, &|| true).unwrap_err().to_string();
+        assert!(e.contains("llama3.2") && e.contains("not loaded"), "{e}");
+        struct Down;
+        impl Http for Down {
+            fn get(&self, _: &str, _: &[(&str, &str)]) -> Result<HttpReply, PawError> { Err(PawError::Exec("no".into())) }
+            fn post(&self, _: &str, _: &[(&str, &str)], _: &str) -> Result<HttpReply, PawError> { Err(PawError::Exec("connection refused".into())) }
+        }
+        let e = chat(&Down, &crate::providers::ChatProvider::ollama("llama3.2"), &[], "hi there", &|| false, &|| true).unwrap_err().to_string();
+        assert!(e.contains("probably not running") && e.contains("11434"), "{e}");
     }
 
     /// Written after the filter, not used to tune it: ordinary chat must be offered, private or command-like text must not.

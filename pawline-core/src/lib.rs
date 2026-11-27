@@ -24,6 +24,7 @@ pub mod organize;
 pub mod plan;
 pub mod platform;
 pub mod planmem;
+pub mod providers;
 pub mod search;
 pub mod shrink;
 pub mod searchmem;

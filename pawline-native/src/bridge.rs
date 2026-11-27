@@ -24,9 +24,16 @@ fn run_cancellable<T: Send + 'static>(
     provider: pawline_core::imagegen::ImageProvider,
     job: impl FnOnce(&dyn Fn() -> bool, &dyn Fn() -> bool) -> Result<T, PawError> + Send + 'static,
 ) -> Result<T, PawError> {
+    let ticket = pawline_core::imagegen::GUARD.begin(provider, std::time::Instant::now())?;
+    run_cancellable_with(ticket, job)
+}
+
+fn run_cancellable_with<T: Send + 'static>(
+    ticket: pawline_core::imagegen::Ticket<'_>,
+    job: impl FnOnce(&dyn Fn() -> bool, &dyn Fn() -> bool) -> Result<T, PawError> + Send + 'static,
+) -> Result<T, PawError> {
     use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
     use std::sync::Arc;
-    let ticket = pawline_core::imagegen::GUARD.begin(provider, std::time::Instant::now())?;
     let my = GEN.fetch_add(1, SeqCst) + 1;
     // 0 running, 1 cancelled, 2 committed.
     let state = Arc::new(AtomicU8::new(0));
@@ -52,14 +59,35 @@ fn run_cancellable<T: Send + 'static>(
 
 static LAST_CHAT_ANSWER: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-fn chat_online(context: &[String], text: &str) -> Result<String, PawError> {
+/// The chat provider as configured right now (falls back to Pollinations).
+fn current_chat_provider() -> pawline_core::providers::ChatProvider {
+    match pawline_core::providers::config_path() {
+        Some(p) => pawline_core::providers::load(&p),
+        None => pawline_core::providers::ChatProvider::pollinations(),
+    }
+}
+
+fn chat_online(spec: &pawline_core::providers::ProviderSpec, context: &[String], text: &str) -> Result<String, PawError> {
+    // The card the user confirmed named a provider; re-read the config and
+    // refuse if it changed since, so a quiet switch never re-aims a confirmed send.
+    let provider = current_chat_provider();
+    let now = provider.spec();
+    if now.name != spec.name || now.url != spec.url || now.model != spec.model {
+        return Err(PawError::Exec(format!(
+            "The chat provider changed since you confirmed that card (it is now {}, model \"{}\", at {}). Nothing was sent. Ask again to see a fresh card.",
+            now.name, now.model, now.url
+        )));
+    }
     let (c, q) = (context.to_vec(), text.to_string());
-    let a = run_cancellable(pawline_core::imagegen::ImageProvider::Pollinations, move |cancelled, commit| {
+    let local = provider.local;
+    let label = provider.answer_label();
+    let ticket = pawline_core::imagegen::GUARD.begin_chat(local, std::time::Instant::now())?;
+    let a = run_cancellable_with(ticket, move |cancelled, commit| {
         let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(60));
-        pawline_core::textfallback::chat(&http, &c, &q, cancelled, commit)
+        pawline_core::textfallback::chat(&http, &provider, &c, &q, cancelled, commit)
     })?;
     *LAST_CHAT_ANSWER.lock().unwrap() = Some(a.clone());
-    Ok(format!("Pollinations chat (online, not checked, may be wrong):\n{a}"))
+    Ok(format!("{label}:\n{a}"))
 }
 
 fn ask_online(text: &str) -> Result<String, PawError> {
@@ -115,7 +143,7 @@ fn online_md(ops: &[OpOutcome]) -> Option<String> {
         let (head, body) = match &o.op {
             O::Search { engine: SearchEngine::Wiki, .. } => ("Wikipedia (online)".to_string(), o.detail.clone()),
             O::Search { .. } => ("Web instant answer (online, may be out of date)".to_string(), o.detail.clone()),
-            O::ChatOnline { .. } => ("Pollinations chat reply (online, AI-written, not checked, may be wrong)".to_string(), o.detail.split_once('\n').map(|x| x.1.to_string()).unwrap_or_else(|| o.detail.clone())),
+            O::ChatOnline { provider, .. } => (format!("{} chat reply ({}, AI-written, not checked, may be wrong)", provider.name, if provider.local { "on this computer" } else { "online" }), o.detail.split_once('\n').map(|x| x.1.to_string()).unwrap_or_else(|| o.detail.clone())),
             O::AskOnline { .. } => ("Pollinations answer (online, not checked, may be wrong)".to_string(), o.detail.split_once('\n').map(|x| x.1.to_string()).unwrap_or_else(|| o.detail.clone())),
             _ => return None,
         };
@@ -180,8 +208,8 @@ impl ExecutionBackend for UiBackend {
             })?;
             return Ok(OpOutcome { op: op.clone(), detail: format!("Saved {}", path.display()) });
         }
-        if let Operation::ChatOnline { context, text } = op {
-            return Ok(OpOutcome { op: op.clone(), detail: chat_online(context, text)? });
+        if let Operation::ChatOnline { provider, context, text } = op {
+            return Ok(OpOutcome { op: op.clone(), detail: chat_online(provider, context, text)? });
         }
         if let Operation::AskOnline { text } = op {
             return Ok(OpOutcome { op: op.clone(), detail: ask_online(text)? });
@@ -398,13 +426,43 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
         }
         if matches!(low, "chat online" | "start online chat" | "turn on online chat" | "online chat" | "chat online on") {
             state.online_chat = true;
-            return reply("message", format!("Online chat is ON for this session only. Nothing was sent. Commands and offline help still run first and locally. When something is not a command, I will show you a card with the exact messages (up to {} earlier lines of this session, kept in memory only) before anything goes to text.pollinations.ai (free, no account, your IP address is visible, one request per 45 seconds). Your files, location and saved history are never sent; texts with paths, addresses, long numbers, file names, passwords or other credentials are not offered. Replies are AI-written and may be wrong. Say \"chat off\" to stop or \"forget our chat\" to clear the lines.", pawline_core::textfallback::CHAT_CONTEXT_LINES));
+            let provider = current_chat_provider();
+            return reply("message", format!("Online chat is ON for this session only. Nothing was sent. Commands and offline help still run first and locally. When something is not a command, I will show you a card with the exact messages (up to {} earlier lines of this session, kept in memory only) before anything goes out. {} Your files, location and saved history are never sent; texts with paths, addresses, long numbers, file names, passwords or other credentials are not offered. Replies are AI-written and may be wrong. Say \"chat off\" to stop, \"forget our chat\" to clear the lines, or \"chat provider\" to change where answers come from.", pawline_core::textfallback::CHAT_CONTEXT_LINES, provider.destination_line()));
         }
         if matches!(low, "chat off" | "stop online chat" | "turn off online chat" | "chat offline" | "online chat off") {
             state.online_chat = false;
             state.online_ctx.clear();
             state.online_pending = None;
             return reply("message", "Online chat is OFF and its lines are cleared. Nothing was sent.".into());
+        }
+        if matches!(low, "chat provider" | "which chat provider" | "chat provider status" | "what chat provider") {
+            return reply("message", pawline_core::providers::status_text(&current_chat_provider()));
+        }
+        if low == "use pollinations" || low.starts_with("use ollama ") || low.starts_with("use llama.cpp ") || low.starts_with("use lm studio ") {
+            let (provider, ty) = if low == "use pollinations" {
+                (pawline_core::providers::ChatProvider::pollinations(), "pollinations")
+            } else if let Some(rest) = low.strip_prefix("use ollama ") {
+                let m = rest.strip_prefix("model ").unwrap_or(rest).trim();
+                (pawline_core::providers::ChatProvider::ollama(m), "ollama")
+            } else if let Some(rest) = low.strip_prefix("use llama.cpp ") {
+                let m = rest.strip_prefix("model ").unwrap_or(rest).trim();
+                (pawline_core::providers::ChatProvider::llama_cpp(m), "llama.cpp")
+            } else {
+                let rest = low.strip_prefix("use lm studio ").unwrap_or("");
+                let m = rest.strip_prefix("model ").unwrap_or(rest).trim();
+                (pawline_core::providers::ChatProvider::lm_studio(m), "lmstudio")
+            };
+            if ty != "pollinations" && (provider.model.is_empty() || provider.model.chars().any(char::is_whitespace) || provider.model.len() > 80) {
+                return reply("message", format!("I need one model name, no spaces, for example: \"use {} model llama3.2\". Nothing changed.", ty));
+            }
+            let path = match pawline_core::providers::config_path() {
+                Some(p) => p,
+                None => return reply("message", "I could not work out where to save the setting on this computer, so nothing changed.".into()),
+            };
+            return match pawline_core::providers::save(&path, &provider, ty) {
+                Ok(()) => reply("message", format!("Saved (in {}, owner-only). {}\nNothing was sent; the next chat card will show this provider before anything goes out.", path.display(), pawline_core::providers::status_text(&provider))),
+                Err(e) => reply("message", format!("Could not save that setting: {e}. Nothing changed.")),
+            };
         }
     }
     // A trailing "please" is politeness, not part of a name (never for quoted names or right after called/folder/file).
@@ -569,13 +627,18 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             None => {
                 let ctx: Vec<String> = state.online_ctx.iter().rev().take(pawline_core::textfallback::CHAT_CONTEXT_LINES).rev().map(|c| pawline_core::textfallback::chat_clip(c)).collect();
                 let ctx = if ctx.len() % 2 == 1 { ctx[1..].to_vec() } else { ctx };
-                let op = Operation::ChatOnline { context: ctx, text: input.trim().to_string() };
+                let provider = current_chat_provider();
+                let op = Operation::ChatOnline { provider: provider.spec(), context: ctx, text: input.trim().to_string() };
                 let summary = format!("1. {}", op.describe());
                 state.online_pending = Some(input.trim().to_string());
                 state.pending = Some(Plan {
                     ops: vec![op],
                     needs_confirmation: true,
-                    confirmation_reasons: vec!["This would send your text to an online service.".into()],
+                    confirmation_reasons: vec![if provider.local {
+                        format!("This would send your text to a program on this computer ({}).", provider.name)
+                    } else {
+                        "This would send your text to an online service.".into()
+                    }],
                     assist_derived: false,
                     notes: vec![],
                 });
