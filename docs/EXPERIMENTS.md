@@ -433,3 +433,14 @@ speed. Training on his CPU stays unmeasured and unquoted.
 The free Colab T4 remains the only sensible route to the visual families, which
 is what the notebook is for. The router needs no training and covers 84 of the
 86 state, text and refusal questions on its own.
+
+### Why a low training loss is not alarming here
+
+The light-config training set (320 scenes) yields 4564 QA rows over 373 distinct
+answers, and the ten most common answers cover 52.6% of all rows: "no" 14.0%,
+"yes" 7.0%, "not visible on the screen" 7.0%, then six palette names at ~3.5%
+each. A 256M model that learns that distribution fits the bulk of the training
+set quickly, so 15 -> 0.23 in one epoch is expected rather than suspicious.
+leakage_check.py separately rules out the eval set being in the data. What a low
+loss does not tell us is whether the model generalises to new layouts and fonts;
+only the held-out battery can, which is what fork_eval.sh measures.
