@@ -49,6 +49,18 @@ def object_point(meta, family):
     W = meta["width"]
     if family == "indicator":
         return (W - 167, 14)          # the status dot drawn in the top bar
+    if family in ("color", "color_neg"):
+        f = next((x for x in meta["windows"] if x["focused"]), meta["windows"][0])
+        return (f["x"] + f["w"] // 2, f["y"])       # the focused border, top edge
+    if family == "focus":
+        f = next((x for x in meta["windows"] if x["focused"]), meta["windows"][0])
+        return (f["x"] + f["w"] // 2, f["y"] + 10)  # its title bar
+    if family == "text":
+        import fork_router as fr
+        app = fr.target_app(meta.get("_question", ""))
+        w = next((x for x in meta["windows"] if app and x["app"] == app),
+                 next(x for x in meta["windows"] if x["focused"]))
+        return (w["x"] + w["w"] // 2, w["y"] + w["h"] // 2)
     w = meta["windows"][meta["progress_win"]]
     return (w["x"] + w["w"] // 2, w["y"] + w["h"] - 22)
 
@@ -79,7 +91,7 @@ def run(png, rect, question):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", required=True)
-    ap.add_argument("--cursor", choices=["oracle", "random", "window", "border"], default="oracle")
+    ap.add_argument("--cursor", choices=["oracle", "random", "window", "border", "windowpick"], default="oracle")
     ap.add_argument("--families", default="indicator,progress",
                     help="comma-separated families (window mode also does color,text)")
     ap.add_argument("--size", type=int, default=500)
@@ -115,6 +127,18 @@ def main():
                 rect = (cx - 200, cy - 60, cx + 200, cy + 60)
                 rect = (max(0, rect[0]), max(0, rect[1]),
                         min(meta["width"], rect[2]), min(meta["height"], rect[3]))
+            elif args.cursor == "windowpick":
+                # what a user would pick by hand: the window that actually
+                # contains the thing being asked about, cropped whole.
+                ox, oy = object_point(meta, r["family"])
+                w = next((x for x in meta["windows"]
+                          if x["x"] <= ox < x["x"] + x["w"] and x["y"] <= oy < x["y"] + x["h"]),
+                         next(x for x in meta["windows"] if x["focused"]))
+                pad = 6
+                rect = (max(0, w["x"] - pad), max(0, w["y"] - pad),
+                        min(meta["width"], w["x"] + w["w"] + pad),
+                        min(meta["height"], w["y"] + w["h"] + pad))
+                cx, cy = (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2
             elif args.cursor == "window":
                 # window-based version: crop the window the question is about,
                 # at native resolution. This is the confirm-loop unit the user

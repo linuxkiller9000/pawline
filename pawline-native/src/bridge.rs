@@ -86,6 +86,9 @@ fn run_cancellable_with<T: Send + 'static>(
 }
 
 static LAST_CHAT_ANSWER: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// The short lookup text offered when a screen answer was unsure. Memory only:
+/// it is never written anywhere, and it is cleared by the next screen question.
+static LAST_SCREEN_SEARCH: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// Longest the app waits for the local model. Not tuned against measured inference times; a timeout switches the assist off for the session.
 const ASSIST_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -208,7 +211,7 @@ fn screen_vision_provider() -> Result<pawline_core::providers::ChatProvider, Paw
     Ok(p)
 }
 
-fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str) -> Result<String, PawError> {
+fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str, share: &pawline_core::screencap::ShareTarget) -> Result<String, PawError> {
     use pawline_core::screencap as sc;
     // Route 0, ahead of any capture: window state (count, focus, layout order,
     // which app is where, is X open) is exact in the compositor's own window
@@ -224,6 +227,7 @@ fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str) -> Re
             ));
         }
     }
+    *LAST_SCREEN_SEARCH.lock().unwrap() = None;
     // Same rule as chat and images: the confirmed card named a provider.
     let provider = screen_vision_provider()?;
     let now = provider.spec();
@@ -233,10 +237,22 @@ fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str) -> Re
             now.name, now.model, now.url
         )));
     }
-    // Capture (only after the confirmed card; this fn is the exec arm).
+    // Capture (only after the confirmed card; this fn is the exec arm). What is
+    // captured is exactly what the card named: one window, the region the user
+    // drew, or the whole screen.
     let dest = std::env::temp_dir().join(format!("pawline-screen-{}.png", std::process::id()));
-    let cmd = sc::screen_capture_command(&sc::binary_on_path, &dest)?;
-    if cmd[0] == "niri" {
+    let (cmd, whole_frame) = match share {
+        sc::ShareTarget::Window { id, .. } => match sc::window_capture_command(&sc::binary_on_path, &dest, *id) {
+            Some(c) => (c, false),
+            None => (sc::screen_capture_command(&sc::binary_on_path, &dest)?, true),
+        },
+        sc::ShareTarget::Region { x, y, w, h } => match sc::region_capture_command(&sc::binary_on_path, &dest, (*x, *y, *w, *h)) {
+            Some(c) => (c, false),
+            None => (sc::screen_capture_command(&sc::binary_on_path, &dest)?, true),
+        },
+        sc::ShareTarget::WholeScreen => (sc::screen_capture_command(&sc::binary_on_path, &dest)?, true),
+    };
+    if whole_frame && cmd[0] == "niri" {
         return Err(PawError::Exec(
             "niri's own screenshot action writes to its own folder and Pawline cannot find the file yet; install grim (`sudo pacman -S grim`) and ask again. Nothing was captured.".into()));
     }
@@ -247,7 +263,12 @@ fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str) -> Re
     }
     // The only copy of the pixels; deleted when this guard drops.
     let shot = sc::ScreenShot::new(dest);
-    let bytes = std::fs::read(&shot.path).map_err(|e| PawError::Exec(format!("Could not read the capture: {e}. Nothing was done.")))?;
+    let mut bytes = std::fs::read(&shot.path).map_err(|e| PawError::Exec(format!("Could not read the capture: {e}. Nothing was done.")))?;
+    // A border is a few pixels on a window's edge: keep the top strip, which is
+    // what makes the colour answerable (docs/EXPERIMENTS.md 4h: 5/8 from 0/8).
+    if let sc::ShareTarget::Window { strip_top: true, .. } = share {
+        bytes = sc::crop_png_top(&bytes, 96)?;
+    }
     // Route: OCR for text questions, pixels for visual ones, refuse otherwise.
     let kind = sc::classify_screen_question(question);
     let ocr_text = if matches!(kind, sc::ScreenQuestionKind::Text) && sc::binary_on_path("tesseract") {
@@ -268,14 +289,13 @@ fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str) -> Re
     let label = provider.answer_label();
     let q = question.to_string();
     let ticket = pawline_core::imagegen::GUARD.begin_chat(local, std::time::Instant::now())?;
-    match route {
+    let (prefix, answer) = match route {
         sc::ScreenRoute::Ocr => {
             let a = run_cancellable_with(ticket, move |cancelled, commit| {
                 let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(120));
                 sc::chat_with_ocr_text(&http, &provider, &ocr_text, &q, cancelled, commit)
             })?;
-            *LAST_CHAT_ANSWER.lock().unwrap() = Some(a.clone());
-            Ok(format!("Read the screen text - {label}:\n{a}"))
+            ("Read the screen text", a)
         }
         _ => {
             let shrunk = sc::downscale_png(&bytes, sc::SCREEN_VISION_MAX_WIDTH)?;
@@ -284,10 +304,20 @@ fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str) -> Re
                 let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(180));
                 pawline_core::textfallback::chat_with_image(&http, &provider, &image, &q, cancelled, commit)
             })?;
-            *LAST_CHAT_ANSWER.lock().unwrap() = Some(a.clone());
-            Ok(format!("Looked at the screen - {label}:\n{a}"))
+            ("Looked at the screen", a)
+        }
+    };
+    *LAST_CHAT_ANSWER.lock().unwrap() = Some(answer.clone());
+    let mut out = format!("{prefix} - {label}:\n{answer}");
+    if sc::answer_is_unsure(&answer) {
+        if let Some(query) = sc::fallback_search_query(question, &sc::niri_windows().unwrap_or_default()) {
+            *LAST_SCREEN_SEARCH.lock().unwrap() = Some(query.clone());
+            out.push_str(&format!(
+                "\n\nI could not tell what that is. Say \"search it\" and Pawline shows a card first: it would send only this short text to the free web search, no screenshot and no screen text - \"{query}\"."
+            ));
         }
     }
+    Ok(out)
 }
 
 fn ask_online(text: &str) -> Result<String, PawError> {
@@ -306,6 +336,41 @@ static WEATHER_PICK: std::sync::Mutex<Option<Vec<pawline_core::weather::Place>>>
 /// A typed number - or the typed name of one listed place - while a weather chooser is open fetches
 /// that place's forecast. A name matching several listed places asks for the number and keeps the
 /// chooser open. Anything else cancels the chooser and is treated as a new request.
+
+/// "search it" after an unsure screen answer: build the lookup card. Nothing is
+/// sent until that card is approved, and the card names the exact text that
+/// would leave the machine (a short query, never pixels, never screen text).
+pub fn screen_search_offer(input: &str, state: &mut UiState) -> Option<UiReply> {
+    let low = input.trim().to_lowercase();
+    let low = low.trim_end_matches(['.', '!']).trim();
+    if !matches!(
+        low,
+        "search it" | "search that" | "search this" | "search for it" | "look it up" | "look that up"
+            | "search the web for it"
+    ) {
+        return None;
+    }
+    let Some(query) = LAST_SCREEN_SEARCH.lock().unwrap().clone() else {
+        return Some(reply(
+            "message",
+            "There is no screen answer waiting for a search. Ask about your screen first, then say \"search it\". Nothing was sent.".into(),
+        ));
+    };
+    let op = Operation::Search { engine: pawline_core::plan::SearchEngine::Web, query: query.clone() };
+    let summary = format!("1. {}", op.describe());
+    state.pending = Some(Plan {
+        ops: vec![op],
+        needs_confirmation: true,
+        confirmation_reasons: vec![format!(
+            "This sends only this short text to the free DuckDuckGo web search: \"{query}\". No screenshot, no screen text, nothing from your files. Nothing is sent until you confirm."
+        )],
+        assist_derived: false,
+        notes: vec![],
+    });
+    state.pending_request = None;
+    Some(UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) })
+}
+
 pub fn weather_pick(input: &str) -> Option<UiReply> {
     let opts = WEATHER_PICK.lock().unwrap().clone()?;
     let low = input.trim().to_lowercase();
@@ -446,8 +511,8 @@ impl ExecutionBackend for UiBackend {
         if let Operation::LookAtImage { provider, path, prompt } = op {
             return Ok(OpOutcome { op: op.clone(), detail: look_at_image(provider, path, prompt)? });
         }
-        if let Operation::ScreenQA { provider, question } = op {
-            return Ok(OpOutcome { op: op.clone(), detail: screen_qa(provider, question)? });
+        if let Operation::ScreenQA { provider, question, share } = op {
+            return Ok(OpOutcome { op: op.clone(), detail: screen_qa(provider, question, share)? });
         }
         if let Operation::AskOnline { text } = op {
             return Ok(OpOutcome { op: op.clone(), detail: ask_online(text)? });
@@ -878,6 +943,9 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
     if let Some(r) = weather_pick(input) {
         return r;
     }
+    if let Some(r) = screen_search_offer(input, state) {
+        return r;
+    }
     {
         let low = input.trim().to_lowercase();
         let low = low.trim_end_matches(['.', '!']).trim();
@@ -1066,7 +1134,26 @@ Nothing is sent from your machine, and after setup Laya works fully offline. You
                 let metadata_first = pawline_core::screencap::classify_metadata_question(&question)
                     .is_some()
                     && pawline_core::screencap::binary_on_path("niri");
-                let op = Operation::ScreenQA { provider: provider.spec(), question };
+                // Screen-share picker: narrow the capture to the window the
+                // question is about when it points at one; otherwise the card
+                // offers the whole screen and names the window option.
+                use pawline_core::screencap::{CropChoice, ShareTarget};
+                let share = match pawline_core::screencap::niri_windows() {
+                    Some(wins) if pawline_core::screencap::names_a_window(&question, &wins) => {
+                        match pawline_core::screencap::crop_for_question(&question, &wins) {
+                            CropChoice::Window { id, title, app } => ShareTarget::Window { id, title, app, strip_top: false },
+                            CropChoice::BorderStrip { id, title, app } => ShareTarget::Window { id, title, app, strip_top: true },
+                            CropChoice::FullFrame => ShareTarget::WholeScreen,
+                        }
+                    }
+                    _ => ShareTarget::WholeScreen,
+                };
+                let window_option = match (&share, pawline_core::screencap::niri_windows()) {
+                    (ShareTarget::WholeScreen, Some(wins)) => pawline_core::screencap::window_for_question(&question, &wins)
+                        .map(|w| format!(" To send only one window instead, say \"share only the {} window\" and the card will name it.", w.app_name())),
+                    _ => None,
+                };
+                let op = Operation::ScreenQA { provider: provider.spec(), question, share: share.clone() };
                 let summary = format!("1. {}", op.describe());
                 state.pending = Some(Plan {
                     ops: vec![op],
@@ -1074,7 +1161,10 @@ Nothing is sent from your machine, and after setup Laya works fully offline. You
                     confirmation_reasons: vec![if metadata_first {
                         "This reads your open window titles and positions locally to answer, and takes no screenshot. It only falls back to capturing the screen if the question needs pixels.".into()
                     } else {
-                        "This would capture your whole screen, answer from it, then delete the capture.".into()
+                        match &window_option {
+                            Some(extra) => format!("{}{extra}", share.describe()),
+                            None => share.describe(),
+                        }
                     }],
                     assist_derived: false,
                     notes: vec![],
@@ -2852,7 +2942,7 @@ mod memory_tests {
     fn generated_content_is_labelled_on_every_online_result_path() {
         use pawline_core::plan::Operation as O;
         let o = |op: O, d: &str| OpOutcome { op, detail: d.into() };
-        let chat = online_md(&[o(O::ChatOnline { context: vec![], text: "q".into() }, "x\nhello")]).unwrap();
+        let chat = online_md(&[o(O::ChatOnline { provider: current_chat_provider().spec(), context: vec![], text: "q".into() }, "x\nhello")]).unwrap();
         assert!(chat.contains("AI-written") && chat.contains("not checked") && chat.contains("may be wrong"), "{chat}");
         let ask = online_md(&[o(O::AskOnline { text: "q".into() }, "x\nhello")]).unwrap();
         assert!(ask.contains("not checked") && ask.contains("may be wrong"), "{ask}");
@@ -3818,6 +3908,35 @@ mod memory_tests {
         assert!(task_memory_command("forget task steps", Some(&p)).unwrap().contains("Deleted 1"));
         assert!(!p.exists());
         assert_eq!(task_memory_command("task steps", None).unwrap(), "No data folder.");
+    }
+}
+
+#[cfg(test)]
+mod screen_search_tests {
+    use super::*;
+
+    #[test]
+    fn unsure_screen_answer_offers_a_card_and_sends_nothing() {
+        *LAST_SCREEN_SEARCH.lock().unwrap() = None;
+        let mut st = new_state(std::env::temp_dir().join("pawline-test-screen-search"));
+        let r = screen_search_offer("search it", &mut st).unwrap();
+        assert_eq!(r.kind, "message");
+        assert!(st.pending.is_none(), "no card, no plan");
+        assert!(r.text.contains("Nothing was sent"), "{}", r.text);
+
+        *LAST_SCREEN_SEARCH.lock().unwrap() = Some("icon corner kitty".into());
+        let r = screen_search_offer("search it", &mut st).unwrap();
+        assert_eq!(r.kind, "confirm");
+        let plan = st.pending.as_ref().expect("a pending plan");
+        assert!(plan.needs_confirmation, "the lookup is never automatic");
+        assert_eq!(plan.ops.len(), 1);
+        match &plan.ops[0] {
+            Operation::Search { query, .. } => assert_eq!(query, "icon corner kitty"),
+            other => panic!("expected a search, got {other:?}"),
+        }
+        assert!(r.text.contains("icon corner kitty"), "the card names the text: {}", r.text);
+        assert!(r.text.contains("DuckDuckGo"), "the card names the service: {}", r.text);
+        *LAST_SCREEN_SEARCH.lock().unwrap() = None;
     }
 }
 
