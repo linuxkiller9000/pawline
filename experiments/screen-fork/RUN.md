@@ -105,3 +105,30 @@ Before trusting any of it, run leakage_check.py against whatever training set
 the run actually used:
 
   python3 leakage_check.py --train <train dir 1> --train <train dir 2> --eval /tmp/synth/eval3
+
+## Crop experiments (what runs what)
+
+- `cursor_crop.py --dir <eval dir> --cursor <mode> --families <fams>` crops the
+  frame and asks the vision model. Modes: `oracle` (a box centred on the thing),
+  `window` (the window the question names, or the focused one), `windowpick` (the
+  window that actually contains the thing, which is what a user would pick),
+  `border` (the 400x120 strip on the focused window's top edge) and `random`
+  (same crop size, random place: the control that proves the crop's content is
+  what matters). Results land in `<eval dir>/results_cursor_<mode>.json`.
+- `ocr_crop.py --dir <eval dir> [--end-to-end]` asks the same crop question of
+  the OCR route: retrieval of the expected string in tesseract's text, and with
+  `--end-to-end` the full OCR + qwen2.5-0.5b answer, whole frame against window.
+- `rescale_set.py --src <eval dir> --dst <new dir> --width 1366` makes a copy of
+  an eval set at the Dell's resolution, scaling the sidecar window rectangles.
+  Text is resampled rather than re-rendered, so treat it as close, not identical.
+- `eval_battery.py --dir <eval dir> --method smol256 --scale 1.0 --families ...`
+  is the full-frame baseline (scale 1.0 = send the frame at its own size).
+
+Reproduce the 4j tables:
+
+  python3 eval_battery.py --dir /tmp/synth/eval3 --method smol256 --scale 0.5 --families indicator,progress
+  python3 cursor_crop.py --dir /tmp/synth/eval3 --cursor oracle  --families indicator,progress
+  python3 cursor_crop.py --dir /tmp/synth/eval3 --cursor window  --families progress
+  python3 rescale_set.py --src /tmp/synth/eval3 --dst /tmp/synth/eval4 --width 1366
+  python3 eval_battery.py --dir /tmp/synth/eval4 --method smol256 --scale 1.0 --families indicator,progress
+  python3 cursor_crop.py --dir /tmp/synth/eval4 --cursor oracle --families indicator,progress
