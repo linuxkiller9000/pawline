@@ -991,3 +991,15 @@ Measured, not reasoned (same scene, same question, image first, warm server):
 identical bytes 11.76 s then 0.05 s (`cache_n=482`); one minute of clock painted
 into the top bar 11.77 s then 0.07 s. So a single changed patch of a few hundred
 pixels costs the whole encode again, exactly as the paragraph above says.
+
+### User-reported Dell data point (2026-11-28)
+
+He reports a screen question answered on his Dell i3 M370 in "0.1 second", and
+says it felt even faster. Recorded as reported, not measured: we do not know
+which route produced it - the compositor's window list (no capture, no model),
+the OCR text route, or a cached repeat of an identical frame (0.05-0.30 s in the
+sandbox, docs above). A fresh vision encode of a new frame is 7 s class on one
+thread, so it cannot have been that. The reply's own "Took 0.1s" line is the
+measurement; what is missing is which route it was, so the next test build should
+print the route next to the time. Treat this as evidence that the sandbox's
+timings are in the same class as his machine, not as a new benchmark.

@@ -199,6 +199,9 @@ fn lh() -> f32 {
 }
 /// The settings screen shows one theme row (Enter cycles), so the notes below it stay readable at the fixed window height.
 const THEME_ROWS: usize = 1;
+
+/// Room taken on the left of the prompt box by the screen-share pill.
+const SHARE_INSET: f32 = 28.0;
 const PAD: f32 = 14.0;
 const CHAT_TOP: f32 = 64.0;
 const BOTTOM: f32 = 64.0;
@@ -511,6 +514,7 @@ struct App {
     vstate: VState,
     voice_tx: Option<channel::Sender<VEv>>,
     speaking: Option<std::process::Child>,
+    r_share: (f32, f32, f32, f32),
     r_mic: (f32, f32, f32, f32),
     r_vstop: (f32, f32, f32, f32),
     r_vcancel: (f32, f32, f32, f32),
@@ -525,6 +529,9 @@ struct App {
     settings_scroll: f32,
     /// Settings: the model file the user is typing a path for (Enter on those rows). Local only.
     model_prompt: Option<pawline_core::models::Kind>,
+    /// The question the screen-share pill took out of the box. Held until the picture
+    /// exists: if the share fails it goes back into the box instead of being sent blind.
+    share_held: Option<String>,
     t0: std::time::Instant,
     r_gear: (f32, f32, f32, f32),
     input_w: f32,
@@ -1065,7 +1072,8 @@ impl App {
         } else {
             self.draw_chat(pm, w, h, inner_w);
             // input box: wraps onto up to MAX_IN_LINES lines, then scrolls by line
-            let wmax = inner_w - 30.0;
+            // Left inset leaves room for the screen-share pill, right keeps room for the mic.
+            let wmax = inner_w - 30.0 - SHARE_INSET;
             let chars: Vec<char> = self.input.text().chars().collect();
             self.input_w = wmax;
             let full = self.shaper.layout(&self.input.text(), px(), shape::Mode::Auto);
@@ -1102,7 +1110,7 @@ impl App {
                 let ly = top + 6.0 + self.chip_h() + k as f32 * lh();
                 let text: String = chars[ls..le].iter().collect();
                 let laid = self.shaper.layout(&text, px(), shape::Mode::Auto);
-                let x0 = PAD + 8.0 + if laid.rtl { (wmax - laid.width).max(0.0) } else { 0.0 };
+                let x0 = PAD + 8.0 + SHARE_INSET + if laid.rtl { (wmax - laid.width).max(0.0) } else { 0.0 };
                 if let Some((sa, sb)) = sel {
                     let (a, b) = (sa.max(ls), sb.min(le));
                     if b > a {
@@ -2111,7 +2119,23 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
         }
     }
 
+    /// The screen-share pill, on the left of the prompt box, mirroring the microphone on the
+    /// right. A screen icon: pressing it takes whatever is typed as the question and starts the
+    /// screen share, so the question can never go out without the picture.
+    fn draw_share(&mut self, pm: &mut Pixmap, w: f32, h: f32) {
+        let (sx, sy) = (PAD + 6.0, self.input_box_top + 9.0);
+        self.r_share = (sx, sy, 22.0, 22.0);
+        let armed = self.share_held.is_some();
+        fill(pm, &rrect(sx, sy, 22.0, 22.0, 11.0), if armed { (46, 125, 80) } else { self.th().accent }.rgba());
+        // a small screen: an outline with a stand
+        fill(pm, &rrect(sx + 5.0, sy + 6.0, 12.0, 8.0, 1.5), (255, 255, 255, 255));
+        fill(pm, &rrect(sx + 7.0, sy + 8.0, 8.0, 4.0, 1.0), if armed { (46, 125, 80) } else { self.th().accent }.rgba());
+        fill(pm, &rrect(sx + 9.5, sy + 15.0, 3.0, 2.0, 0.5), (255, 255, 255, 255));
+        let _ = (pm, w, h);
+    }
+
     fn draw_voice(&mut self, pm: &mut Pixmap, w: f32, h: f32) {
+        self.draw_share(pm, w, h);
         let mx = w - PAD - 26.0;
         let my = self.input_box_top + 9.0;
         self.r_mic = (mx, my, 22.0, 22.0);
@@ -2675,6 +2699,25 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
         } else {
             self.persist_history();
         }
+        // The screen-share pill held a question: if the share failed, the question goes back
+        // into the box (never sent blind, even when the failure replaced the thinking line);
+        // once an answer arrives the hold is done.
+        if let Some(q) = self.share_held.clone() {
+            // A screen share can fail as an ordinary message ("Execution failed: ... Nothing was
+            // captured"), so the text decides too: a question is never silently lost.
+            let failed = matches!(r.kind.as_str(), "failed" | "error")
+                || r.text.starts_with("Execution failed")
+                || r.text.contains("Nothing was captured");
+            if failed {
+                self.share_held = None;
+                if !q.is_empty() && self.input.is_blank() {
+                    self.input.insert(&q);
+                    self.toast = Some("Screen share failed, your question is still in the box");
+                }
+            } else if r.kind == "message" {
+                self.share_held = None;
+            }
+        }
         if r.kind == "md" {
             if let Some(m) = self.msgs.last_mut() {
                 m.md = true;
@@ -2693,6 +2736,26 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
             self.plan_scroll = 0.0;
         }
         self.draw();
+    }
+
+    /// The screen-share pill: take the question out of the box, hand it to the screen path,
+    /// and keep a copy. The picture is captured before the question is asked (the screen route
+    /// sends the image part first), so the two can never be separated; if the share fails the
+    /// question comes back into the box instead of being sent blind.
+    fn start_screen_share(&mut self) {
+        if self.busy || self.confirm.is_some() {
+            return;
+        }
+        let q = self.input.text().trim().to_string();
+        self.input.clear();
+        self.share_held = Some(q.clone());
+        let request = if q.is_empty() {
+            "what is on my screen".to_string()
+        } else {
+            format!("on my screen, {q}")
+        };
+        self.input.insert(&request);
+        self.submit();
     }
 
     /// Enter on a model row: the normal input box becomes the path box, prefilled with
@@ -3137,6 +3200,10 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
                     self.stop_speaking();
                     self.draw();
                 }
+                return;
+            }
+            if inside(self.r_share, self.ptr_pos) {
+                self.start_screen_share();
                 return;
             }
             if inside(self.r_mic, self.ptr_pos) {
@@ -4051,6 +4118,7 @@ fn main() {
         vnote: false,
         vstate: VState::Idle,
         speaking: None,
+        r_share: (0.0, 0.0, 0.0, 0.0),
         r_mic: (0.0, 0.0, 0.0, 0.0),
         r_vstop: (0.0, 0.0, 0.0, 0.0),
         r_vcancel: (0.0, 0.0, 0.0, 0.0),
@@ -4070,6 +4138,7 @@ fn main() {
         settings_sel: 0,
         settings_scroll: 0.0,
         model_prompt: None,
+        share_held: None,
         t0: std::time::Instant::now(),
         r_gear: (0.0, 0.0, 0.0, 0.0),
         input_w: 300.0,
