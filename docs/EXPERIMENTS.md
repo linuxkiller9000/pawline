@@ -444,3 +444,75 @@ set quickly, so 15 -> 0.23 in one epoch is expected rather than suspicious.
 leakage_check.py separately rules out the eval set being in the data. What a low
 loss does not tell us is whether the model generalises to new layouts and fonts;
 only the held-out battery can, which is what fork_eval.sh measures.
+
+## 4h. Crop around the object: the window first, the pointer second (2026-11-27)
+
+Every no-training path in 4g sits at chance on the pixel-colour families, and the
+reason is resolution, not prompting: a 1366x768 frame squeezed into the model's
+960px budget makes a 14px focused border a handful of pixels wide. Two crop
+sources were measured, both with stock SmolVLM-256M, a 500px crop window and the
+same plain question. All numbers: sandbox, 1 vCPU / 2 GB, eval3's 16 visual
+questions.
+
+| crop source | correct | s/q | peak RSS |
+|---|---|---|---|
+| none (full frame, 960px) | 5/16 | 9.7 | 534 MiB |
+| oracle: crop centred on the object | 11/16 | 7.2 | 530 MiB |
+| random position, same crop size | 1/16 | 7.0 | 530 MiB |
+| window: crop = the whole window the question is about | 15/40 | 15.2 | 559 MiB |
+
+The oracle crop doubles accuracy and is 25% faster than the full frame (fewer
+image tokens). The random crop proves the gain comes from the crop's content and
+not from crop size or a shorter prompt: at the same 500px it scores at chance.
+Chance on these families is 2/16.
+
+Per family, on eval2's 40 window-scoped questions (stock 256M, full frame ->
+window crop): focus 0/8 -> 2/8, colour of the focused border 0/8 -> 0/8, "is the
+border yellow" 7/8 -> 6/8, text in a named window 1/16 -> 7/16. So the window
+crop is worth about +7 questions, almost all of them text, and it costs 15.2 s/q
+against 9.7 s/q because a window-sized crop carries more image tokens than a
+960px full frame.
+
+The colour families are the exception, and the reason is geometric: the focused
+border is a 4px frame around the *edge* of the window, so a crop of the whole
+window puts the border at the margin of the image and the model answers "Black".
+The oracle crop wins there because it is centred on the border itself. So the
+crop is what buys visual accuracy, and the remaining problem is entirely
+one of knowing *where* to crop - which window for text, which edge for colour. That is a UI problem, not a model problem, and
+it splits into the two stages below.
+
+### Stage 1 - the window (this is the route Pawline takes)
+
+The router already knows every window's app id, title, geometry and focus from
+`niri msg --json windows` (`screencap::parse_niri_windows`), so for a question
+that names a window or the focused window, the crop rectangle is already in
+hand with no pointer involved. `cursor_crop.py --cursor window` reproduces that:
+it picks the focused window for colour/focus questions and the named app's
+window for text questions, pads by 6px and crops at native resolution.
+
+The confirm step the user asked for ("is this it?" -> else let him pick) is the
+same rectangle shown back to him as a card before any pixels are sent anywhere,
+and `slurp` is the fallback when the answer is no: it is a rectangle picker, so
+the user's own drag supplies the rect and no pointer API is needed at all.
+
+### Stage 2 - the pointer (research only, not shipped)
+
+If the crop should instead be centred on where the cursor is, the crop code is
+already written (`cursor_crop.py`); what is missing is a way to *read* the
+pointer position without a click. Findings as of 2026-11-27:
+
+- niri merged `niri msg pointer` (PR #1924), which reports the pointer location
+  and can set it. Reading it needs a niri new enough to have that subcommand.
+- `window-under-cursor` as a single IPC call is still an open PR (#4189), so the
+  compositor will not hand back "which window is under the pointer" today; the
+  same result comes from `msg pointer` plus the window rects the router already
+  has (point-in-rect over `parse_niri_windows` output).
+- `niri msg pick-window` exists (PR #1031) but needs a click, so it is a
+  user-pick path, not an ambient one.
+- `grim` + `slurp` is the established pair for user-chosen regions: `slurp`
+  returns a rectangle, `grim -g` crops to it. That is the "else let him pick"
+  branch, and it works on any wlroots compositor, not just niri.
+
+Conclusion: the window crop is available today from metadata alone and needs no
+new compositor feature; the pointer crop is worth having only as a convenience
+over the same code, and it depends on a niri version with `msg pointer`.
