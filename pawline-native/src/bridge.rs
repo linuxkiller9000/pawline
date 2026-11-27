@@ -90,6 +90,41 @@ fn chat_online(spec: &pawline_core::providers::ProviderSpec, context: &[String],
     Ok(format!("{label}:\n{a}"))
 }
 
+fn look_at_image(spec: &pawline_core::providers::ProviderSpec, path: &str, prompt: &str) -> Result<String, PawError> {
+    // Same rule as chat: the confirmed card named a provider; refuse a quiet switch.
+    let provider = current_chat_provider();
+    let now = provider.spec();
+    if now.name != spec.name || now.url != spec.url || now.model != spec.model {
+        return Err(PawError::Exec(format!(
+            "The chat provider changed since you confirmed that card (it is now {}, model \"{}\", at {}). Nothing was sent. Ask again to see a fresh card.",
+            now.name, now.model, now.url
+        )));
+    }
+    let meta = std::fs::metadata(path).map_err(|e| PawError::Exec(format!("Cannot read {path}: {e}. Nothing was sent.")))?;
+    if !meta.is_file() {
+        return Err(PawError::Exec(format!("{path} is not a file. Nothing was sent.")));
+    }
+    if meta.len() > pawline_core::textfallback::MAX_IMAGE_BYTES as u64 {
+        return Err(PawError::Exec(format!(
+            "That image is {} MB; the limit is {} MB. Shrink it and try again. Nothing was sent.",
+            meta.len() / (1024 * 1024),
+            pawline_core::textfallback::MAX_IMAGE_BYTES / (1024 * 1024)
+        )));
+    }
+    let bytes = std::fs::read(path).map_err(|e| PawError::Exec(format!("Cannot read {path}: {e}. Nothing was sent.")))?;
+    let image = pawline_core::textfallback::ChatImage::from_bytes(&bytes)?;
+    let local = provider.local;
+    let label = provider.answer_label();
+    let prompt = prompt.to_string();
+    let ticket = pawline_core::imagegen::GUARD.begin_chat(local, std::time::Instant::now())?;
+    let a = run_cancellable_with(ticket, move |cancelled, commit| {
+        let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(120));
+        pawline_core::textfallback::chat_with_image(&http, &provider, &image, &prompt, cancelled, commit)
+    })?;
+    *LAST_CHAT_ANSWER.lock().unwrap() = Some(a.clone());
+    Ok(format!("Looked at {path} - {label}:\n{a}"))
+}
+
 fn ask_online(text: &str) -> Result<String, PawError> {
     let q = text.to_string();
     // Same Pollinations slot as pictures: one request at a time, 45 s apart.
@@ -210,6 +245,9 @@ impl ExecutionBackend for UiBackend {
         }
         if let Operation::ChatOnline { provider, context, text } = op {
             return Ok(OpOutcome { op: op.clone(), detail: chat_online(provider, context, text)? });
+        }
+        if let Operation::LookAtImage { provider, path, prompt } = op {
+            return Ok(OpOutcome { op: op.clone(), detail: look_at_image(provider, path, prompt)? });
         }
         if let Operation::AskOnline { text } = op {
             return Ok(OpOutcome { op: op.clone(), detail: ask_online(text)? });
@@ -378,7 +416,7 @@ pub fn task_memory_command(input: &str, path: Option<&std::path::Path>) -> Optio
 /// Answers, searches, online asks, pictures, undo and list are never remembered. Returns whether it saved.
 pub fn remember_steps(path: &std::path::Path, request: &str, ops: &[Operation], now: u64) -> bool {
     use pawline_core::plan::Operation as O;
-    if ops.is_empty() || ops.iter().any(|o| matches!(o, O::Answer { .. } | O::Search { .. } | O::Weather { .. } | O::AskOnline { .. } | O::ChatOnline { .. } | O::DeckDraft { .. } | O::DeckText { .. } | O::GenerateImage { .. } | O::Undo { .. } | O::List { .. })) {
+    if ops.is_empty() || ops.iter().any(|o| matches!(o, O::Answer { .. } | O::Search { .. } | O::Weather { .. } | O::AskOnline { .. } | O::ChatOnline { .. } | O::LookAtImage { .. } | O::DeckDraft { .. } | O::DeckText { .. } | O::GenerateImage { .. } | O::Undo { .. } | O::List { .. })) {
         return false;
     }
     let steps: Vec<String> = ops.iter().map(|o| o.describe()).collect();
@@ -437,6 +475,30 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
         }
         if matches!(low, "chat provider" | "which chat provider" | "chat provider status" | "what chat provider") {
             return reply("message", pawline_core::providers::status_text(&current_chat_provider()));
+        }
+        for prefix in ["look at this picture ", "look at this image ", "look at the picture ", "look at the image ", "look at ", "describe this image ", "describe this picture ", "what is in this picture ", "what is in this image ", "what's in this picture ", "what's in this image "] {
+            if let Some(rest) = low.strip_prefix(prefix) {
+                let path = input.trim()[input.trim().len() - rest.len()..].trim().trim_matches('"').trim_matches('\'').to_string();
+                if path.is_empty() {
+                    return reply("message", "Which image? Say for example: \"look at this picture ./cat.png\". Nothing was sent.".into());
+                }
+                let provider = current_chat_provider();
+                let op = Operation::LookAtImage { provider: provider.spec(), path, prompt: "Describe this image honestly and briefly.".into() };
+                let summary = format!("1. {}", op.describe());
+                state.pending = Some(Plan {
+                    ops: vec![op],
+                    needs_confirmation: true,
+                    confirmation_reasons: vec![if provider.local {
+                        format!("This would read that image file and send it to a program on this computer ({}).", provider.name)
+                    } else {
+                        "This would read that image file and send it to an online service.".into()
+                    }],
+                    assist_derived: false,
+                    notes: vec![],
+                });
+                state.pending_request = None;
+                return UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) };
+            }
         }
         if low == "use pollinations" || low.starts_with("use ollama ") || low.starts_with("use llama.cpp ") || low.starts_with("use lm studio ") {
             let (provider, ty) = if low == "use pollinations" {
@@ -704,6 +766,7 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
                         pawline_core::plan::Operation::Search { .. }
                         | pawline_core::plan::Operation::AskOnline { .. }
                         | pawline_core::plan::Operation::ChatOnline { .. }
+                        | pawline_core::plan::Operation::LookAtImage { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)
                         }
@@ -803,6 +866,7 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
                         pawline_core::plan::Operation::Search { .. }
                         | pawline_core::plan::Operation::AskOnline { .. }
                         | pawline_core::plan::Operation::ChatOnline { .. }
+                        | pawline_core::plan::Operation::LookAtImage { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)
                         }

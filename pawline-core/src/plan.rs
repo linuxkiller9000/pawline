@@ -92,6 +92,7 @@ pub enum Operation {
     AskOnline { text: String },
     /// One online chat turn: `context` = earlier lines of THIS session (alternating you / assistant, oldest first), `text` = the new message.
     ChatOnline { provider: crate::providers::ProviderSpec, context: Vec<String>, text: String },
+    LookAtImage { provider: crate::providers::ProviderSpec, path: String, prompt: String },
 }
 
 impl Operation {
@@ -128,6 +129,29 @@ impl Operation {
             Operation::AskOnline { text } => format!(
                 "Ask Pollinations (online) \"{text}\": this is the free \"Classic\" service: no account, best effort, about one request per 45 seconds per IP address. Pawline puts your question text in the web address it requests from text.pollinations.ai, plus the usual web details (your IP address, a \"Pawline\" user-agent). Pollinations says the same address returns the same cached answer to anyone who has it. Pawline does not send your files, chat history or location. What Pollinations keeps is its own policy. Do not put passwords, secrets or private information in this question. The answer is only shown, never run, and may be wrong."
             ),
+            Operation::LookAtImage { provider, path, prompt } => {
+                let destination = if provider.local {
+                    format!(
+                        "The request goes to {} on this computer (loopback only): the image and question do not leave the machine. The runner is a separate program; its own settings are not Pawline's.",
+                        provider.url
+                    )
+                } else {
+                    format!(
+                        "The request goes over the internet to {} ({}): the image content and question text are visible to that service, along with your IP address.",
+                        provider.url, provider.name
+                    )
+                };
+                format!(
+                    "Look at an image with {} (model \"{}\"). Pawline reads the file {} from disk, checks it really is a PNG, JPEG, GIF or WebP image ({} MB limit), and POSTs one JSON body to {}: the image (base64 inside the body), your question \"{}\", and the system line Pawline always shows. No chat history goes along. {} Never sent: other files, location or saved history. The answer is only shown, never run, and is AI-written text that may be wrong - small local vision models can describe an image incorrectly with confidence.",
+                    provider.name,
+                    provider.model,
+                    path,
+                    crate::textfallback::MAX_IMAGE_BYTES / (1024 * 1024),
+                    provider.url,
+                    prompt,
+                    destination
+                )
+            }
             Operation::ChatOnline { provider, context, text } => {
                 let mut lines = vec![format!("  system: {}", crate::textfallback::CHAT_SYSTEM)];
                 for (i, c) in context.iter().enumerate() {

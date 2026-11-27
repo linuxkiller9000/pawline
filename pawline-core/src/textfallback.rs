@@ -278,6 +278,118 @@ pub fn chat_block_reason(text: &str) -> Option<&'static str> {
 /// Cut a stored context line to the sent size (never mid-way past the limit).
 pub fn chat_clip(s: &str) -> String { s.chars().take(CHAT_LINE_CHARS).collect() }
 
+/// Largest image file Pawline will read for a vision request.
+pub const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+
+/// Base64 (standard alphabet, with padding). Own implementation: the only
+/// use is request bodies, and pulling a crate for 20 lines is not worth it.
+pub fn base64_encode(data: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(A[(n >> 18) as usize & 63] as char);
+        out.push(A[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { A[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { A[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+/// An image the user explicitly pointed Pawline at, validated and encoded for
+/// one vision request. Only ever created from a path the user typed.
+#[derive(Debug, Clone)]
+pub struct ChatImage {
+    pub media_type: &'static str,
+    pub byte_len: usize,
+    pub b64: String,
+}
+
+impl ChatImage {
+    /// Validate magic bytes and size, then encode. Rejects anything that is
+    /// not a PNG, JPEG, GIF or WebP image: the user named a picture, and
+    /// sending them something else would be a silent substitution.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, PawError> {
+        let media_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            "image/png"
+        } else if bytes.starts_with(b"\xff\xd8\xff") {
+            "image/jpeg"
+        } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+            "image/gif"
+        } else if bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+            "image/webp"
+        } else {
+            return Err(PawError::Validation(
+                "That file is not a PNG, JPEG, GIF or WebP image (its first bytes say so). Nothing was sent.".into(),
+            ));
+        };
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return Err(PawError::Validation(format!(
+                "That image is {} MB; the limit is {} MB. Shrink it and try again. Nothing was sent.",
+                bytes.len() / (1024 * 1024),
+                MAX_IMAGE_BYTES / (1024 * 1024)
+            )));
+        }
+        Ok(Self { media_type, byte_len: bytes.len(), b64: base64_encode(bytes) })
+    }
+
+    /// OpenAI-style image content part.
+    pub fn content_part(&self) -> serde_json::Value {
+        serde_json::json!({"type": "image_url", "image_url": {"url": format!("data:{};base64,{}", self.media_type, self.b64)}})
+    }
+}
+
+/// One vision turn: the named image plus the question about it, to the
+/// configured provider. No chat history goes along (images make it heavy);
+/// the system prompt is the same one the card shows.
+pub fn chat_with_image(http: &dyn Http, provider: &crate::providers::ChatProvider, image: &ChatImage, text: &str, cancelled: &dyn Fn() -> bool, commit: &dyn Fn() -> bool) -> Result<String, PawError> {
+    if let Some(why) = chat_block_reason(text) {
+        return Err(PawError::Validation(format!("I did not send that: it {why}. Nothing was sent.")));
+    }
+    let msgs = serde_json::json!([
+        {"role": "system", "content": CHAT_SYSTEM},
+        {"role": "user", "content": [
+            {"type": "text", "text": text.trim()},
+            image.content_part()
+        ]}
+    ]);
+    let body = serde_json::json!({"model": provider.model, "messages": msgs}).to_string();
+    let owned = provider.headers();
+    let headers: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let r = http.post(&provider.url, &headers, &body).map_err(|_| provider.unreachable_error())?;
+    if cancelled() || !commit() {
+        return Err(PawError::Exec("Cancelled. Nothing was kept, and a late answer will be discarded.".into()));
+    }
+    match r.status {
+        200 => {
+            let raw = String::from_utf8_lossy(&r.body).to_string();
+            let content = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| v["choices"][0]["message"]["content"].as_str().map(|s| s.to_string()))
+                .ok_or_else(|| PawError::Exec(format!("{} sent a reply Pawline could not read; no answer.", provider.name)))?;
+            let clean: String = content.chars().filter(|c| !c.is_control() || *c == '\n').collect();
+            let clean = clean.trim();
+            if clean.is_empty() {
+                return Err(PawError::Exec(format!("{} sent an empty answer.", provider.name)));
+            }
+            let n = clean.chars().count();
+            let shown: String = clean.chars().take(MAX_ANSWER_CHARS).collect();
+            Ok(if n > MAX_ANSWER_CHARS { format!("{shown}\n(shortened: {n} characters received)") } else { shown })
+        }
+        400 => Err(PawError::Exec(format!(
+            "{} refused the request (HTTP 400). With llama-server, the model needs its mmproj vision file loaded; with Ollama, the model must be a vision model. Nothing was answered.",
+            provider.name
+        ))),
+        404 if provider.local => Err(PawError::Exec(format!(
+            "{} answered HTTP 404: the model \"{}\" is probably not loaded on the server (with Ollama, pull it first; with llama-server or LM Studio, load it there). Nothing was sent.",
+            provider.name, provider.model
+        ))),
+        413 => Err(PawError::Exec(format!("{} said the request was too large (HTTP 413); the image is too big for it. Nothing was answered.", provider.name))),
+        s => Err(PawError::Exec(format!("{} answered HTTP {s}; no answer.", provider.name))),
+    }
+}
+
 /// One chat turn: POST the exact messages shown on the card. Nothing else is sent.
 /// The provider (chosen with "use ollama model ..." etc., default Pollinations)
 /// decides the endpoint, the model name and whether text leaves the machine.
@@ -522,6 +634,58 @@ mod tests {
         }
         let e = chat(&Down, &crate::providers::ChatProvider::ollama("llama3.2"), &[], "hi there", &|| false, &|| true).unwrap_err().to_string();
         assert!(e.contains("probably not running") && e.contains("11434"), "{e}");
+    }
+
+    #[test]
+    fn base64_matches_known_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64_encode(&[0xff, 0xee, 0xdd]), "/+7d");
+    }
+
+    #[test]
+    fn chat_image_accepts_real_magic_and_rejects_other_files() {
+        let png = ChatImage::from_bytes(b"\x89PNG\r\n\x1a\nrest").unwrap();
+        assert_eq!(png.media_type, "image/png");
+        assert_eq!(ChatImage::from_bytes(b"\xff\xd8\xff\xe0....").unwrap().media_type, "image/jpeg");
+        assert_eq!(ChatImage::from_bytes(b"GIF89a....").unwrap().media_type, "image/gif");
+        assert_eq!(ChatImage::from_bytes(b"RIFF....WEBP..").unwrap().media_type, "image/webp");
+        for bad in [b"#!/bin/sh\nrm -rf /".as_slice(), b"%PDF-1.4".as_slice(), b"plain text".as_slice(), b"".as_slice()] {
+            assert!(ChatImage::from_bytes(bad).is_err());
+        }
+        let big = vec![0u8; MAX_IMAGE_BYTES + 1];
+        assert!(ChatImage::from_bytes(&big).is_err());
+    }
+
+    #[test]
+    fn vision_request_carries_the_image_inline_and_blocks_private_text() {
+        let seen = std::cell::RefCell::new(vec![]);
+        struct P<'a>(&'a std::cell::RefCell<Vec<String>>);
+        impl Http for P<'_> {
+            fn get(&self, _: &str, _: &[(&str, &str)]) -> Result<HttpReply, PawError> { Err(PawError::Exec("no".into())) }
+            fn post(&self, u: &str, _: &[(&str, &str)], b: &str) -> Result<HttpReply, PawError> {
+                self.0.borrow_mut().push(format!("POST {u} {b}"));
+                Ok(HttpReply { status: 200, retry_after: None, content_type: String::new(), body: br#"{"choices":[{"message":{"content":"a red square"}}]}"#.to_vec() })
+            }
+        }
+        let prov = crate::providers::ChatProvider::llama_cpp("smolvlm-256m");
+        let img = ChatImage::from_bytes(b"\x89PNG\r\n\x1a\ntiny").unwrap();
+        let r = chat_with_image(&P(&seen), &prov, &img, "what is in this picture", &|| false, &|| true).unwrap();
+        assert_eq!(r, "a red square");
+        let s = seen.borrow();
+        assert_eq!(s.len(), 1);
+        assert!(s[0].starts_with("POST http://127.0.0.1:8080/v1/chat/completions "), "{}", s[0]);
+        assert!(s[0].contains(r#""model":"smolvlm-256m""#), "{}", s[0]);
+        assert!(s[0].contains(r#""type":"image_url""#) && s[0].contains("data:image/png;base64,"), "{}", s[0]);
+        assert!(s[0].contains("what is in this picture"), "{}", s[0]);
+        drop(s);
+        assert!(chat_with_image(&P(&seen), &prov, &img, "my password is hunter2", &|| false, &|| true).is_err());
+        assert_eq!(seen.borrow().len(), 1, "private text: nothing sent");
     }
 
     /// Written after the filter, not used to tune it: ordinary chat must be offered, private or command-like text must not.
