@@ -194,6 +194,65 @@ fn look_at_image(spec: &pawline_core::providers::ProviderSpec, path: &str, promp
     Ok(format!("Looked at {path} - {label}:\n{a}"))
 }
 
+/// "use vision model <path>", "use speech model <path>" and their "off" forms.
+/// The file is checked before anything is saved, so a typo never becomes a setting.
+/// Nothing is loaded here and nothing is captured.
+fn model_setting(kind: pawline_core::models::Kind, arg: Option<String>) -> UiReply {
+    use pawline_core::models as m;
+    let store = match m::store_path() {
+        Some(p) => p,
+        None => return reply("message", "I could not work out where to save that setting on this computer, so nothing changed.".into()),
+    };
+    let home = pawline_core::platform::home_dir();
+    let mut paths = m::load(&store);
+    match arg {
+        None => {
+            paths.set(kind, None);
+            if let Err(e) = m::save(&store, &paths) {
+                return reply("message", format!("Could not save that setting: {e}. Nothing changed."));
+            }
+            let auto = home
+                .as_deref()
+                .map(m::discover)
+                .and_then(|d| d.get(kind).cloned());
+            let tail = match auto {
+                Some(p) => format!(" Found {} and will use that.", p.display()),
+                None => " Nothing is installed in the usual places, so it will not be used until you point me at a file.".to_string(),
+            };
+            reply("message", format!("The {} setting is cleared ({}).{}", kind.label(), store.display(), tail))
+        }
+        Some(raw) => match m::check(kind, &raw, home.as_deref()) {
+            Err(msg) => reply("message", msg),
+            Ok(p) => {
+                paths.set(kind, Some(p.clone()));
+                if let Err(e) = m::save(&store, &paths) {
+                    return reply("message", format!("Could not save that setting: {e}. Nothing changed."));
+                }
+                let size = std::fs::metadata(&p).map(|x| m::size_text(x.len())).unwrap_or_default();
+                let tail = match kind {
+                    m::Kind::Vision => {
+                        let mm = match paths.mmproj.as_ref() {
+                            Some(mm) => format!("--mmproj {}", mm.display()),
+                            None => "--mmproj <the mmproj .gguf that came with it>".to_string(),
+                        };
+                        format!(
+                            "\nPawline does not load models itself yet, so your runner still loads it. Start it with:\n  llama-server -m {} {} -c 4096 --port 8080\n(No mmproj set: point me at the projector with \"use vision mmproj <path>\".)",
+                            p.display(),
+                            mm
+                        )
+                    }
+                    m::Kind::Mmproj => "\nScreen questions will pass this projector with the vision model.".to_string(),
+                    m::Kind::Speech => format!(
+                        "\nVoice input will use it with whisper.cpp:\n  whisper-cli -m {} -f <audio.wav> -nt -np",
+                        p.display()
+                    ),
+                };
+                reply("message", format!("Saved (owner-only, in {}): {} = {} ({}).{}", store.display(), kind.label(), p.display(), size, tail))
+            }
+        },
+    }
+}
+
 /// The provider used for screen-capture requests: the configured chat
 /// provider plus the optional screen-model override ("use screen model ...").
 /// Screen captures are local-only: a non-local provider is refused, never
@@ -1138,6 +1197,15 @@ Nothing is sent from your machine, and after setup Laya works fully offline. You
         }
         if matches!(low, "chat provider" | "which chat provider" | "chat provider status" | "what chat provider") {
             return reply("message", pawline_core::providers::status_text(&current_chat_provider()));
+        }
+        if pawline_core::models::is_status_query(input) {
+            let home = pawline_core::platform::home_dir();
+            let stored = pawline_core::models::store_path().map(|p| pawline_core::models::load(&p)).unwrap_or_default();
+            let t = pawline_core::models::status_text(&stored, home.as_deref(), &|k| std::env::var(k).ok());
+            return reply("message", format!("Model files (set them in Settings, or say \"use vision model <path>\" / \"use speech model <path>\"):\n{t}Pawline downloads no model and loads none by itself: your runner loads the vision file, whisper.cpp loads the speech file."));
+        }
+        if let Some((kind, arg)) = pawline_core::models::parse_setting(input) {
+            return model_setting(kind, arg);
         }
         if low == "use screen model off" || low == "screen model off" {
             let path = match pawline_core::providers::config_path() {

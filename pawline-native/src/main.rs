@@ -319,6 +319,28 @@ fn history_path() -> Option<std::path::PathBuf> {
     settings_path().map(|p| p.with_file_name("history.txt"))
 }
 
+/// The model files the user pointed Pawline at (Settings rows, or "use vision model <path>").
+fn model_paths() -> pawline_core::models::ModelPaths {
+    pawline_core::models::store_path().map(|p| pawline_core::models::load(&p)).unwrap_or_default()
+}
+
+/// What a Settings row shows: the file name in use, or "automatic" when nothing is set.
+/// Long names are shortened in the middle so the row never runs off the panel; the
+/// full path is what the setting holds and what the prompt box shows.
+fn model_file_label(kind: pawline_core::models::Kind) -> String {
+    let name = match model_paths().get(kind) {
+        Some(p) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string_lossy().to_string()),
+        None => return "automatic".to_string(),
+    };
+    let n = name.chars().count();
+    if n <= 17 {
+        return name;
+    }
+    let head: String = name.chars().take(8).collect();
+    let tail: String = name.chars().skip(n - 7).collect();
+    format!("{head}...{tail}")
+}
+
 fn settings_path() -> Option<std::path::PathBuf> {
     pawline_core::searchmem::default_path().map(|p| p.with_file_name("ui-settings.txt"))
 }
@@ -501,6 +523,8 @@ struct App {
     settings_open: bool,
     settings_sel: usize,
     settings_scroll: f32,
+    /// Settings: the model file the user is typing a path for (Enter on those rows). Local only.
+    model_prompt: Option<pawline_core::models::Kind>,
     t0: std::time::Instant,
     r_gear: (f32, f32, f32, f32),
     input_w: f32,
@@ -795,7 +819,7 @@ impl App {
     }
 
     fn settings_rows(&self) -> usize {
-        THEME_ROWS + 11
+        THEME_ROWS + 13
     }
 
     /// The drift animation runs only when its own switch is on and reduced motion is off (item 13).
@@ -839,6 +863,12 @@ impl App {
             pawline_core::filesgate::set_read_only(self.settings.files_blocked);
         } else if row == THEME_ROWS + 10 {
             self.settings.voice = (self.settings.voice + 1) % theme::VOICES.len();
+        } else if row == THEME_ROWS + 11 {
+            self.open_model_prompt(pawline_core::models::Kind::Vision);
+            return;
+        } else if row == THEME_ROWS + 12 {
+            self.open_model_prompt(pawline_core::models::Kind::Speech);
+            return;
         } else {
             let i = theme::TEXT_SIZES.iter().position(|p| *p == self.settings.text_pct).unwrap_or(0);
             self.settings.text_pct = theme::TEXT_SIZES[(i + 1) % theme::TEXT_SIZES.len()];
@@ -863,7 +893,11 @@ impl App {
     /// Privacy notes shown under the settings rows. Assembled in one place so the drawn text and the
     /// scrollable content height can never disagree.
     fn settings_notes(&self) -> Vec<String> {
-        let mut notes = vec!["Offline mode stops Pawline's own requests only, not apps you open.".to_string(), history::NOTE.to_string()];
+        let mut notes = vec![
+            "The two model rows take a file you already have: Enter, then type or paste its full path (an empty box means automatic). Pawline never downloads a model.".to_string(),
+            "Offline mode stops Pawline's own requests only, not apps you open.".to_string(),
+            history::NOTE.to_string(),
+        ];
         // Offline mode covers Pawline's built-in requests only. Say when a custom speech command is configured.
         let custom: Vec<&str> = ["PAWLINE_STT_CMD", "PAWLINE_TTS_CMD", "PAWLINE_REC_CMD"].into_iter().filter(|k| std::env::var_os(k).is_some()).collect();
         if !custom.is_empty() {
@@ -933,6 +967,12 @@ impl App {
                 self.settings_fill(pm, PAD + 66.0, y + 4.0, 18.0, 18.0, 9.0, (t.accent.0, t.accent.1, t.accent.2, 255));
                 let label = format!("Theme: {} (Enter for next)", t.name);
                 self.text(pm, &label, PAD + 96.0, y + 18.0, 14.0, (255, 255, 255), clip);
+            } else if k == THEME_ROWS + 12 {
+                let label = format!("Voice model (whisper): {} - Enter to change", model_file_label(pawline_core::models::Kind::Speech));
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
+            } else if k == THEME_ROWS + 11 {
+                let label = format!("Screen model (SmolVLM): {} - Enter to change", model_file_label(pawline_core::models::Kind::Vision));
+                self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
             } else if k == THEME_ROWS + 10 {
                 let label = format!("Voice (espeak voices only): {} (Enter to change)", theme::VOICES[self.settings.voice.min(theme::VOICES.len() - 1)].0);
                 self.text(pm, &label, PAD + 10.0, y + 18.0, 14.0, (255, 255, 255), clip);
@@ -1937,7 +1977,11 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
         let home = pawline_core::platform::home_dir().unwrap_or_default();
         let has = &voice::has_in_path;
         let rec = voice::recorder(std::env::var("PAWLINE_REC_CMD").ok().as_deref(), has, &wav)?;
-        let setup = voice::find_stt(&home, &|b| voice::has_in_path(b));
+        // A speech model the user pointed Pawline at wins over auto-detection.
+        let pointed = pawline_core::models::store_path()
+            .map(|p| pawline_core::models::load(&p))
+            .and_then(|m| pawline_core::models::configured(pawline_core::models::Kind::Speech, &m, &|k| std::env::var(k).ok(), Some(&home)));
+        let setup = voice::find_stt_at(&home, &|b| voice::has_in_path(b), pointed.as_deref());
         let st = voice::stt(std::env::var("PAWLINE_STT_CMD").ok().as_deref(), has, &setup, &wav)?;
         Ok((rec, st, wav))
     }
@@ -2651,7 +2695,98 @@ fn hist_lines(msgs: &[Msg], from: usize) -> Vec<history::Line> {
         self.draw();
     }
 
+    /// Enter on a model row: the normal input box becomes the path box, prefilled with
+    /// the file in use so a small edit is enough. Nothing is loaded here.
+    fn open_model_prompt(&mut self, kind: pawline_core::models::Kind) {
+        self.settings_open = false;
+        self.model_prompt = Some(kind);
+        let current = model_paths().get(kind).map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+        self.input.clear();
+        if !current.is_empty() {
+            self.input.insert(&current);
+        }
+        self.toast = Some("Type or paste the model file path, Enter saves, Esc cancels");
+        self.set_expanded(true);
+    }
+
+    /// Enter in the path box: check the file, save the setting, and say what happens next.
+    /// A path that is not there is refused with the reason and the setting stays as it was.
+    fn commit_model_prompt(&mut self) {
+        let Some(kind) = self.model_prompt.take() else { return };
+        self.toast = None;
+        let raw = self.input.text().trim().to_string();
+        self.input.clear();
+        let home = pawline_core::platform::home_dir();
+        let Some(store) = pawline_core::models::store_path() else {
+            self.push(false, "message", "I could not work out where to save that setting on this computer, so nothing changed.".into(), None);
+            self.draw();
+            return;
+        };
+        let mut paths = pawline_core::models::load(&store);
+        if raw.is_empty() {
+            // empty box: back to automatic, the same as saying "off"
+            paths.set(kind, None);
+            let saved = pawline_core::models::save(&store, &paths);
+            let msg = match saved {
+                Ok(()) => format!("{} is back to automatic: Pawline looks for it in its own models folder and the usual download spots. Nothing was loaded.", kind.label()),
+                Err(e) => format!("Could not save that setting: {e}. Nothing changed."),
+            };
+            self.push(false, "message", msg, None);
+            self.draw();
+            return;
+        }
+        match pawline_core::models::check(kind, &raw, home.as_deref()) {
+            Err(msg) => self.push(false, "message", msg, None),
+            Ok(p) => {
+                paths.set(kind, Some(p.clone()));
+                match pawline_core::models::save(&store, &paths) {
+                    Err(e) => self.push(false, "message", format!("Could not save that setting: {e}. Nothing changed."), None),
+                    Ok(()) => {
+                        let size = std::fs::metadata(&p).map(|m| pawline_core::models::size_text(m.len())).unwrap_or_default();
+                        let next = match kind {
+                            pawline_core::models::Kind::Speech => " Voice input will use it with whisper.cpp.".to_string(),
+                            pawline_core::models::Kind::Vision => " Your llama-server still loads the file; Pawline will use it when it runs the model itself.".to_string(),
+                            pawline_core::models::Kind::Mmproj => String::new(),
+                        };
+                        self.push(false, "message", format!("Saved: {} = {} ({}, owner-only in {}).{}", kind.label(), p.display(), size, store.display(), next), None);
+                    }
+                }
+            }
+        }
+        self.draw();
+    }
+
     fn key(&mut self, e: KeyEvent) {
+        // Typing a model file path for the Settings rows: Enter saves, Esc cancels, other keys
+        // type into the normal box. Nothing is loaded and nothing is captured.
+        if self.model_prompt.is_some() {
+            match e.keysym {
+                Keysym::Escape => {
+                    self.model_prompt = None;
+                    self.input.clear();
+                    self.toast = Some("Model setting cancelled, nothing changed");
+                }
+                Keysym::Return | Keysym::KP_Enter => self.commit_model_prompt(),
+                Keysym::BackSpace => self.input.backspace(),
+                Keysym::Delete => self.input.delete(),
+                Keysym::v | Keysym::V | Keysym::Insert if self.ctrl => {
+                    if let Some(t) = self.clip_paste() {
+                        self.input.insert(&t);
+                    }
+                }
+                _ => {
+                    if !self.ctrl {
+                        if let Some(t) = e.utf8 {
+                            if !t.is_empty() && !t.chars().any(|c| c.is_control()) {
+                                self.input.insert(&t);
+                            }
+                        }
+                    }
+                }
+            }
+            self.draw();
+            return;
+        }
         self.toast = None;
         if !matches!(self.vstate, VState::Working) {
             self.vnote = false;
@@ -3934,6 +4069,7 @@ fn main() {
         settings_open: false,
         settings_sel: 0,
         settings_scroll: 0.0,
+        model_prompt: None,
         t0: std::time::Instant::now(),
         r_gear: (0.0, 0.0, 0.0, 0.0),
         input_w: 300.0,

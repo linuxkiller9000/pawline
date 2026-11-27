@@ -78,6 +78,13 @@ pub fn moonshine_files(dir: &Path) -> Option<[PathBuf; 5]> {
 /// Look for sherpa-onnx and a Moonshine model where Pawline documents them: PATH, or ~/.local/share/pawline/sherpa,
 /// and ~/.local/share/pawline/models/moonshine-*.
 pub fn find_stt(home: &Path, has: &dyn Fn(&str) -> bool) -> SttSetup {
+    find_stt_at(home, has, None)
+}
+
+/// Same, but a speech model the user pointed Pawline at (Settings, or "use speech model <path>")
+/// wins over the first .bin found in the models folder. Nothing else changes: the whisper.cpp
+/// command still has to exist, and no model is ever downloaded.
+pub fn find_stt_at(home: &Path, has: &dyn Fn(&str) -> bool, configured: Option<&Path>) -> SttSetup {
     let base = home.join(".local/share/pawline");
     let private = base.join("sherpa/bin/sherpa-onnx-offline");
     let sherpa = if has("sherpa-onnx-offline") {
@@ -90,7 +97,11 @@ pub fn find_stt(home: &Path, has: &dyn Fn(&str) -> bool) -> SttSetup {
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(base.join("models")).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
     dirs.sort();
     let moonshine = dirs.into_iter().find(|d| d.is_dir() && d.file_name().map_or(false, |n| n.to_string_lossy().starts_with("moonshine-")) && moonshine_files(d).is_some());
-    SttSetup { sherpa, moonshine, whisper_model: find_model(None, home) }
+    let whisper_model = match configured {
+        Some(p) => Some(p.to_path_buf()),
+        None => find_model(None, home),
+    };
+    SttSetup { sherpa, moonshine, whisper_model }
 }
 
 /// The speech-to-text command for the WAV at `wav`. Order: `PAWLINE_STT_CMD` override (file path appended; it must
@@ -535,6 +546,26 @@ mod tests {
         assert!(e.contains("parecord") && e.contains("arecord"));
         let o = recorder(Some("myrec --fast"), &|_| false, out).unwrap();
         assert_eq!((o.program.as_str(), o.args), ("myrec", vec!["--fast".to_string(), "/run/x.wav".to_string()]));
+    }
+
+    #[test]
+    fn a_pointed_speech_model_wins_over_the_one_in_the_models_folder() {
+        let d = std::env::temp_dir().join(format!("pawline-stt-point-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let models = d.join(".local/share/pawline/models");
+        std::fs::create_dir_all(&models).unwrap();
+        let auto = models.join("ggml-base.en.bin");
+        std::fs::write(&auto, b"x").unwrap();
+        let pointed = d.join("my-whisper.bin");
+        std::fs::write(&pointed, b"x").unwrap();
+        let su = find_stt_at(&d, &|_| false, Some(&pointed));
+        assert_eq!(su.whisper_model.as_deref(), Some(pointed.as_path()), "the file the user pointed at is the one used");
+        let su2 = find_stt_at(&d, &|_| false, None);
+        assert_eq!(su2.whisper_model, Some(auto), "with nothing pointed at, the models folder still works as before");
+        // and the command it builds really carries that file
+        let c = stt(None, &|b| b == "whisper-cli", &su, std::path::Path::new("/tmp/a.wav")).unwrap();
+        assert!(c.args.iter().any(|a| a == &pointed.to_string_lossy().to_string()), "{:?}", c.args);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
