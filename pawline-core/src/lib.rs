@@ -34,6 +34,7 @@ pub mod pending;
 pub mod platform;
 pub mod planmem;
 pub mod providers;
+pub mod runner;
 pub mod search;
 pub mod shrink;
 pub mod screencap;
