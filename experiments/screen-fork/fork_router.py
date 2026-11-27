@@ -319,6 +319,7 @@ def main():
         t_ocr = time.time()
         lines = ocr_lines(png)
         ocr_dt = time.time() - t_ocr
+        ocr_charged = False  # OCR is per image, not per question
         rows = [r for r in qa if r["image"] == img]
         for r in eb.pick_questions(rows):
             qid = f"{img}|{r['family']}|{r['question']}"
@@ -330,8 +331,12 @@ def main():
             confusion[(r["family"], rt)] += 1
             ok = eb.norm(r["answer"]) in eb.norm(got) and eb.norm(r["answer"]) != ""
             peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+            # charge the image's OCR to the first question that uses it, so the
+            # per-question figure is honest and the total still adds up
+            charge = 0.0 if ocr_charged else ocr_dt
+            ocr_charged = True
             res["router"][qid] = {"ok": ok, "expected": r["answer"], "got": got,
-                                  "seconds": round(dt + (ocr_dt if rt != "cache" else 0), 1),
+                                  "seconds": round(dt + charge, 3),
                                   "peak_kib": peak, "route": rt}
             print(f"{'OK ' if ok else 'MISS'} [router/{rt}] {img} {r['family']:9s} "
                   f"want={r['answer']!r} got={got!r} ({dt:.2f}s)", flush=True)

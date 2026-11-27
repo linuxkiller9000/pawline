@@ -345,7 +345,7 @@ eval2, 86 questions:
 
 | method | total | avg s/q | peak MiB |
 |--------|-------|---------|----------|
-| router (no model) | 84/86 | 0.5 | 81 |
+| router (no model) | 84/86 | 0.27 | 81 |
 | OCR hybrid | 29/86 | 1.4 | 793 |
 | stock 256M @960px | 13/86 | 9.7 | 534 |
 | stock 256M + crop + candidates + grammar | 36/86 | 16.2 | 539 |
@@ -376,7 +376,7 @@ Four findings:
    instead ("1.", "23.3.", "Nothing to Commend."). Counting stays at 2/8, the
    clock at 1/8. Refusal and counting are what training buys; no prompt or
    grammar bought them here.
-3. The router wins outright on this battery: 84/86, 20x faster than the tuned
+3. The router wins outright on this battery: 84/86, 60x faster than the tuned
    model, 6.5x smaller, and it fails only on two browser URLs where tesseract
    read `linuxkiller9000` as `lLinuxkiller9000`.
 4. eval3 makes the split explicit: the router answers 84/84 of the state, text
@@ -406,6 +406,10 @@ of them knows it, which is why the router refuses: a colour question about a
 pixel it never looked at is exactly the question that produces a confident wrong
 answer. These families are what a trained fork is for, and they are the reason
 the Colab run is still worth one more attempt.
+
+The router's 0.27 s/question is measured alone on an idle box: median 0.02 s for
+a metadata answer, and the first question on each new scene pays that scene's
+tesseract pass (max 1.86 s). OCR is charged once per image, not per question.
 
 Caveats: every timing here is this sandbox (1 vCPU, 2 GB), not the N5010. The
 router's window metadata comes from `scene_meta.py`, which supplies the same
