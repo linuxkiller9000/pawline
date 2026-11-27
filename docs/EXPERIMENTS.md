@@ -158,6 +158,31 @@ downscale floor for usable answers is likely 1280-1920px even on the
 256M, and small terminal text stays unreliable on both models. The
 setting keeps the default image path on the 500M.
 
+## 4e. OCR hybrid vs vision models on screens (live, sandbox)
+
+Same synthetic 1920x1080 desktop as 4d. Pipeline (experiments/screen-fork/
+ocr_screen.py): 2x upscale + grayscale + autocontrast, tesseract (Apache-2.0)
+~1 s, then the OCR text alone to qwen2.5-0.5b on llama-server.
+
+| approach | wall | prompt tokens | result |
+|----------|------|---------------|--------|
+| 256M, full 1920px (from 4d) | 41.8 s | 622 | missed almost everything |
+| 500M, full 1920px (from 4d) | 56.7 s | 622 | partial, hallucinated credentials |
+| OCR hybrid | ~10 s (1 s OCR + 8.9 s text) | 160 | correct window list (terminal, firefox), correct content (repo URL, "208 passed", Downloads files), no hallucination |
+
+OCR extraction quality: after 2x upscale + autocontrast, tesseract reads
+nearly all UI text including small terminal lines; raw tesseract on the
+untreated image reads almost nothing - the preprocessing is load-bearing.
+
+Boundary test (honest limit): asked "what color is the terminal
+background, which window is on top?", the hybrid answered "blue / firefox"
+- wrong, and it answered instead of saying the OCR text does not show it.
+OCR+text wins on text-content questions and is blind to visual/spatial/
+color questions; the system prompt alone does not stop it from guessing.
+A production version needs either the vision model as a visual fallback
+or explicit refusal training. This is also where a screen-tuned fork
+(experiments/screen-fork/RESEARCH.md) could add value over both.
+
 ## 5. Laya
 
 The opt-in Laya intent router (150M) is verified end to end against the real
