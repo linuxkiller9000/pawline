@@ -972,3 +972,9 @@ second question about that screen costs ~0.3 s instead of ~7 s. Test:
 
 Screen captures only ever go to a loopback provider (`screen_vision_provider`
 refuses anything else), so none of this moves pixels off the machine.
+
+One more property that matters in real use: the runner keeps more than one
+image's prefix. Alternating between two different screenshots, each already seen
+once: A 6.74 s (cold), B 6.73 s (cold), then A 0.23 s, B 0.23 s, A 0.19 s,
+B 0.42 s (cache_n=138 for both). So switching back and forth between two
+windows does not re-encode either of them.
