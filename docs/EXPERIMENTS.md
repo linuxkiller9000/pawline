@@ -986,3 +986,8 @@ pays the full encode again. Two questions asked inside the same clock minute on
 an otherwise still screen hit; a question after the clock moves does not. Making
 that better would need the model call to ignore volatile regions, which changes
 what the model is looking at, so it is not something to do quietly.
+
+Measured, not reasoned (same scene, same question, image first, warm server):
+identical bytes 11.76 s then 0.05 s (`cache_n=482`); one minute of clock painted
+into the top bar 11.77 s then 0.07 s. So a single changed patch of a few hundred
+pixels costs the whole encode again, exactly as the paragraph above says.
