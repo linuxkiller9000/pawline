@@ -670,6 +670,13 @@ pub fn share_target_from_phrase(low: &str, question: &str, wins: &[WindowInfo]) 
 /// whole screen and names the window option.
 pub fn names_a_window(question: &str, wins: &[WindowInfo]) -> bool {
     let q = question.to_lowercase();
+    // A question about the desktop itself is about the whole frame, not a window.
+    if ["desktop", "background", "wallpaper", "whole screen", "taskbar", "top bar"]
+        .iter()
+        .any(|w| q.contains(w))
+    {
+        return false;
+    }
     if q.contains("focused window") || q.contains("this window") || q.contains("that window") {
         return !wins.is_empty();
     }
@@ -1222,6 +1229,16 @@ mod tests {
         std::fs::write(&e, b"").unwrap();
         assert!(!wait_for_capture(&e, std::time::Duration::from_millis(40)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+    #[test]
+    fn desktop_questions_keep_the_whole_frame() {
+        let wins = parse_niri_windows(SAMPLE_WINDOWS).unwrap();
+        assert!(!names_a_window("what colour is my desktop background", &wins));
+        assert!(!names_a_window("is there a taskbar on the whole screen", &wins));
+        assert!(names_a_window("what does the kitty window say", &wins));
+        assert!(names_a_window("what is the title of the focused window", &wins));
     }
 
 }

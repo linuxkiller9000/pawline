@@ -1207,8 +1207,8 @@ Nothing is sent from your machine, and after setup Laya works fully offline. You
                 };
                 let window_option = match (&share, pawline_core::screencap::niri_windows()) {
                     (ShareTarget::WholeScreen, Some(wins)) => pawline_core::screencap::window_for_question(&question, &wins)
-                        .map(|w| format!(" To send only one window instead, say \"share only the {} window\" and the card will name it.", w.app_name())),
-                    _ => None,
+                        .map(|w| format!(" Instead, say \"share only the {} window\" to send just that window, or \"pick a region\" to draw one.", w.app_name())),
+                    _ => Some(" Instead, say \"share the whole screen\" or \"pick a region\" to draw one.".to_string()),
                 };
                 *LAST_SCREEN_QUESTION.lock().unwrap() = Some(question.clone());
                 let op = Operation::ScreenQA { provider: provider.spec(), question, share: share.clone() };
