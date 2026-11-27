@@ -99,14 +99,33 @@ With a loopback provider nothing leaves the machine.
 
 ## 5. Laya
 
-The opt-in Laya intent router (150M) got its pinned-download path verified
-against the real files: model (302,276,803 bytes) and tokenizer (2,132,967
-bytes) match the sha256 pins in laya_setup.rs exactly. A full inference test
-needs the fp32 conversion (~640 MB, over this sandbox's RAM) and pawline-native
-(which needs system GUI libraries the sandbox lacks); both run on the Dell.
+The opt-in Laya intent router (150M) is verified end to end against the real
+files:
+
+- Pinned download: model (302,276,803 bytes) and tokenizer (2,132,967 bytes)
+  match the sha256 pins in laya_setup.rs exactly.
+- Conversion: the in-app converter (pawline-core/examples/laya_convert.rs)
+  turns the contrib-op ONNX into a tract-runnable fp32 graph in 12.3 s; the
+  result is 96 nodes (~640 MB fp32, loaded once, kept in memory).
+- Forward pass: 347 ms on the converted graph, finite logits (sandbox).
+- Routing quality (experiments/laya-route-bench): the real converted model,
+  the real tokenizer and a faithful port of laya.rs route_inner over a
+  22-message battery: 18 intent phrases across 12 intents plus 4 adversarial
+  none-cases. Result: 21/22 pass. Every positive phrase routed to the right
+  intent at p=0.966-0.982 (threshold 0.80), all four none-cases correctly
+  declined except one: "my folder of memories from school" fired make_folder
+  at p=0.950. That is a genuine model false positive on an adversarial
+  phrase, worth a follow-up (threshold tuning or an extra negative phrasing).
+  Known harness limitation: it exercises only the common fits-in-window
+  tokenization path, not the over-budget per-phrasing truncation branch.
+
+Caveat on speed: per-message routing in this sandbox takes 3.5-6 s
+(fp32, tract, 2 GB RAM VM). That is a sandbox floor, not a Dell number;
+tools/dell_bench.sh is where the real timing comes from. A sub-second Dell
+result would make Laya viable as an always-on pre-classifier; a multi-second
+result says keep it opt-in.
 
 ## Honest labels
 
-All numbers above are sandbox numbers (a 2026 cloud VM, AVX2, 1 GB RAM for
-builds) unless a row says otherwise. Nothing here was measured on the Dell;
+All numbers above are sandbox numbers (a 2026 cloud VM, AVX2, 2 GB RAM) unless a row says otherwise. Nothing here was measured on the Dell;
 `tools/dell_bench.sh` exists to produce those numbers.

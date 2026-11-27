@@ -1,0 +1,16 @@
+[package]
+name = "laya-route-bench"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone experiment harness, not part of the Pawline workspace.
+[workspace]
+
+[dependencies]
+tract-onnx = "0.23"
+tokenizers = "0.21"
+regex = "1"
+
+[profile.release]
+opt-level = 0
+codegen-units = 16

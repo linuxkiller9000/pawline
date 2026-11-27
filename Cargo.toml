@@ -1,6 +1,7 @@
 [workspace]
 members = ["pawline-core", "pawline-needle", "pawline-native", "pawline-needle-native", "vendor/needle-rs/needle-core", "vendor/needle-rs/needle-infer"]
 resolver = "2"
+exclude = ["experiments"]
 
 [profile.release]
 opt-level = 2
