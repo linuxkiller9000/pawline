@@ -537,3 +537,114 @@ pointer position without a click. Findings as of 2026-11-27:
 Conclusion: the window crop is available today from metadata alone and needs no
 new compositor feature; the pointer crop is worth having only as a convenience
 over the same code, and it depends on a niri version with `msg pointer`.
+
+## 4i. Why not train a tiny desktop-only model from scratch (2026-11-27)
+
+The question: instead of fine-tuning SmolVLM, train a small model only on desktop
+content - words, colours, UI elements - and the user's own suspicion that such a
+model would not know about things it has never seen.
+
+The suspicion is right, and the measurements in 4g and 4h say something stronger:
+what we are still getting wrong is not a knowledge gap. It is a resolution gap,
+and it closes with crops, not with training.
+
+### What from-scratch actually requires
+
+The ViT paper is the cleanest statement of the data hunger: trained on a
+mid-sized dataset like ImageNet without strong regularization, ViT "yield[s]
+modest accuracies of a few percentage points below ResNets of comparable size",
+and only pre-trained on ImageNet-21k or JFT-300M does it approach or beat the
+state of the art. A vision encoder does not get its features from architecture;
+it gets them from data volume.
+
+The closest thing to "a model trained only on UI" is Google's ScreenAI, and it is
+not trained from scratch. Its 670M variant is a ViT-B/16 (92M) plus mT5-base
+(583M), both started from pre-trained unimodal checkpoints, then pre-trained on a
+corpus of desktop, mobile and tablet screenshots collected by crawling apps and
+web pages, annotated automatically with a screen schema and expanded into QA
+pairs by PaLM 2-S. The 2B and 5B variants start from the same kind of checkpoints
+and, for 5B, from PaLI-3's multimodal checkpoint. So even the UI specialist with
+Google's data pipeline treats "UI-only" as a specialization stage on top of
+general pre-training, not as a substitute for it.
+
+Apple's Ferret-UI Lite makes the same choice at the small end: a 3B model built
+on an internal 3B model already pretrained on text and vision-language data, then
+SFT for 10K steps and RL for 1.5K steps on a curated mixture of real and synthetic
+GUI data. It reaches 91.6 on ScreenSpot-V2 and 53.3 on ScreenSpot-Pro, and its
+paper lists image cropping and zoom-in as one of the three things that make a
+small model work at GUI resolution. That is an independent confirmation of the 4h
+finding, from a team with far more data than we have.
+
+### What fine-tuning costs, and why it is still the cheaper direction
+
+LoRA does learn less than full fine-tuning: on code and maths, standard low-rank
+settings substantially underperform full fine-tuning, and the perturbations full
+fine-tuning learns have rank 10-100x higher than typical LoRA configurations. It
+also forgets less, more so than weight decay or dropout. The scaling-laws study
+puts a number on the trade: an inverse linear relationship between fine-tuning
+performance and the amount of forgetting, and it holds for LoRA too.
+
+So specializing always spends generality. Fine-tuning spends less of it than
+training from scratch, and LoRA spends less than full fine-tuning. That is the
+whole argument for fine-tuning over from-scratch, before compute enters it.
+
+### What our own numbers say the gap is
+
+On the same 86-question battery (sandbox, 1 vCPU / 2 GB, all in 4f/4g):
+
+| path | correct | s/q | note |
+|---|---|---|---|
+| metadata router, no model | 84/86 | 0.27 | state, text, focus, refusal |
+| OCR hybrid | 29/86 | 1.4 | |
+| stock SmolVLM-500M, full frame | 19/86 | 18.5 | |
+| stock SmolVLM-256M, full frame | 13/86 | 9.7 | visual 5/16 |
+| stock 256M, metadata-chosen crop | progress 7/8, border colour 5/8 | 7.1-14.7 | zero training |
+
+Every no-training path sits near chance on pixel colour (5-6 of 16 against a
+2/16 chance line) until the crop is right, and then a stock model answers most of
+them. Nothing in that table is a missing fact about desktops. The model already
+knows what a progress bar is and what teal looks like; it could not see them.
+
+A model trained only on desktop content would be trained to solve a problem the
+router and the crops already solve, while giving up the language prior that makes
+"which window is focused" and "I cannot see that" work at all. Section 4g also
+measured that refusal does not come from prompting (0/8 with a grammar that
+offers the refusal string), so a specialized model would answer out of scope
+confidently unless the router keeps that job anyway.
+
+### What it would cost on the N5010
+
+The CPU LoRA probe in 4g is the honest scale marker: SmolVLM-256M cannot even be
+adapted on 2 GB, killed by the OOM killer before the first step at fp32 and again
+at bf16 with a 384px image. A 6 GB machine has room for the weights but not for a
+claim about speed, and from-scratch pre-training is orders of magnitude past
+adaptation: ScreenAI-scale work means millions of screenshots plus a labeling
+pipeline that itself needs a large model. We also do not have the corpus: 320
+synthetic scenes and 4564 QA rows is a fine-tuning set, not a pre-training set.
+
+### Recommendation
+
+1. Do not train from scratch. Nothing in the published UI-model literature does,
+   the smallest credible UI specialists are pretrained backbones plus large
+   auto-labelled corpora, and we have neither the data nor the compute.
+2. Ship stock SmolVLM-256M plus the metadata router plus metadata-chosen crops.
+   It is the only path measured to beat the OCR hybrid on latency and the full
+   frame on visual accuracy at the same time, and it needs no training at all.
+3. If training happens, it is LoRA on the free Colab T4, on the visual families
+   only, and it ships only if it beats the crop baseline (progress 7/8, border
+   colour 5/8, indicator 5/8 with the oracle crop) on held-out scenes and does
+   not lose eval2's refusal families. `fork_eval.sh FORK.gguf MMPROJ.gguf` runs
+   exactly that comparison, and `leakage_check.py` guards the data.
+4. For unseen apps and themes, prefer mechanisms that need no training: metadata
+   for structure, OCR for text, crops for colour. They transfer to an app nobody
+   has seen, which is the one thing a trained-only model cannot promise and his
+   battery cannot test until he meets one.
+
+Sources:
+- ViT, "An Image is Worth 16x16 Words" - https://arxiv.org/abs/2010.11929
+- ScreenAI - https://arxiv.org/html/2402.04615 and Google's summary,
+  https://research.google/blog/screenai-a-visual-language-model-for-ui-and-visually-situated-language-understanding/
+- Ferret-UI Lite (Apple) - https://arxiv.org/html/2509.26539
+- "LoRA Learns Less and Forgets Less" - https://arxiv.org/abs/2405.09673
+- "Scaling Laws for Forgetting When Fine-Tuning Large Language Models" -
+  https://arxiv.org/abs/2401.05605
