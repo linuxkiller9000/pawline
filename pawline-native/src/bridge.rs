@@ -324,6 +324,37 @@ fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str, share
     *LAST_SCREEN_SEARCH.lock().unwrap() = None;
     // Same rule as chat and images: the confirmed card named a provider.
     let provider = screen_vision_provider()?;
+    // Until the engine lives inside Pawline: if the local llama.cpp runner is not answering,
+    // Pawline starts it with the files the user pointed at, so nothing is launched by hand.
+    // A server that already answers is never started twice, and the child dies with Pawline
+    // (kernel parent-death signal), so a crash cannot leave an orphan holding the model.
+    if provider.local && provider.spec().name.to_lowercase().contains("llama") {
+        let home = pawline_core::platform::home_dir();
+        let paths = pawline_core::models::store_path().map(|p| pawline_core::models::load(&p)).unwrap_or_default();
+        let env = |k: &str| std::env::var(k).ok();
+        if let Some(v) = pawline_core::models::configured(pawline_core::models::Kind::Vision, &paths, &env, home.as_deref()) {
+            let mm = pawline_core::models::configured(pawline_core::models::Kind::Mmproj, &paths, &env, home.as_deref());
+            let has = |b: &str| pawline_core::screencap::binary_on_path(b);
+            let data = home.as_deref().map(|h| h.join(".local/share/pawline"));
+            match pawline_core::runner::find_binary(&has, &v, data.as_deref()) {
+                Some(bin) => {
+                    let probe = |u: &str| {
+                        let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_millis(800));
+                        pawline_core::imagegen::Http::get(&http, u, &[]).is_ok()
+                    };
+                    if let Err(e) = pawline_core::runner::ensure_running(&provider.spec().url, &v, mm.as_deref(), &bin, &probe, std::time::Duration::from_secs(90)) {
+                        return Err(PawError::Exec(e));
+                    }
+                }
+                None => {
+                    return Err(PawError::Exec(format!(
+                        "Pawline would start the runner itself with {}, but llama-server was not found on this computer (not on PATH, not next to the model). Install it, or start your own server. Nothing was captured.",
+                        v.display()
+                    )));
+                }
+            }
+        }
+    }
     let now = provider.spec();
     if now.name != spec.name || now.url != spec.url || now.model != spec.model {
         return Err(PawError::Exec(format!(

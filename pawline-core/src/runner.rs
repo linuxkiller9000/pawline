@@ -119,7 +119,7 @@ pub fn ensure_running(
             });
         }
     }
-    let child = cmd.spawn().map_err(|e| {
+    let mut child = cmd.spawn().map_err(|e| {
         format!(
             "Could not start {} ({e}). If llama-server is not installed, install it (for example the llama.cpp package) or start your own server. Nothing was captured.",
             binary.display()
@@ -132,6 +132,15 @@ pub fn ensure_running(
     loop {
         if probe(&url) {
             return Ok(Outcome::Started { pid, log });
+        }
+        // A server that dies straight away (usually the port is already taken by something
+        // that is not a llama server) must not keep the user waiting for the full timeout.
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!(
+                "Started {} but it exited straight away ({status}). Something else may already be listening on that port. Its output is in {}.",
+                binary.display(),
+                log.display()
+            ));
         }
         if Instant::now() >= deadline {
             return Err(format!(
@@ -201,6 +210,36 @@ mod tests {
         let err2 = out2.unwrap_err();
         assert!(err2.contains("Could not start") && err2.contains("Nothing was captured"), "{err2}");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+
+    /// Opt-in integration test: proves start, answer, no second copy, and that the child is
+    /// really gone after it is signalled. Runs only when the environment names a real binary
+    /// and model, so the normal test suite stays hermetic:
+    ///   PAWLINE_RUNNER_TEST_BIN=/path/llama-server PAWLINE_RUNNER_TEST_MODEL=/path/x.gguf
+    ///   (optionally PAWLINE_RUNNER_TEST_MMPROJ=/path/mmproj.gguf)
+    #[test]
+    fn a_real_runner_starts_answers_does_not_double_start_and_dies_when_signalled() {
+        let (Ok(bin), Ok(model)) = (std::env::var("PAWLINE_RUNNER_TEST_BIN"), std::env::var("PAWLINE_RUNNER_TEST_MODEL")) else {
+            return;
+        };
+        let mmproj = std::env::var("PAWLINE_RUNNER_TEST_MMPROJ").ok();
+        let port: u16 = std::env::var("PAWLINE_RUNNER_TEST_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8097);
+        let url = format!("http://127.0.0.1:{port}");
+        let up = |_: &str| std::net::TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().unwrap(), Duration::from_millis(300)).is_ok();
+        assert!(!up(""), "the port must be free before the test starts");
+        let out = ensure_running(&url, Path::new(&model), mmproj.as_deref().map(Path::new), Path::new(&bin), &up, Duration::from_secs(120)).expect("the runner starts");
+        let Outcome::Started { pid, log } = out else { panic!("expected a fresh start, got {out:?}") };
+        assert!(up(""), "it answers after starting");
+        // A second request must not start a second copy.
+        assert_eq!(ensure_running(&url, Path::new(&model), None, Path::new(&bin), &up, Duration::from_secs(5)).unwrap(), Outcome::AlreadyRunning);
+        // Signalling the child the way the parent-death signal would, then waiting, must free the port.
+        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while up("") && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert!(!up(""), "the runner is gone after SIGTERM (its log: {})", log.display());
     }
 
     #[test]
