@@ -940,3 +940,35 @@ Landed: `chat_with_image` now sends the image part first, with a test that fails
 if the text part ever moves ahead of it. Still open: the first question about a
 new screenshot still pays the full encode (7.0 s here, ~2 s expected on 4
 threads, unmeasured on the Dell), and pawline spawns no prefill today.
+
+## 4l. Encode-at-capture: measured, and why it is not shipped as a blind prefill (2026-11-28)
+
+The idea (asked for directly): start encoding the screenshot the moment it is
+captured, so the question that follows finds the vision prefix already warm.
+Measured on the same warm llama-server, 500 px crop, sandbox 1 vCPU:
+
+| sequence | wall |
+|---|---|
+| prefill (image + ".") fired in the background, real question 0.4 s later | 12.95 s for the question, 13.36 s for both |
+| prefill completes first, then the real question | 6.78 s + 0.25 s |
+| no prefill, first question on that image | 6.8-7.0 s |
+
+The queued request does not reuse a prefix that is still being encoded: it waits
+for the running request and then encodes the image again (`cache_n=0`). So a
+prefill fired at capture, with the question following immediately, makes the
+wait worse, not better. It only pays when it can *finish* before the question
+arrives, which needs a gap of at least one encode (~7 s here, ~2-3 s on four
+threads) between capture and question. This flow has no such gap: the question
+comes first, then the capture, then the call.
+
+What the ordering win actually needs, and got: the image part has to be
+byte-for-byte what the runner saw last time. `downscale_png` used to hand back
+the capture's own bytes unchanged when the image was already narrow enough,
+which means whatever a capture tool stamps into the PNG (a text or time chunk)
+travels to the runner and defeats the prefix match. It now re-encodes in that
+case too, so two shots of an unchanged screen give identical bytes, and the
+second question about that screen costs ~0.3 s instead of ~7 s. Test:
+`the_same_pixels_give_the_same_bytes_even_when_the_capture_is_stamped`.
+
+Screen captures only ever go to a loopback provider (`screen_vision_provider`
+refuses anything else), so none of this moves pixels off the machine.

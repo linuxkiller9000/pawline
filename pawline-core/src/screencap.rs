@@ -454,7 +454,13 @@ pub fn prepare_for_ocr(png: &[u8]) -> Result<Vec<u8>, PawError> {
 pub fn downscale_png(png: &[u8], max_w: u32) -> Result<Vec<u8>, PawError> {
     let (px, w, h, ct) = decode_png(png)?;
     if w <= max_w {
-        return Ok(png.to_vec());
+        // Re-encode even when no shrinking is needed. The vision prefix cache
+        // (docs/EXPERIMENTS.md 4k) only hits when the image part is byte-for-byte
+        // the same as last time, and a capture tool may stamp its PNG with a
+        // time chunk or other ancillary data that changes between two shots of
+        // an unchanged screen. Decoding and re-encoding keeps the pixels and
+        // drops everything else, so the same screen yields the same bytes.
+        return reencode_png(&px, w as usize, h as usize, ct);
     }
     let ch = match ct {
         png::ColorType::Rgb => 3usize,
@@ -480,13 +486,20 @@ pub fn downscale_png(png: &[u8], max_w: u32) -> Result<Vec<u8>, PawError> {
             for c in 0..ch { out[(y2 * w2 + x2) * ch + c] = (acc[c] / n.max(1)) as u8; }
         }
     }
+    reencode_png(&out, w2, h2, ct)
+}
+
+/// PNG bytes for these pixels, with no ancillary chunks: two calls with the
+/// same pixels give the same bytes, which is what lets the runner reuse the
+/// vision prefix instead of running the tower again.
+fn reencode_png(px: &[u8], w: usize, h: usize, ct: png::ColorType) -> Result<Vec<u8>, PawError> {
     let mut enc_buf = Vec::new();
     {
-        let mut enc = png::Encoder::new(&mut enc_buf, w2 as u32, h2 as u32);
+        let mut enc = png::Encoder::new(&mut enc_buf, w as u32, h as u32);
         enc.set_color(ct);
         enc.set_depth(png::BitDepth::Eight);
         let mut wri = enc.write_header().map_err(|e| PawError::Exec(format!("Could not re-encode the screenshot ({e}). Nothing was done.")))?;
-        wri.write_image_data(&out).map_err(|e| PawError::Exec(format!("Could not re-encode the screenshot ({e}). Nothing was done.")))?;
+        wri.write_image_data(px).map_err(|e| PawError::Exec(format!("Could not re-encode the screenshot ({e}). Nothing was done.")))?;
     }
     Ok(enc_buf)
 }
@@ -1071,9 +1084,60 @@ mod tests {
         assert_eq!(ct, png::ColorType::Rgb);
         // top-left pixel of the downscaled image is still the red quadrant.
         assert!(px[0] > 150 && px[1] < 80);
-        // already small: returned byte-identical, no work.
-        assert_eq!(downscale_png(&png, 64).unwrap(), png);
-        assert_eq!(downscale_png(&png, 128).unwrap(), png);
+        // already small: pixels unchanged, and the bytes are re-encoded on
+        // purpose so that a stamped capture still gives stable bytes.
+        let kept = downscale_png(&png, 128).unwrap();
+        let (px2, w2, h2, _) = decode_png(&kept).unwrap();
+        assert_eq!((w2, h2), (64, 32));
+        let (px1, _, _, _) = decode_png(&png).unwrap();
+        assert_eq!(px1, px2);
+        assert_eq!(downscale_png(&png, 64).unwrap(), kept);
+    }
+
+    /// A tEXt chunk, the way a capture tool stamps its PNG with its own name
+    /// and version. Inserted after IHDR so the file stays valid.
+    fn with_text_chunk(png: &[u8], key: &str, val: &str) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(key.as_bytes());
+        data.push(0);
+        data.extend_from_slice(val.as_bytes());
+        let mut typed = b"tEXt".to_vec();
+        typed.extend_from_slice(&data);
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        chunk.extend_from_slice(&typed);
+        chunk.extend_from_slice(&crc32(&typed).to_be_bytes());
+        let mut out = png[..33].to_vec();   // signature + IHDR
+        out.extend_from_slice(&chunk);
+        out.extend_from_slice(&png[33..]);
+        out
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for b in bytes {
+            crc ^= *b as u32;
+            for _ in 0..8 {
+                let m = if crc & 1 != 0 { 0xEDB8_8320 } else { 0 };
+                crc = (crc >> 1) ^ m;
+            }
+        }
+        !crc
+    }
+
+    /// The runner reuses the vision prefix only when the image part is
+    /// byte-for-byte what it saw last time (docs/EXPERIMENTS.md 4k: 7.0 s
+    /// becomes 0.3 s). Two captures of an unchanged screen must therefore give
+    /// the same bytes, whatever the capture tool stamped on the file.
+    #[test]
+    fn the_same_pixels_give_the_same_bytes_even_when_the_capture_is_stamped() {
+        let png = test_png(64, 32);
+        let stamped = with_text_chunk(&png, "Software", "niri 26.1");
+        let plain_bytes = downscale_png(&png, 128).unwrap();
+        let stamped_bytes = downscale_png(&stamped, 128).unwrap();
+        assert_eq!(plain_bytes, stamped_bytes, "ancillary chunks must not reach the vision model");
+        assert_eq!(downscale_png(&stamped, 128).unwrap(), stamped_bytes, "same pixels, same bytes");
+        assert!(!stamped_bytes.windows(4).any(|w| w == b"tEXt"));
     }
     #[test]
     fn crop_choice_follows_the_question_and_needs_no_pointer() {
