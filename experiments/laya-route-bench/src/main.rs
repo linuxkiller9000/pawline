@@ -12,7 +12,7 @@ const INTENTS: &[(&str, &[&str])] = &[
     ("delete", &["delete a file or folder", "remove something", "trash this file"]),
     ("rename", &["rename a file or folder", "change the name of a file"]),
     ("list_files", &["list the files in a folder", "show me what is in downloads"]),
-    ("open_app", &["open an application", "launch firefox", "start a program"]),
+    ("open_app", &["open an application", "launch firefox", "start a program", "open the calculator"]),
     ("weather", &["what is the weather", "will it rain", "weather forecast for a city", "is it going to be hot", "do i need a coat today"]),
     ("math", &["calculate something", "solve an equation", "what is 2 plus 2", "solve for x"]),
     ("search", &["search for information", "look something up", "what is a black hole", "what is a file system", "how do magnets work", "why is the sky blue", "a general knowledge question"]),
@@ -35,11 +35,11 @@ const FAMILIES: &[(&str, &[&str])] = &[
     (r"\b(rename|call it|change the name)\b", &["rename"]),
     (r"\b(list|show|what'?s in|downloaded|contents)\b", &["list_files"]),
     (r"\b(open|launch|start|run|firefox|spotify|app)\b", &["open_app"]),
-    (r"\b(weather|rain|hot|cold|coat|forecast|umbrella|sunny|cloudy|wether)\b", &["weather"]),
-    (r"\b(calculat|solve|equation|plus|minus|times|divided|math)\w*|\d\s*[-+*/^=]\s*\d|\d+x", &["math"]),
-    (r"\b(what|why|how|who|explain|mean|means|meaning|is a|are a)\b", &["search", "chat_about_words"]),
+    (r"\b(weather|rain|hot|cold|coat|jacket|forecast|umbrella|sunny|cloudy|wether|snow|wind|windy|fog|storm|degrees|temperature|warm)\b", &["weather"]),
+    (r"\b(calculat|solve|equation|plus|minus|times|divided|math|percent)\w*|\bhow (much|many)\b|\d\s*[-+*/^=]\s*\d|\d+x", &["math"]),
+    (r"\b(what|why|how|who|explain|mean|means|meaning|is a|are a)\b|\blook ?up\b|\btell me about\b", &["search", "chat_about_words"]),
     (r"\b(remind|remember|forget|nudge)\w*", &["remind"]),
-    (r"\b(volume|sound|hear|loud|quiet|mute|deaf)\b", &["volume"]),
+    (r"\b(volume|sound|hear|loud\w*|quiet|mute|muting|deaf)\b", &["volume"]),
     (r"\b(help|examples|what can you do|use this|how do i use)\b", &["help"]),
 ];
 
@@ -53,8 +53,8 @@ const MIN_HEAD_TOKENS: usize = 16;
 const PHRASING_SEP: &str = "\" | \"";
 /// Non-destructive intents need this much confidence; destructive ones more (a confirm
 /// card still follows either way - the threshold is about not *offering* nonsense).
-const THRESHOLD: f32 = 0.80;
-const THRESHOLD_DESTRUCTIVE: f32 = 0.90;
+const THRESHOLD: f32 = 0.96;
+const THRESHOLD_DESTRUCTIVE: f32 = 0.96;
 const CACHE_MAX: usize = 64;
 
 fn temperature(n: usize) -> f32 {

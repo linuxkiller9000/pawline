@@ -227,6 +227,23 @@ model-level miss (none won at 0.969 on "how much is 15 percent of 80").
 Follow-up: widen FAMILIES or fall back to all intents on an empty window.
 Applied: THRESHOLD and THRESHOLD_DESTRUCTIVE both 0.96 in laya.rs.
 
+Routing-gap fixes (same harness, same 42-message battery). The 4 narrow()
+misses were fixed by widening family regexes in laya.rs (mirrored in the
+bench): weather gained jacket/snow/wind/windy/fog/storm/degrees/temperature/
+warm, math gained percent and "how much|how many", search gained "look up"
+and "tell me about", volume gained loud\w*/muting forms, and open_app
+gained the phrasing "open the calculator". Measured before/after on the
+full battery: at the old thresholds (0.80/0.90) 33/42 -> 38/42; at the
+shipped thresholds (0.96/0.96) 37/42 -> 42/42 measured live (not an
+offline re-score). Fixed rows: "launch the calculator" p=0.962, "do i need
+a jacket tonight" p=0.981, "how much is 15 percent of 80" p=0.961, "look
+up the capital of iceland" p=0.965. Zero false positives. New margin note:
+the lowest true positive is now p=0.961, only 0.001 over the threshold -
+fragile; revisit with a bigger battery before trusting it. The
+empty-window fast path (29 ms chatter answers, p=0.000 rows) is still
+deliberately kept: falling back to all intents there would cost chatter
+latency and re-introduce false-positive risk; revisit only with data.
+
 Caveat on speed: per-message routing in this sandbox takes 3.5-6 s
 (fp32, tract, 2 GB RAM VM). That is a sandbox floor, not a Dell number;
 tools/dell_bench.sh is where the real timing comes from. A sub-second Dell
