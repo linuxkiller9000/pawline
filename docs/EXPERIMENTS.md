@@ -714,6 +714,28 @@ option on the card when it does not, and the tight region is what `slurp` gives
 when the user draws it. A colour question on a border is answered from the strip,
 not from the window.
 
+### The same crop helps the text route, for less money
+
+Text questions never reach the vision model: they go to tesseract, then to a
+small text model (4e). `ocr_crop.py` measures the same crop question there, on
+eval2's 16 text questions, with the hybrid's own pipeline (2x Lanczos, tesseract
+`--psm 3`, qwen2.5-0.5b through llama-server):
+
+| OCR input | answer correct | s/q | OCR chars |
+|---|---|---|---|
+| whole frame | 7/16 | 1.4 | 189-402 |
+| the window the question names | 8/16 | 0.9 | 67-172 |
+
+Retrieval is not the bottleneck: the expected string is found 15/16 in the full
+frame's text and 16/16 in the window's, so OCR reads the screen fine either way.
+The loss is in the answering step, and the window crop helps it by giving the
+text model a third of the text to ignore: same answer, less distractor, and 36%
+faster.
+
+This is why the share picker pays twice: a window capture is what OCR sees, so
+picking the window improves the text route at the same time as the visual one,
+with no extra work.
+
 ### What shipped (branch work/llm-vision-experiments)
 
 - `screencap::ShareTarget` (whole screen, one window with an optional top strip,
