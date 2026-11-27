@@ -97,6 +97,31 @@ Pawline talks to it through the same provider layer as chat: say
 cap and the destination), and the image goes only to the configured provider.
 With a loopback provider nothing leaves the machine.
 
+## 4b. Larger-context / image-tiling check (live, llama.cpp b12811)
+
+Same provider path as section 4, server started with -c 4096. Flat-color
+test images (red/blue/green/yellow quadrants, white circle, black triangle,
+white square) at three sizes, temperature 0.0:
+
+| image | prompt tokens (image share) | wall (1-thread sandbox) | answer quality |
+|-------|------------------------------|--------------------------|----------------|
+| 256 px | 149 (~120) | 9.4 s | correct: "a blue square" |
+| 1024 px | 380 (~350) | 24.2 s (23.2 s prompt) | 3/4 quadrant colors (yellow read as black, likely the black divider lines); black triangle correctly located top-right; white circle/square missed |
+| 2048 px | 1151 (~1120) | 80.8 s | same colors answer plus one hallucinated detail ("labeled home") |
+
+Findings:
+- llama.cpp tiling works through the provider layer unchanged: image tokens
+  scale ~120 -> ~350 -> ~1120 across 256/1024/2048 px. A 2048 px image plus
+  chat history plus the 1200-char description cap still fits in -c 4096.
+- The quality ceiling on multi-part spatial questions is the 256M model
+  itself, not the transport. Simple one-sentence descriptions are solid;
+  quadrant-level attribution is unreliable.
+- Sandbox timings are a 1-thread VM floor, not Dell numbers.
+
+Recommendation: keep SmolVLM-256M as the default (free, tiny, correct on
+simple asks). Quality headroom candidate for a later experiment:
+ggml-org SmolVLM-500M-Instruct-GGUF, same drop-in path.
+
 ## 5. Laya
 
 The opt-in Laya intent router (150M) is verified end to end against the real
