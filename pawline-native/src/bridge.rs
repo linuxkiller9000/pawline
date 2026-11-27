@@ -57,7 +57,7 @@ fn run_cancellable<T: Send + 'static>(
 }
 
 fn run_cancellable_with<T: Send + 'static>(
-    ticket: pawline_core::imagegen::Ticket<'_>,
+    ticket: pawline_core::imagegen::Ticket<'static>,
     job: impl FnOnce(&dyn Fn() -> bool, &dyn Fn() -> bool) -> Result<T, PawError> + Send + 'static,
 ) -> Result<T, PawError> {
     use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
@@ -186,6 +186,94 @@ fn look_at_image(spec: &pawline_core::providers::ProviderSpec, path: &str, promp
     })?;
     *LAST_CHAT_ANSWER.lock().unwrap() = Some(a.clone());
     Ok(format!("Looked at {path} - {label}:\n{a}"))
+}
+
+/// The provider used for screen-capture requests: the configured chat
+/// provider plus the optional screen-model override ("use screen model ...").
+/// Screen captures are local-only: a non-local provider is refused, never
+/// silently aimed at the internet.
+fn screen_vision_provider() -> Result<pawline_core::providers::ChatProvider, PawError> {
+    let mut p = current_chat_provider();
+    if let Some(path) = pawline_core::providers::config_path() {
+        if let Some(m) = pawline_core::providers::load_screen_model(&path) {
+            p.model = m;
+        }
+    }
+    if !p.local {
+        return Err(PawError::Exec(format!(
+            "Screen captures only ever go to a runner on this computer, and your chat provider is {} (online). Set a local one first, for example: \"use llama.cpp model smolvlm-256m\". Nothing was captured.",
+            p.name
+        )));
+    }
+    Ok(p)
+}
+
+fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str) -> Result<String, PawError> {
+    use pawline_core::screencap as sc;
+    // Same rule as chat and images: the confirmed card named a provider.
+    let provider = screen_vision_provider()?;
+    let now = provider.spec();
+    if now.name != spec.name || now.url != spec.url || now.model != spec.model {
+        return Err(PawError::Exec(format!(
+            "The chat provider changed since you confirmed that card (it is now {}, model \"{}\", at {}). Nothing was captured. Ask again to see a fresh card.",
+            now.name, now.model, now.url
+        )));
+    }
+    // Capture (only after the confirmed card; this fn is the exec arm).
+    let dest = std::env::temp_dir().join(format!("pawline-screen-{}.png", std::process::id()));
+    let cmd = sc::screen_capture_command(&sc::binary_on_path, &dest)?;
+    if cmd[0] == "niri" {
+        return Err(PawError::Exec(
+            "niri's own screenshot action writes to its own folder and Pawline cannot find the file yet; install grim (`sudo pacman -S grim`) and ask again. Nothing was captured.".into()));
+    }
+    let status = std::process::Command::new(&cmd[0]).args(&cmd[1..]).status()
+        .map_err(|e| PawError::Exec(format!("Could not run {}: {e}. Nothing was captured.", cmd[0])))?;
+    if !status.success() || !dest.exists() {
+        return Err(PawError::Exec(format!("{} did not produce a screenshot. Nothing was captured.", cmd[0])));
+    }
+    // The only copy of the pixels; deleted when this guard drops.
+    let shot = sc::ScreenShot::new(dest);
+    let bytes = std::fs::read(&shot.path).map_err(|e| PawError::Exec(format!("Could not read the capture: {e}. Nothing was done.")))?;
+    // Route: OCR for text questions, pixels for visual ones, refuse otherwise.
+    let kind = sc::classify_screen_question(question);
+    let ocr_text = if matches!(kind, sc::ScreenQuestionKind::Text) && sc::binary_on_path("tesseract") {
+        let pgm = sc::prepare_for_ocr(&bytes)?;
+        let f = std::env::temp_dir().join(format!("pawline-screen-{}.pgm", std::process::id()));
+        std::fs::write(&f, &pgm).map_err(|e| PawError::Exec(format!("Could not stage the capture for OCR: {e}. Nothing was done.")))?;
+        let t = sc::run_tesseract(&f);
+        let _ = std::fs::remove_file(&f);
+        t.unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let (route, refuse) = sc::route_question(kind, ocr_text.trim().len(), true);
+    if let Some(why) = refuse {
+        return Err(PawError::Exec(why));
+    }
+    let local = provider.local;
+    let label = provider.answer_label();
+    let q = question.to_string();
+    let ticket = pawline_core::imagegen::GUARD.begin_chat(local, std::time::Instant::now())?;
+    match route {
+        sc::ScreenRoute::Ocr => {
+            let a = run_cancellable_with(ticket, move |cancelled, commit| {
+                let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(120));
+                sc::chat_with_ocr_text(&http, &provider, &ocr_text, &q, cancelled, commit)
+            })?;
+            *LAST_CHAT_ANSWER.lock().unwrap() = Some(a.clone());
+            Ok(format!("Read the screen text - {label}:\n{a}"))
+        }
+        _ => {
+            let shrunk = sc::downscale_png(&bytes, sc::SCREEN_VISION_MAX_WIDTH)?;
+            let image = pawline_core::textfallback::ChatImage::from_bytes(&shrunk)?;
+            let a = run_cancellable_with(ticket, move |cancelled, commit| {
+                let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_secs(180));
+                pawline_core::textfallback::chat_with_image(&http, &provider, &image, &q, cancelled, commit)
+            })?;
+            *LAST_CHAT_ANSWER.lock().unwrap() = Some(a.clone());
+            Ok(format!("Looked at the screen - {label}:\n{a}"))
+        }
+    }
 }
 
 fn ask_online(text: &str) -> Result<String, PawError> {
@@ -343,6 +431,9 @@ impl ExecutionBackend for UiBackend {
         }
         if let Operation::LookAtImage { provider, path, prompt } = op {
             return Ok(OpOutcome { op: op.clone(), detail: look_at_image(provider, path, prompt)? });
+        }
+        if let Operation::ScreenQA { provider, question } = op {
+            return Ok(OpOutcome { op: op.clone(), detail: screen_qa(provider, question)? });
         }
         if let Operation::AskOnline { text } = op {
             return Ok(OpOutcome { op: op.clone(), detail: ask_online(text)? });
@@ -535,7 +626,7 @@ pub fn task_memory_command(input: &str, path: Option<&std::path::Path>) -> Optio
 /// Answers, searches, online asks, pictures, undo and list are never remembered. Returns whether it saved.
 pub fn remember_steps(path: &std::path::Path, request: &str, ops: &[Operation], now: u64) -> bool {
     use pawline_core::plan::Operation as O;
-    if ops.is_empty() || ops.iter().any(|o| matches!(o, O::Answer { .. } | O::Search { .. } | O::Weather { .. } | O::AskOnline { .. } | O::ChatOnline { .. } | O::LookAtImage { .. } | O::DeckDraft { .. } | O::DeckText { .. } | O::GenerateImage { .. } | O::Undo { .. } | O::List { .. })) {
+    if ops.is_empty() || ops.iter().any(|o| matches!(o, O::Answer { .. } | O::Search { .. } | O::Weather { .. } | O::AskOnline { .. } | O::ChatOnline { .. } | O::LookAtImage { .. } | O::ScreenQA { .. } | O::DeckDraft { .. } | O::DeckText { .. } | O::GenerateImage { .. } | O::Undo { .. } | O::List { .. })) {
         return false;
     }
     let steps: Vec<String> = ops.iter().map(|o| o.describe()).collect();
@@ -909,6 +1000,65 @@ Nothing is sent from your machine, and after setup Laya works fully offline. You
         if matches!(low, "chat provider" | "which chat provider" | "chat provider status" | "what chat provider") {
             return reply("message", pawline_core::providers::status_text(&current_chat_provider()));
         }
+        if low == "use screen model off" || low == "screen model off" {
+            let path = match pawline_core::providers::config_path() {
+                Some(p) => p,
+                None => return reply("message", "I could not work out where to save the setting on this computer, so nothing changed.".into()),
+            };
+            return match pawline_core::providers::save_screen_model(&path, None) {
+                Ok(()) => reply("message", "Screen questions will use the main chat model again. Nothing was captured.".into()),
+                Err(e) => reply("message", format!("Could not save that setting: {e}. Nothing changed.")),
+            };
+        }
+        if let Some(rest) = low.strip_prefix("use screen model ") {
+            let m = rest.trim();
+            if m.is_empty() || m.chars().any(char::is_whitespace) || m.len() > 80 {
+                return reply("message", "I need one model name, no spaces, for example: \"use screen model smolvlm-256m\". Nothing changed.".into());
+            }
+            let path = match pawline_core::providers::config_path() {
+                Some(p) => p,
+                None => return reply("message", "I could not work out where to save the setting on this computer, so nothing changed.".into()),
+            };
+            return match pawline_core::providers::save_screen_model(&path, Some(m)) {
+                Ok(()) => reply("message", format!("Saved (in {}, owner-only): screen questions will use model \"{}\" on your local runner. Nothing was captured.", path.display(), m)),
+                Err(e) => reply("message", format!("Could not save that setting: {e}. Nothing changed.")),
+            };
+        }
+        {
+            let bare = ["what's on my screen", "what is on my screen", "what's on the screen", "what is on the screen", "read my screen", "what does my screen say"];
+            let mut screen_q: Option<String> = None;
+            if bare.iter().any(|b| *b == low) {
+                screen_q = Some("What is on this computer screen? List the open windows and anything readable.".into());
+            } else {
+                for prefix in ["on my screen, ", "on my screen: ", "ask my screen ", "about my screen "] {
+                    if let Some(rest) = low.strip_prefix(prefix) {
+                        if !rest.trim().is_empty() {
+                            // keep the user's own casing for the question
+                            let q = input.trim()[input.trim().len() - rest.len()..].trim().to_string();
+                            screen_q = Some(q);
+                        }
+                        break;
+                    }
+                }
+            }
+            if let Some(question) = screen_q {
+                let provider = match screen_vision_provider() {
+                    Ok(p) => p,
+                    Err(e) => return reply("message", e.to_string()),
+                };
+                let op = Operation::ScreenQA { provider: provider.spec(), question };
+                let summary = format!("1. {}", op.describe());
+                state.pending = Some(Plan {
+                    ops: vec![op],
+                    needs_confirmation: true,
+                    confirmation_reasons: vec!["This would capture your whole screen, answer from it, then delete the capture.".into()],
+                    assist_derived: false,
+                    notes: vec![],
+                });
+                state.pending_request = None;
+                return UiReply { kind: "confirm".into(), text: format!("This needs your confirmation:\n{summary}"), plan: Some(summary) };
+            }
+        }
         for prefix in ["look at this picture ", "look at this image ", "look at the picture ", "look at the image ", "look at ", "describe this image ", "describe this picture ", "what is in this picture ", "what is in this image ", "what's in this picture ", "what's in this image "] {
             if let Some(rest) = low.strip_prefix(prefix) {
                 let path = input.trim()[input.trim().len() - rest.len()..].trim().trim_matches('"').trim_matches('\'').to_string();
@@ -1249,6 +1399,7 @@ Nothing is sent from your machine, and after setup Laya works fully offline. You
                         | pawline_core::plan::Operation::AskOnline { .. }
                         | pawline_core::plan::Operation::ChatOnline { .. }
                         | pawline_core::plan::Operation::LookAtImage { .. }
+                        | pawline_core::plan::Operation::ScreenQA { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)
                         }
@@ -1408,6 +1559,7 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
                         | pawline_core::plan::Operation::AskOnline { .. }
                         | pawline_core::plan::Operation::ChatOnline { .. }
                         | pawline_core::plan::Operation::LookAtImage { .. }
+                        | pawline_core::plan::Operation::ScreenQA { .. }
                         | pawline_core::plan::Operation::List { .. } => {
                             format!("{}\n{}", o.op.describe(), o.detail)
                         }

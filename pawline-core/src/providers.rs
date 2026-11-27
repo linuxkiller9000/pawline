@@ -225,6 +225,59 @@ pub fn load(path: &Path) -> ChatProvider {
     parse_config(&raw).unwrap_or_else(ChatProvider::pollinations)
 }
 
+/// The optional model used only for screen-capture vision requests (the
+/// "what's on my screen" flow), e.g. "smolvlm-256m" for speed while the
+/// main image path uses a bigger model. Same JSON document, extra key;
+/// missing/empty means "use the main model".
+pub fn load_screen_model(path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v["screen_model"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+/// Set or clear the screen-vision model, merging into the existing document
+/// so every other key (including api_key) survives. Written 0600 like save().
+pub fn save_screen_model(path: &Path, model: Option<&str>) -> Result<(), PawError> {
+    let raw = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".into());
+    let mut v: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| PawError::Exec(format!("the provider settings at {} did not parse ({e}); fix or delete that file first. Nothing changed.", path.display())))?;
+    match model {
+        Some(m) => { v["screen_model"] = serde_json::json!(m); }
+        None => { if let Some(o) = v.as_object_mut() { o.remove("screen_model"); } }
+    }
+    let text = serde_json::to_string_pretty(&v)
+        .map_err(|e| PawError::Exec(format!("could not encode the provider settings: {e}")))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| PawError::Exec(format!("could not create {}: {e}", dir.display())))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true).mode(0o600);
+        let mut f = opts.open(path)
+            .map_err(|e| PawError::Exec(format!("could not write {}: {e}", path.display())))?;
+        use std::io::Write;
+        f.write_all(text.as_bytes())
+            .map_err(|e| PawError::Exec(format!("could not write {}: {e}", path.display())))?;
+        drop(f);
+        let mut perms = std::fs::metadata(path)
+            .map_err(|e| PawError::Exec(format!("could not stat {}: {e}", path.display())))?
+            .permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o600);
+        std::fs::set_permissions(path, perms)
+            .map_err(|e| PawError::Exec(format!("could not make {} private: {e}", path.display())))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, text)
+            .map_err(|e| PawError::Exec(format!("could not write {}: {e}", path.display())))?;
+    }
+    Ok(())
+}
+
 /// Parse one config document. Kept separate from `load` so tests never
 /// touch the filesystem for the happy paths.
 pub fn parse_config(raw: &str) -> Option<ChatProvider> {

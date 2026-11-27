@@ -257,6 +257,64 @@ pub fn ocr_user_message(ocr_text: &str, question: &str) -> String {
     format!("OCR text from my screen:\n{ocr_text}\n\nQuestion: {question}")
 }
 
+/// Is this binary on PATH? (uses `which`; false when `which` itself is gone)
+pub fn binary_on_path(name: &str) -> bool {
+    std::process::Command::new("which").arg(name)
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .status().map(|s| s.success()).unwrap_or(false)
+}
+
+/// Run tesseract (Apache-2.0) on a prepared PGM and return its text.
+/// A missing tesseract is an honest error naming the install command.
+pub fn run_tesseract(pgm: &Path) -> Result<String, PawError> {
+    if !binary_on_path("tesseract") {
+        return Err(PawError::Exec(
+            "tesseract is not installed, so I cannot read text off the screen. On Arch: `sudo pacman -S tesseract`. Nothing was captured.".into()));
+    }
+    let out = std::process::Command::new("tesseract")
+        .arg(pgm).arg("stdout").arg("--psm").arg("3")
+        .output().map_err(|e| PawError::Exec(format!("Could not run tesseract: {e}. Nothing was done.")))?;
+    if !out.status.success() {
+        return Err(PawError::Exec(format!(
+            "tesseract failed on the capture ({}). Nothing was done.",
+            String::from_utf8_lossy(&out.stderr).chars().take(120).collect::<String>())));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// One OCR-routed turn: the OCR text plus the question, to the configured
+/// provider with the OCR grounding system line. No chat history goes along.
+/// Mirrors textfallback::chat, which owns the shared answer handling.
+pub fn chat_with_ocr_text(http: &dyn crate::imagegen::Http, provider: &crate::providers::ChatProvider, ocr_text: &str, question: &str, cancelled: &dyn Fn() -> bool, commit: &dyn Fn() -> bool) -> Result<String, PawError> {
+    let msgs = serde_json::json!([
+        {"role": "system", "content": OCR_SYSTEM},
+        {"role": "user", "content": ocr_user_message(ocr_text, question)}
+    ]);
+    let body = serde_json::json!({"model": provider.model, "messages": msgs}).to_string();
+    let owned = provider.headers();
+    let headers: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let r = http.post(&provider.url, &headers, &body).map_err(|_| provider.unreachable_error())?;
+    if cancelled() || !commit() {
+        return Err(PawError::Exec("Cancelled. Nothing was kept, and a late answer will be discarded.".into()));
+    }
+    match r.status {
+        200 => {
+            let raw = String::from_utf8_lossy(&r.body).to_string();
+            let content = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| v["choices"][0]["message"]["content"].as_str().map(|s| s.to_string()))
+                .ok_or_else(|| PawError::Exec(format!("{} sent a reply Pawline could not read; no answer.", provider.name)))?;
+            let clean: String = content.chars().filter(|c| !c.is_control() || *c == '\n').collect();
+            let clean = clean.trim();
+            if clean.is_empty() {
+                return Err(PawError::Exec(format!("{} sent an empty answer.", provider.name)));
+            }
+            Ok(clean.to_string())
+        }
+        s => Err(PawError::Exec(format!("{} answered HTTP {s}; no answer.", provider.name))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,5 +428,32 @@ mod tests {
         // already small: returned byte-identical, no work.
         assert_eq!(downscale_png(&png, 64).unwrap(), png);
         assert_eq!(downscale_png(&png, 128).unwrap(), png);
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    #[test]
+    fn binary_on_path_finds_sh_and_misses_nonsense() {
+        assert!(binary_on_path("sh"));
+        assert!(!binary_on_path("pawline-no-such-binary-xyz"));
+    }
+
+    #[test]
+    fn tesseract_reads_a_pgm_we_write() {
+        if !binary_on_path("tesseract") {
+            return; // sandbox without tesseract: the error path is covered by unit tests
+        }
+        // 40x12 white PGM with a black rectangle - garbage text is fine, the
+        // contract is "runs and returns a string", quality is covered live.
+        let mut pgm = b"P5\n40 12\n255\n".to_vec();
+        pgm.extend(std::iter::repeat(255u8).take(40 * 12));
+        let f = std::env::temp_dir().join("pawline-ocr-test.pgm");
+        std::fs::write(&f, &pgm).unwrap();
+        let out = run_tesseract(&f).unwrap();
+        assert!(out.len() < 200);
+        let _ = std::fs::remove_file(&f);
     }
 }

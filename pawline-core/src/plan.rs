@@ -93,6 +93,9 @@ pub enum Operation {
     /// One online chat turn: `context` = earlier lines of THIS session (alternating you / assistant, oldest first), `text` = the new message.
     ChatOnline { provider: crate::providers::ProviderSpec, context: Vec<String>, text: String },
     LookAtImage { provider: crate::providers::ProviderSpec, path: String, prompt: String },
+    /// One "what's on my screen" turn: capture the screen, then answer from
+    /// OCR text or pixels depending on the question. Always confirmed.
+    ScreenQA { provider: crate::providers::ProviderSpec, question: String },
 }
 
 impl Operation {
@@ -129,6 +132,17 @@ impl Operation {
             Operation::AskOnline { text } => format!(
                 "Ask Pollinations (online) \"{text}\": this is the free \"Classic\" service: no account, best effort, about one request per 45 seconds per IP address. Pawline puts your question text in the web address it requests from text.pollinations.ai, plus the usual web details (your IP address, a \"Pawline\" user-agent). Its privacy policy (updated 2026-11-17) says answers can be cached, typically up to 30 days, so the same address can return a saved answer. Pawline does not send your files, chat history or location. What Pollinations keeps is its own policy. Do not put passwords, secrets or private information in this question. The answer is only shown, never run, and may be wrong."
             ),
+            Operation::ScreenQA { provider, question } => {
+                let destination = if provider.local {
+                    format!("{} on this computer (loopback only): the capture never leaves the machine", provider.url)
+                } else {
+                    format!("{} ({}) over the internet: the whole screen is visible to that service", provider.url, provider.name)
+                };
+                format!(
+                    "Answer \"{}\" about YOUR SCREEN with {} (model \"{}\"). Pawline takes one screenshot of the whole screen - everything on it is in that picture. Text questions are answered from OCR text read off the capture; visual questions send the capture itself (shrunk to 1280px wide). Either way the request goes to {}. The screenshot file is deleted right after the answer. The answer is only shown, never run, and may be wrong.",
+                    question, provider.name, provider.model, destination
+                )
+            }
             Operation::LookAtImage { provider, path, prompt } => {
                 let destination = if provider.local {
                     format!(
