@@ -127,10 +127,19 @@ def route(q):
     if re.search(r"which window is (focused|currently active)|title of the focused window"
                  r"|name the active window", ql):
         return "focus"
-    if re.search(r"is the focused window'?s? border|border .* (yellow|blue|red|green|purple|orange|teal|pink)", ql):
-        return "color_neg"
-    if re.search(r"colou?r", ql):
-        return "color"
+    color_word = re.search(r"colou?r", ql) is not None
+    asks_what = re.search(r"(what|which|tell me|name) .*colou?r", ql) is not None
+    if "border" in ql and ("focused" in ql or "active" in ql):
+        if asks_what:
+            return "color"
+        if ql.strip().startswith("is ") or " is the " in ql:
+            return "color_neg"
+    if color_word:
+        # Only the focused window's border is read from pixels here. Any other
+        # colour question (a status dot, a progress bar, a button) needs real
+        # visual understanding this router does not have, so it says so rather
+        # than sampling the wrong pixels and sounding confident.
+        return "visual"
     if re.search(r"what time|clock|status bar", ql):
         return "clock"
     if re.search(r"leftmost|far left", ql):
@@ -282,6 +291,8 @@ def answer(q, meta, lines, png):
         return r, ("yes" if asked in present else "no")
     if r == "text":
         return r, answer_text(q, meta, png)
+    if r == "visual":
+        return r, "not visible on the screen"
     return r, ("not visible on the screen" if not has_value_evidence(q, lines)
                else answer_text(q, meta, png))
 
