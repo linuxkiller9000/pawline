@@ -139,6 +139,25 @@ code, free download.
 DECIDED (user, 2026-11-27): SmolVLM-500M is the single vision default;
 SmolVLM-256M is documented as the lighter option for tight installs.
 
+## 4d. Screen-vision probe (synthetic 1920x1080 desktop, live)
+
+Synthetic desktop screenshot (niri-style top bar, terminal with readable
+command text, browser window on the Pawline repo page, file window) asked
+as "what is on this computer screen?":
+
+| config | wall (1-thread sandbox) | prompt tokens | result |
+|--------|--------------------------|---------------|--------|
+| 256M, downscaled 960px | 14.3 s | 225 | nearly empty: generic "black screen", hallucinated its own prompt text |
+| 256M, full 1920px | 41.8 s | 622 | found only the browser text ("rust is no longer required"); missed terminal, top bar, file window |
+| 500M, full 1920px | 56.7 s | 622 | found both windows and the "pawline / local-first assistant" page, but hallucinated usernames/passwords |
+
+User decision (2026-11-27): screen captures use a SEPARATE screen-vision
+model setting defaulting to SmolVLM-256M with downscale, for speed. The
+measured caveat to surface: at 960px the 256M reads almost nothing; the
+downscale floor for usable answers is likely 1280-1920px even on the
+256M, and small terminal text stays unreliable on both models. The
+setting keeps the default image path on the 500M.
+
 ## 5. Laya
 
 The opt-in Laya intent router (150M) is verified end to end against the real
