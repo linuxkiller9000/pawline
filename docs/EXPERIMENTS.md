@@ -978,3 +978,11 @@ image's prefix. Alternating between two different screenshots, each already seen
 once: A 6.74 s (cold), B 6.73 s (cold), then A 0.23 s, B 0.23 s, A 0.19 s,
 B 0.42 s (cache_n=138 for both). So switching back and forth between two
 windows does not re-encode either of them.
+
+The limit of the reuse, stated plainly: "unchanged" means unchanged to the
+pixel. A desktop clock that ticks, a blinking cursor in a terminal, or a
+notification popping up changes the capture, the bytes differ, and the question
+pays the full encode again. Two questions asked inside the same clock minute on
+an otherwise still screen hit; a question after the clock moves does not. Making
+that better would need the model call to ignore volatile regions, which changes
+what the model is looking at, so it is not something to do quietly.
