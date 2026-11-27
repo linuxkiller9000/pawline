@@ -449,10 +449,10 @@ only the held-out battery can, which is what fork_eval.sh measures.
 
 Every no-training path in 4g sits at chance on the pixel-colour families, and the
 reason is resolution, not prompting: a 1366x768 frame squeezed into the model's
-960px budget makes a 14px focused border a handful of pixels wide. Two crop
-sources were measured, both with stock SmolVLM-256M, a 500px crop window and the
-same plain question. All numbers: sandbox, 1 vCPU / 2 GB, eval3's 16 visual
-questions.
+960px budget makes a 14px focused border a handful of pixels wide. Four crop sources were measured,
+all with stock SmolVLM-256M and the same plain question. All numbers: sandbox,
+1 vCPU / 2 GB. The first four rows are eval3's 16 visual questions (indicator and
+progress families); the border row is eval2's 16 border-colour questions.
 
 | crop source | correct | s/q | peak RSS |
 |---|---|---|---|
@@ -460,25 +460,39 @@ questions.
 | oracle: crop centred on the object | 11/16 | 7.2 | 530 MiB |
 | random position, same crop size | 1/16 | 7.0 | 530 MiB |
 | window: crop = the whole window the question is about | 15/40 | 15.2 | 559 MiB |
+| border strip: top edge of the focused window (metadata only) | 13/16* | 7.1 | 530 MiB |
 
 The oracle crop doubles accuracy and is 25% faster than the full frame (fewer
 image tokens). The random crop proves the gain comes from the crop's content and
 not from crop size or a shorter prompt: at the same 500px it scores at chance.
-Chance on these families is 2/16.
+Chance on these families is 2/16. (*The border row is eval2's 16 colour
+questions, not eval3's 16 visual ones, so it is scored out of 16 with chance
+at 4/16; see the per-family paragraph below.)
 
 Per family, on eval2's 40 window-scoped questions (stock 256M, full frame ->
 window crop): focus 0/8 -> 2/8, colour of the focused border 0/8 -> 0/8, "is the
-border yellow" 7/8 -> 6/8, text in a named window 1/16 -> 7/16. So the window
-crop is worth about +7 questions, almost all of them text, and it costs 15.2 s/q
+border yellow" 7/8 -> 6/8, text in a named window 1/16 -> 7/16. On eval3's
+progress family the window crop does better than any other crop source measured:
+7/8, against 4/8 full frame, 6/8 with the oracle crop and 1/8 with the random
+crop. So the window crop is worth about +7 questions on eval2 and +3 on
+progress, almost all of it text and progress-bar reading, and it costs 15.2 s/q
 against 9.7 s/q because a window-sized crop carries more image tokens than a
 960px full frame.
 
-The colour families are the exception, and the reason is geometric: the focused
-border is a 4px frame around the *edge* of the window, so a crop of the whole
-window puts the border at the margin of the image and the model answers "Black".
-The oracle crop wins there because it is centred on the border itself. So the
-crop is what buys visual accuracy, and the remaining problem is entirely
-one of knowing *where* to crop - which window for text, which edge for colour. That is a UI problem, not a model problem, and
+Colour of the focused border is the family the window crop cannot fix, and the
+reason is geometric: the border is a 4px frame around the *edge* of the window,
+so a crop of the whole window puts it at the margin of the image and the model
+answers "Black" 8 times out of 8. A metadata-only sub-crop does fix it: the top
+edge of the focused window, 400x120 centred on the edge midpoint, magnified by
+the model's own resize, scores 5/8 on the colour and 8/8 on "is it yellow" at
+7.1 s/q - the fastest and most accurate of the four crop sources, with no
+pointer involved.
+
+So the crop is what buys visual accuracy, and the remaining problem is entirely
+one of knowing *where* to crop. That is now answered from metadata alone: the
+window rectangle for text and progress questions, the border strip of the focused
+window for border colour. Neither needs a pointer position, and neither needs the
+model to see the full frame. That is a UI problem, not a model problem, and
 it splits into the two stages below.
 
 ### Stage 1 - the window (this is the route Pawline takes)
