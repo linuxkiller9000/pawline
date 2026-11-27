@@ -151,6 +151,10 @@ pub struct WindowInfo {
     /// top-to-bottom. Stacked windows share a column and differ by row.
     pub column: i64,
     pub row: i64,
+    /// Pixel size of the window's tile as niri lays it out, when niri reported
+    /// it. Used to size the confirm card and to pick a crop; `None` means the
+    /// window list did not carry `layout.tile_size`.
+    pub tile_size: Option<(u32, u32)>,
 }
 
 impl WindowInfo {
@@ -180,12 +184,22 @@ pub fn parse_niri_windows(json: &str) -> Result<Vec<WindowInfo>, PawError> {
         .iter()
         .map(|w| {
             let pos = w.get("layout").and_then(|l| l.get("pos_in_scrolling_layout"));
+            let tile = w
+                .get("layout")
+                .and_then(|l| l.get("tile_size"))
+                .and_then(|t| t.as_array())
+                .and_then(|t| {
+                    let w0 = t.first()?.as_u64()?;
+                    let h0 = t.get(1)?.as_u64()?;
+                    Some((u32::try_from(w0).ok()?, u32::try_from(h0).ok()?))
+                });
             WindowInfo {
                 app_id: w.get("app_id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                 title: w.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                 focused: w.get("is_focused").and_then(|x| x.as_bool()).unwrap_or(false),
                 column: pos.and_then(|p| p.get(0)).and_then(|x| x.as_i64()).unwrap_or(0),
                 row: pos.and_then(|p| p.get(1)).and_then(|x| x.as_i64()).unwrap_or(0),
+                tile_size: tile,
             }
         })
         .collect())
@@ -605,6 +619,9 @@ mod tests {
         assert_eq!(w[2].column, 2);
         assert!(w[1].focused);
         assert_eq!(w[1].app_name(), "Thunderbird");
+        // tile_size sizes the confirm card and the crop; absent means None
+        assert_eq!(w[0].tile_size, Some((600, 900)));
+        assert_eq!(w[1].tile_size, None);
         // a niri that answers with something else is an error, not an empty screen
         assert!(parse_niri_windows("not json").is_err());
         assert!(parse_niri_windows("{}").is_err());
