@@ -30,6 +30,15 @@ pub fn has_avx2() -> bool {
     if cached != 0 {
         return cached == 1;
     }
+    // Benchmark hook: NEEDLE_SIMD=off forces the portable fallback so the gap
+    // between AVX2 and non-AVX2 machines can be measured on AVX2 hardware.
+    // Evaluated once, before the CPUID result is cached. std-only: a no_std
+    // build always takes the real CPUID answer.
+    #[cfg(feature = "std")]
+    if std::env::var_os("NEEDLE_SIMD").is_some_and(|v| v == "off") {
+        AVX2_DETECTED.store(2, Ordering::Relaxed);
+        return false;
+    }
     // Check CPUID leaf 7, subleaf 0: EBX bit 5 = AVX2.
     // CPUID is always available on x86_64.
     #[allow(unused_unsafe)]
