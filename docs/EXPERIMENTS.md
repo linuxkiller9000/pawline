@@ -411,3 +411,21 @@ Caveats: every timing here is this sandbox (1 vCPU, 2 GB), not the N5010. The
 router's window metadata comes from `scene_meta.py`, which supplies the same
 fields niri IPC supplies in production, so these are "perfect metadata on
 synthetic scenes". fork_infer uses that metadata too, for crops and candidates.
+
+### CPU LoRA: attempted, and the honest result
+
+`lora_probe.py` loads SmolVLM-256M-Instruct through transformers, attaches LoRA
+(r=4, q/k/v/o) to the language backbone, and runs forward+backward+step on a real
+scene. On this sandbox (2 GB) it is killed by the OOM killer before the first
+step: once in fp32, and again in bf16 with a 384px image. The fp32 weights alone
+are ~1.05 GB and the loader peaks above the 1.8 GB the box has free.
+
+So there is no s/step number in this document, because the only one available
+would come from a smaller proxy model and would not be this model's number. What
+the attempt does establish: a 2 GB machine cannot adapt SmolVLM-256M at all, and
+a 6 GB machine (the N5010) has room for the weights but not for a claim about
+speed. Training on his CPU stays unmeasured and unquoted.
+
+The free Colab T4 remains the only sensible route to the visual families, which
+is what the notebook is for. The router needs no training and covers 84 of the
+86 state, text and refusal questions on its own.

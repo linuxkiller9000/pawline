@@ -42,6 +42,11 @@ def main():
     ap.add_argument("--steps", type=int, default=4)
     ap.add_argument("--lora-r", type=int, default=4)
     ap.add_argument("--image", default="/tmp/synth/eval2/10000.png")
+    ap.add_argument("--dtype", default="float32", choices=["float32", "bfloat16"],
+                    help="base dtype. fp32 needs ~1.05 GB for the weights alone; "
+                         "on a 2 GB box it does not fit, bf16 halves that")
+    ap.add_argument("--max-px", type=int, default=0,
+                    help="downscale the image to this max side before the processor")
     ap.add_argument("--question", default="What color is the border of the focused window?")
     ap.add_argument("--answer", default="purple")
     args = ap.parse_args()
@@ -56,7 +61,7 @@ def main():
         from transformers import AutoModelForImageTextToText as AutoVLM
     except ImportError:  # older transformers
         from transformers import AutoModelForVision2Seq as AutoVLM
-    model = AutoVLM.from_pretrained(args.model, dtype=torch.float32)
+    model = AutoVLM.from_pretrained(args.model, dtype=getattr(torch, args.dtype))
     out["load_seconds"] = round(time.time() - t0, 1)
     out["load_peak_mib"] = round(peak_mib())
 
@@ -72,6 +77,8 @@ def main():
     out["trainable_pct"] = round(100 * trainable / total, 3)
 
     img = Image.open(args.image).convert("RGB")
+    if args.max_px:
+        img.thumbnail((args.max_px, args.max_px))
     msgs = [{"role": "user", "content": [{"type": "image"},
                                          {"type": "text", "text": args.question}]}]
     prompt = proc.apply_chat_template(msgs, add_generation_prompt=True)
