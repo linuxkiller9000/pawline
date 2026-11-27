@@ -773,6 +773,34 @@ card offers "pick a region" for the tight case. Note that the frame is still
 capped at 1280px wide, so a 1366x768 capture is sent at 1280 - close to native,
 not identical, and worth re-measuring on the Dell itself.
 
+### The best visual configuration, at his resolution
+
+Sweeping the crop size on the same 1366x768 set settles it:
+
+| crop at 1366x768 | indicator | progress | total | s/q |
+|---|---|---|---|---|
+| 700px box | - | - | 3/16 | 7.1 |
+| 500px box | 5/8 | 7/8 | 12/16 | 7.2 |
+| 320px box | 5/8 | 6/8 | 11/16 | 8.6 |
+| full frame at native | 5/8 | 6/8 | 11/16 | 23.8 |
+
+And for the colour families at the same resolution:
+
+| crop at 1366x768 | border colour | "is it yellow" | total | s/q |
+|---|---|---|---|---|
+| 160px box at the border | 3/8 | 8/8 | 11/16 | 7.2 |
+| 400x120 strip on the top edge | 1/8 | 7/8 | 8/16 | 8.7 |
+
+So the best configuration on this machine is: a tight crop at native resolution,
+sized to the thing - about 500px for a window-sized element or a progress bar,
+about 160px for a thin border - which is 12/16 and 11/16 against 11/16 for the
+full frame, at 7.2 s/q against 23.8 s/q. Bigger is not better (700px collapses to
+3/16) and the full frame is both slower and no more accurate.
+
+The shipped strip is now 90 rows by 260 columns at the top of the window instead
+of 400x120, matching the 160px result: same idea, narrower, so the model's own
+resize magnifies the border more.
+
 ### What shipped (branch work/llm-vision-experiments)
 
 - `screencap::ShareTarget` (whole screen, one window with an optional top strip,

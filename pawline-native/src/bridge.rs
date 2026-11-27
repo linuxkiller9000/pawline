@@ -270,7 +270,7 @@ fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str, share
     // A border is a few pixels on a window's edge: keep the top strip, which is
     // what makes the colour answerable (docs/EXPERIMENTS.md 4h: 5/8 from 0/8).
     if let sc::ShareTarget::Window { strip_top: true, .. } = share {
-        bytes = sc::crop_png_top(&bytes, 96)?;
+        bytes = sc::crop_png_top(&bytes, 90, 260)?;
     }
     // Route: OCR for text questions, pixels for visual ones, refuse otherwise.
     let kind = sc::classify_screen_question(question);

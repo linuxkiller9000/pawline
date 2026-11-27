@@ -878,7 +878,7 @@ pub fn region_capture_command(
 }
 
 /// Keep only the top `height` rows of a PNG (the border strip).
-pub fn crop_png_top(png: &[u8], height: u32) -> Result<Vec<u8>, PawError> {
+pub fn crop_png_top(png: &[u8], height: u32, max_width: u32) -> Result<Vec<u8>, PawError> {
     let (px, w, h, ct) = decode_png(png)?;
     let ch = match ct {
         png::ColorType::Rgb => 3usize,
@@ -891,19 +891,25 @@ pub fn crop_png_top(png: &[u8], height: u32) -> Result<Vec<u8>, PawError> {
         }
     };
     let rows = height.min(h).max(1) as usize;
-    let n = w as usize * rows * ch;
-    if px.len() < n {
-        return Err(PawError::Validation("That capture was shorter than its own size said. Nothing was done.".into()));
-    }
+    // Keep the middle `max_width` columns: a narrower strip magnifies more when
+    // the model resizes it, which is what makes a 2-4px border readable
+    // (docs/EXPERIMENTS.md 4j: 160px at 3/8 against a 400px strip at 1/8).
+    let keep = (max_width.max(1) as usize).min(w as usize);
+    let x0 = (w as usize - keep) / 2;
     let mut out = Vec::new();
     {
-        let mut enc = png::Encoder::new(&mut out, w, rows as u32);
+        let mut enc = png::Encoder::new(&mut out, keep as u32, rows as u32);
         enc.set_color(ct);
         enc.set_depth(png::BitDepth::Eight);
         let mut wr = enc
             .write_header()
             .map_err(|e| PawError::Validation(format!("Could not write the cropped capture ({e}). Nothing was done.")))?;
-        wr.write_image_data(&px[..n])
+        let mut rows_px = Vec::with_capacity(keep * rows * ch);
+        for y in 0..rows {
+            let start = (y * w as usize + x0) * ch;
+            rows_px.extend_from_slice(&px[start..start + keep * ch]);
+        }
+        wr.write_image_data(&rows_px)
             .map_err(|e| PawError::Validation(format!("Could not write the cropped capture ({e}). Nothing was done.")))?;
     }
     Ok(out)
@@ -1121,11 +1127,11 @@ mod tests {
             let mut wr = enc.write_header().unwrap();
             wr.write_image_data(&px).unwrap();
         }
-        let strip = crop_png_top(&png_bytes, 1).unwrap();
+        let strip = crop_png_top(&png_bytes, 1, 99).unwrap();
         let (got, gw, gh, _) = decode_png(&strip).unwrap();
         assert_eq!((gw, gh), (2, 1));
         assert_eq!(got, vec![0, 0, 0, 1, 0, 0]); // row 0 is y*10+x for x in 0..2
-        let all = crop_png_top(&png_bytes, 99).unwrap();
+        let all = crop_png_top(&png_bytes, 99, 99).unwrap();
         let (_, _, ah, _) = decode_png(&all).unwrap();
         assert_eq!(ah, 3);
     }
