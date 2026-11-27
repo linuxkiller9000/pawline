@@ -1,3 +1,70 @@
+# Pawline v0.3.0-test.6 - test binaries (pre-release)
+
+Test builds of commit 320f095 (successor line, on top of v0.3.0-test.5).
+SANDBOX-TESTED ONLY: not verified on real hardware, real audio, a real
+desktop, or Windows. The audits mentioned in the docs are author-written.
+
+Linux x86_64 and Windows x86_64. THE WINDOWS EXE WAS CROSS-COMPILED AND
+NEVER RUN - build verified only. Release profile: opt-level 2, thin LTO, stripped; Pawline's own crates
+are built with codegen-units 1 (dependencies stay at the default 16 -
+single-unit tract-core needs more RAM than a 2 GB build box has).
+
+## What changed since v0.3.0-test.5 (10 commits)
+
+1. No more silent multi-minute hangs on slow machines: loading and routing
+   the Laya model are time-bound now. If a wait runs long you get an honest
+   message and Laya stays off for the session; Esc cancels mid-wait; "laya
+   on" retries after a timeout.
+
+2. Undo survives restarts: restart-surviving behaviour tests for
+   rename/move/copy undo (the behaviour was already correct; this closed
+   the test gap).
+
+3. Confirm cards survive a crash: a pending confirmation is restored after
+   a crash or kill, fingerprint-checked, and still needs its real card
+   click - typing never approves it.
+
+4. "check the draft against <file>": a word-level check of a reviewed
+   presentation draft against a UTF-8 text/markdown file you choose
+   (home-confined, 256 KB cap). Lines whose words are not in the file are
+   named, with the missing words. Honest label on every result: this is a
+   word-level match, not understanding. The draft is never changed.
+
+5. "check the draft against <https address>": the same check against a web
+   page, behind a disclosure card that names exactly what is sent (the
+   address; the site sees your IP and a "Pawline" user-agent; the page
+   text is used once, in memory, never saved or sent anywhere else). Only
+   the card's "Do it" sends the one request. Offline mode refuses before
+   any card; non-https addresses are refused.
+
+6. Saved actions are back (removed in v0.2.1-beta, now on the current
+   parser and card flow): save/run/list/show/delete for create-folder,
+   create-file and copy commands, with a deterministic re-check before a
+   saved action runs and a delete card for removal.
+
+7. The save-presentation card now shows the fact-check count at the top.
+
+## Verification state (honest)
+
+- 636-test suite: green on the exact source commit. Windows cross-build:
+  green (build only).
+- GUI flows proven by screenshots in a sandboxed Xvfb session (draft
+  disclosure card, draft review, URL disclosure card, fact-check review).
+- The Linux binary was smoke-tested in an emulated Arch guest (kernel
+  7.3.4-arch1-2, QEMU TCG, Westmere CPU, 951 MB RAM): startup OK (no
+  SIGILL), an offline query OK, and one Laya-routed query OK. TCG
+  emulation is 100-250x slower than native and proves ISA/behaviour
+  only - no speed numbers carry over.
+- One GUI pixel gap: the re-rendered review header with the neutral
+  "word-level match, not understanding" wording is asserted by
+  behavioural tests, and the card and review rendering are
+  screenshot-proven on the same binary, but the exact new string was not
+  re-captured in pixels (the sandbox harness kept racing Pollinations
+  rate limits).
+- NOT tested: real hardware, real desktops, Windows at runtime, screen
+  readers, non-English locales end to end.
+
+
 # Pawline v0.3.0-test.5 - test binaries (pre-release)
 
 Test builds of commit 85824ae (successor line, on top of v0.3.0-test.4).
