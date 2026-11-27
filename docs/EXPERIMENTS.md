@@ -923,6 +923,12 @@ Accuracy of the two orderings on the visual families of eval4, 500 px crop,
 same questions and crops: image-first 11/15, text-first baseline (CLI, 4j)
 12/16. Same answers, same misses; the ordering costs nothing measurable at n=16.
 
+Repeated in a controlled run of six consecutive questions on one screenshot:
+7.04 s, then 0.30, 0.32, 0.31, 0.31, 0.30 s. The same reuse is lost whenever the
+server process restarts (a fresh slot re-encodes), which is what the handful of
+7 s follow-ups in the eval4 loop are: that harness starts a server per run, so
+the first request after each restart pays the encode.
+
 Server cost while warm: 420 MiB RSS after load, 471 MiB after a few images
 (`-c 2048`). That is the price of keeping the tower and its KV resident; the OCR
 hybrid path already keeps a qwen server up, so the pattern is not new here.
