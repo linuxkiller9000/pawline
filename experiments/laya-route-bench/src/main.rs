@@ -147,18 +147,39 @@ fn main() {
         ("the weather in that movie was amazing", "__none__"),
         ("hello there", "__none__"),
         ("my folder of memories from school", "__none__"),
+        // extended battery: margin study for threshold tuning
+        ("new folder named photos", "make_folder"),
+        ("make me a file called notes.txt", "make_file"),
+        ("remove the old logs", "delete"),
+        ("change the name of draft.doc", "rename"),
+        ("show me what is in my pictures folder", "list_files"),
+        ("launch the calculator", "open_app"),
+        ("do i need a jacket tonight", "weather"),
+        ("how much is 15 percent of 80", "math"),
+        ("look up the capital of iceland", "search"),
+        ("nudge me to water the plants at 6", "remind"),
+        ("make it louder please", "volume"),
+        ("show me some examples", "help"),
+        ("this folder has all my childhood drawings", "__none__"),
+        ("i deleted my ex's playlist yesterday", "__none__"),
+        ("the file cabinet at work is ancient", "__none__"),
+        ("the weather in that novel set the mood", "__none__"),
+        ("the volume of the container is two liters", "__none__"),
+        ("she reminded me of my grandmother", "__none__"),
+        ("the search for the missing hiker continues", "__none__"),
+        ("he opened up about his feelings", "__none__"),
     ];
 
     let mut pass = 0;
     let mut fail = 0;
     for (message, want) in battery {
         let t0 = std::time::Instant::now();
-        let got = route_inner(&plan, &enc, cls, sep, mask, message);
+        let (got, bestp) = route_inner(&plan, &enc, cls, sep, mask, message);
         let dt = t0.elapsed();
         let name = got.map(|(i, _)| i).unwrap_or("__none__");
         let ok = name == *want;
         if ok { pass += 1 } else { fail += 1 }
-        let prob = got.map(|(_, p)| format!("{p:.3}")).unwrap_or_else(|| "-".into());
+        let prob = format!("{bestp:.3}");
         println!("{} {:43} want={:12} got={:12} p={:6} ({:?})", if ok { "PASS" } else { "FAIL" }, format!("{message:?}"), want, name, prob, dt);
     }
     println!("== {pass} pass / {fail} fail of {} ==", battery.len());
@@ -169,10 +190,10 @@ fn route_inner(
     enc: &dyn Fn(&str) -> (Vec<u32>, Vec<(usize, usize)>),
     cls: i64, sep: i64, mask: i64,
     message: &str,
-) -> Option<(&'static str, f32)> {
+) -> (Option<(&'static str, f32)>, f32) {
     let mut win = narrow(message);
     if win.is_empty() {
-        return None;
+        return (None, 0.0);
     }
     for d in ["chat_about_words", "just_chatting"] {
         if !win.contains(&d) {
@@ -181,7 +202,7 @@ fn route_inner(
     }
     let mut texts: Vec<String> = Vec::new();
     for name in &win {
-        let (_, phrasings) = INTENTS.iter().find(|(n, _)| n == name)?;
+        let Some((_, phrasings)) = INTENTS.iter().find(|(n, _)| n == name) else { return (None, 0.0) };
         let joined = phrasings.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(PHRASING_SEP);
         texts.push(format!(" {name}: {joined}").replace("[MASK]", " "));
     }
@@ -223,35 +244,44 @@ fn route_inner(
     ids.push(sep);
     ids.truncate(MAX_LEN);
     if markers.iter().any(|&m| m as usize >= MAX_LEN) {
-        return None;
+        return (None, 0.0);
     }
     let seq = ids.len();
     let nmark = markers.len();
     let maskv: Vec<i64> = vec![1; seq];
     let mmask: Vec<bool> = vec![true; nmark];
-    let out = plan.run(tvec![
-        Tensor::from_shape(&[1, seq], &ids).ok()?.into(),
-        Tensor::from_shape(&[1, seq], &maskv).ok()?.into(),
-        Tensor::from_shape(&[1, nmark], &markers).ok()?.into(),
-        Tensor::from_shape(&[1, nmark], &mmask).ok()?.into(),
-        Tensor::from_shape(&[1], &[0i64]).ok()?.into(),
-    ]).ok()?;
-    let logits = out[0].to_plain_array_view::<f32>().ok()?;
+    let ok_t = |r: tract_onnx::prelude::TractResult<Tensor>| r.ok();
+    let (t0,t1,t2,t3,t4) = match (ok_t(Tensor::from_shape(&[1, seq], &ids)),
+          ok_t(Tensor::from_shape(&[1, seq], &maskv)),
+          ok_t(Tensor::from_shape(&[1, nmark], &markers)),
+          ok_t(Tensor::from_shape(&[1, nmark], &mmask)),
+          ok_t(Tensor::from_shape(&[1], &[0i64]))) {
+        (Some(a),Some(b),Some(c),Some(d),Some(e)) => (a,b,c,d,e),
+        _ => return (None, 0.0),
+    };
+    let out = match plan.run(tvec![t0.into(),t1.into(),t2.into(),t3.into(),t4.into()]) {
+        Ok(o) => o,
+        Err(_) => return (None, 0.0),
+    };
+    let logits = match out[0].to_plain_array_view::<f32>() { Ok(l) => l, Err(_) => return (None, 0.0) };
     let temp = temperature(nmark);
     let mx = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let exps: Vec<f32> = logits.iter().map(|x| ((x - mx) / temp).exp()).collect();
     let sum: f32 = exps.iter().sum();
     let probs: Vec<f32> = exps.iter().map(|x| x / sum).collect();
-    let (bi, bp) = probs.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i, p)| (i, *p))?;
+    let (bi, bp) = match probs.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i, p)| (i, *p)) {
+        Some(x) => x,
+        None => return (None, 0.0),
+    };
     if bi == probs.len() - 1 {
-        return None;
+        return (None, bp);
     }
     let intent: &'static str = win[bi];
     if matches!(intent, "chat_about_words" | "just_chatting") {
-        return None;
+        return (None, bp);
     }
     let need = if matches!(intent, "delete" | "rename") { THRESHOLD_DESTRUCTIVE } else { THRESHOLD };
-    if bp >= need { Some((intent, bp)) } else { None }
+    (if bp >= need { Some((intent, bp)) } else { None }, bp)
 }
 
 fn narrow(text: &str) -> Vec<&'static str> {

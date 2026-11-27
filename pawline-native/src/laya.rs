@@ -76,8 +76,14 @@ const MIN_HEAD_TOKENS: usize = 16;
 const PHRASING_SEP: &str = "\" | \"";
 /// Non-destructive intents need this much confidence; destructive ones more (a confirm
 /// card still follows either way - the threshold is about not *offering* nonsense).
-const THRESHOLD: f32 = 0.80;
-const THRESHOLD_DESTRUCTIVE: f32 = 0.90;
+// Measured on the 42-message routing battery (experiments/laya-route-bench,
+// docs/EXPERIMENTS.md section 5): every false positive fired at p <= 0.954
+// and the lowest true positive scored p = 0.965, so 0.96 separates them
+// completely on that battery (33/42 -> 37/42, 0 false positives). The
+// margin over the weakest true positive is only 0.005; revisit with a
+// bigger battery before touching this again.
+const THRESHOLD: f32 = 0.96;
+const THRESHOLD_DESTRUCTIVE: f32 = 0.96;
 const CACHE_MAX: usize = 64;
 
 pub struct Route {

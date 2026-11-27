@@ -320,7 +320,7 @@ fn base_url_of(url: &str) -> String {
 pub fn status_text(p: &ChatProvider) -> String {
     let kind = if p.local { "on this computer" } else { "online service" };
     format!(
-        "Chat answers come from: {} ({kind})\n  endpoint: {}\n  model: {}\nTo change it, say for example: \"use ollama model llama3.2\", \"use llama.cpp model qwen2.5\", \"use lm studio model mistral\" or \"use pollinations\". For images, load a vision model on the runner (recommended free one: SmolVLM-256M, llama.cpp GGUF from ggml-org) and say \"look at this picture <path>\". For another OpenAI-compatible server, edit {} (type \"openai-compatible\", base_url, model; api_key only if the server needs one - keys are never typed into the chat).",
+        "Chat answers come from: {} ({kind})\n  endpoint: {}\n  model: {}\nTo change it, say for example: \"use ollama model llama3.2\", \"use llama.cpp model qwen2.5\", \"use lm studio model mistral\" or \"use pollinations\". For images, load a vision model on the runner (recommended free one: SmolVLM-500M, llama.cpp GGUF from ggml-org; SmolVLM-256M is the lighter option for tight installs) and say \"look at this picture <path>\". For another OpenAI-compatible server, edit {} (type \"openai-compatible\", base_url, model; api_key only if the server needs one - keys are never typed into the chat).",
         p.name,
         p.url,
         p.model,

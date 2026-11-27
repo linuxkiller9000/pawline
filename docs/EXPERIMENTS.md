@@ -134,9 +134,10 @@ mmproj 109 MB vs 175 MB / 104 MB for the 256M). Identical token counts
 Verdict: the 500M is a straight quality upgrade on spatial/multi-object
 questions (the 256M failure mode from 4b) for +370 MB on disk and ~25%
 latency on a 1-thread floor. Same llama.cpp drop-in path, same provider
-code, free download. The default-model choice (256M named as "the default
-only one") is a product call: the measured recommendation is 500M for
-machines that can hold it, 256M for the tightest installs.
+code, free download.
+
+DECIDED (user, 2026-11-27): SmolVLM-500M is the single vision default;
+SmolVLM-256M is documented as the lighter option for tight installs.
 
 ## 5. Laya
 
@@ -159,6 +160,21 @@ files:
   phrase, worth a follow-up (threshold tuning or an extra negative phrasing).
   Known harness limitation: it exercises only the common fits-in-window
   tokenization path, not the over-budget per-phrasing truncation branch.
+
+Threshold tuning (same harness, battery extended to 42 messages: 12 more
+paraphrased positives and 8 more adversarial none-cases). At the shipped
+thresholds (0.80 / 0.90 destructive): 33/42 with 4 false positives
+(p=0.814-0.954, including a delete at 0.954 on "i deleted my ex's
+playlist yesterday" - above the old destructive threshold) and 5 false
+negatives. Re-scored offline from the logged probabilities: threshold
+0.96 for both classes gives 37/42 with ZERO false positives and the same
+5 false negatives (lowest true positive is p=0.965, so the margin is
+0.005 - revisit with a bigger battery before changing it again). The 5
+false negatives are not threshold-fixable: 4 are narrow() family-regex
+misses (the model never gets to vote; p=0.000 rows) and 1 is a
+model-level miss (none won at 0.969 on "how much is 15 percent of 80").
+Follow-up: widen FAMILIES or fall back to all intents on an empty window.
+Applied: THRESHOLD and THRESHOLD_DESTRUCTIVE both 0.96 in laya.rs.
 
 Caveat on speed: per-message routing in this sandbox takes 3.5-6 s
 (fp32, tract, 2 GB RAM VM). That is a sandbox floor, not a Dell number;

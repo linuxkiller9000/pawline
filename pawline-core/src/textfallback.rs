@@ -735,14 +735,14 @@ mod tests {
                 Ok(HttpReply { status: 200, retry_after: None, content_type: String::new(), body: br#"{"choices":[{"message":{"content":"a red square"}}]}"#.to_vec() })
             }
         }
-        let prov = crate::providers::ChatProvider::llama_cpp("smolvlm-256m");
+        let prov = crate::providers::ChatProvider::llama_cpp("smolvlm-500m");
         let img = ChatImage::from_bytes(b"\x89PNG\r\n\x1a\ntiny").unwrap();
         let r = chat_with_image(&P(&seen), &prov, &img, "what is in this picture", &|| false, &|| true).unwrap();
         assert_eq!(r, "a red square");
         let s = seen.borrow();
         assert_eq!(s.len(), 1);
         assert!(s[0].starts_with("POST http://127.0.0.1:8080/v1/chat/completions "), "{}", s[0]);
-        assert!(s[0].contains(r#""model":"smolvlm-256m""#), "{}", s[0]);
+        assert!(s[0].contains(r#""model":"smolvlm-500m""#), "{}", s[0]);
         assert!(s[0].contains(r#""type":"image_url""#) && s[0].contains("data:image/png;base64,"), "{}", s[0]);
         assert!(s[0].contains("what is in this picture"), "{}", s[0]);
         drop(s);
