@@ -177,6 +177,14 @@ Q_TEMPLATES = {
                 ["Which window is on the far left?", "Name the leftmost window's title."]),
     "app": (["Which application is in the rightmost window?"],
             ["What app is open in the far right window?", "Name the program in the rightmost window."]),
+    "indicator": (["What color is the network indicator in the top bar?",
+                   "What colour is the status dot in the panel?"],
+                  ["Which colour is the little dot next to the tray icons?",
+                   "Tell me the color of the status light in the top bar."]),
+    "progress": (["What color is the progress bar in the {app} window?",
+                  "Which colour is the progress bar in the {app} window?"],
+                 ["What color is the fill of the {app} progress bar?",
+                  "Name the colour of the bar filling up in the {app} window."]),
 }
 
 
@@ -196,6 +204,13 @@ def draw_text_fit(draw, xy, text, fnt, fill, max_w):
 def make_scene(rng, eval_mode, W, H):
     accents = ACCENTS_ALL if eval_mode else ACCENTS_TRAIN
     focus_accent = rng.choice(accents)
+    # Purely visual probes (2026-11-27): a status dot in the top bar and a
+    # progress bar in one window. Neither is answerable from window metadata
+    # and neither is text, so together they measure what a vision model is
+    # actually FOR - the rest of the battery is state and text questions.
+    indicator = rng.choice(accents)
+    progress_color = rng.choice([a for a in accents if a[0] != indicator[0]])
+    progress_pct = rng.choice([15, 25, 40, 55, 70, 85])
     bg = rng.choice(BGS)
     clock = f"{rng.randint(0, 23):02d}:{rng.randint(0, 59):02d}"
     n_workspaces = rng.randint(2, 6)
@@ -273,8 +288,12 @@ def make_scene(rng, eval_mode, W, H):
             sends = rng.sample(send_pool, min(4, len(send_pool)))
             w["content"] = {"subs": subs, "senders": sends, "first_sub": subs[0]}
             w["title"] = "Inbox - Thunderbird"
+    progress_win = rng.randrange(len(windows))
     return {
         "windows": windows, "clock": clock, "bg": bg,
+        "indicator": indicator, "indicator_name": indicator[0],
+        "progress_color": progress_color, "progress_name": progress_color[0],
+        "progress_pct": progress_pct, "progress_win": progress_win,
         "focus_accent": focus_accent, "focus_accent_name": focus_accent[0],
         "n_workspaces": n_workspaces, "active_ws": active_ws,
     }
@@ -299,6 +318,7 @@ def render(scene, W, H):
     tw = d.textlength(clk, font=f_bar)
     d.text(((W - tw) / 2, 5), clk, font=f_bar, fill=(235, 235, 240))
     d.text((W - 150, 6), "net  vol  bat", font=font(13), fill=(150, 150, 160))
+    d.ellipse([W - 172, 9, W - 162, 19], fill=scene["indicator"][1])
 
     for w in scene["windows"]:
         x0, y0, ww, hh = w["x"], w["y"], w["w"], w["h"]
@@ -349,6 +369,14 @@ def render(scene, W, H):
                 draw_text_fit(d, (tx, ty), subj, f_body, (20, 20, 120), ww - 24)
                 draw_text_fit(d, (tx, ty + 18), snd, font(12), (100, 100, 110), ww - 24)
                 ty += 46
+        if w is scene["windows"][scene["progress_win"]]:
+            # drawn last so nothing overlaps it; the label is text, the fill is
+            # colour only, which is the point of the question
+            by = y0 + hh - 28
+            pw = ww - 24
+            d.rectangle([tx, by, tx + pw, by + 12], fill=(70, 70, 80))
+            d.rectangle([tx, by, tx + max(2, int(pw * scene["progress_pct"] / 100)), by + 12],
+                        fill=scene["progress_color"][1])
     return img
 
 
@@ -418,6 +446,12 @@ def gen_qa(scene, rng, eval_mode):
     if absent_apps:
         pick_no = rng.choice(absent_apps)
         add("presence", f"Is there a {APP_NAMES[pick_no]} window open?", "no")
+
+    # Visual-only probes: no metadata, no OCR text - colour in pixels.
+    add("indicator", pick_template("indicator", rng, eval_mode), scene["indicator_name"])
+    pwin = wins[scene["progress_win"]]
+    add("progress", pick_template("progress", rng, eval_mode).format(app=pwin["app_name"]),
+        scene["progress_name"])
 
     # Refusal training: ask about UI that does not exist anywhere.
     q, a = rng.choice(ABSENT_QUESTIONS)

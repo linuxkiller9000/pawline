@@ -43,7 +43,7 @@ import urllib.request
 VLM_DIR = os.environ.get("PAWLINE_VLM_DIR", "/downloads/vlm")
 LLAMA = os.path.join(VLM_DIR, "llama-b12811")
 FAMILY_ORDER = ["count", "focus", "color", "color_neg", "clock", "spatial", "app",
-                "text", "presence", "absent"]
+                "text", "presence", "absent", "indicator", "progress"]
 
 
 def norm(s):
@@ -165,6 +165,9 @@ def main():
     ap.add_argument("--scale", type=float, default=None,
                     help="image scale factor (smol256 default 0.5 = 960px)")
     ap.add_argument("--results", default=None, help="results.json path (default: <dir>/results.json)")
+    ap.add_argument("--families", default=None,
+                    help="comma-separated families to run, e.g. indicator,progress "
+                         "(default: every family in FAMILY_ORDER)")
     ap.add_argument("--report", action="store_true")
     args = ap.parse_args()
     results_path = args.results or os.path.join(args.dir, "results.json")
@@ -194,6 +197,9 @@ def main():
         ap.error("--method or --report required")
 
     qa = [json.loads(l) for l in open(os.path.join(args.dir, "qa.jsonl"))]
+    only = {f.strip() for f in args.families.split(",")} if args.families else None
+    if only:
+        qa = [r for r in qa if r["family"] in only]
     images = sorted({r["image"] for r in qa})
     res = json.load(open(results_path)) if os.path.exists(results_path) else {}
     res.setdefault(args.method, {})
