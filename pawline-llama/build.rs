@@ -13,6 +13,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/shim.c");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=PAWLINE_LLAMA_SRC");
+    println!("cargo:rerun-if-env-changed=PAWLINE_LLAMA_BUILD_DIR");
 
     let vendored = env::var_os("CARGO_FEATURE_VENDORED").is_some();
     if !vendored {

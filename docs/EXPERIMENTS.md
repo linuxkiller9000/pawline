@@ -1032,3 +1032,21 @@ that was two different questions with different answer lengths, not a finding.
 Structural, not behavioural: the crate's own tests only check that a stub build
 refuses to load and that a real build loads. The numbers come from
 `examples/answer.rs` against the real GGUF.
+
+### The SSE4.2 floor costs 3.7x on a cold question (2026-11-28)
+
+`GGML_CPU_ALL_VARIANTS` needs `GGML_BACKEND_DL`, which means shared backend
+libraries next to the binary, so the ship shape is one static binary compiled at
+his CPU's floor: `-msse4.2 -mno-avx -mno-avx2 -mno-fma`, `-DGGML_NATIVE=OFF`.
+
+Same model, same question, one thread, sandbox:
+
+| build | first question | repeat, prefix cached | back to back |
+|---|---|---|---|
+| native kernels | 0.71 s | 0.50 s | 0.47 s |
+| SSE4.2 floor (ships) | 2.62 s | 1.26 s | 0.70 s |
+
+The kernels for quantised matmul are written for AVX2; without AVX the SSE path
+is what runs, and it is 3.7x slower on a cold question. Any timing measured on
+this sandbox's native kernels overstates the Dell, so the floor column is the
+number to quote for him.

@@ -152,10 +152,36 @@ measurement mistake, not a finding: the two paths were asked different questions
 and produced answers of different length, so the comparison was really
 "7 tokens against 3". The table above asks the same question on both sides.
 
-The shipping build needs `-DGGML_CPU_ALL_VARIANTS=ON` so the i3-370M picks the
-`sse42` kernel at runtime instead of hitting an illegal instruction; the numbers
-above were taken from a native-optimised tree, which is fine for speed and not
-what ships.
+## What the shipping build costs: the SSE4.2 floor (2026-11-28)
+
+`GGML_CPU_ALL_VARIANTS` is not usable the way the earlier plan assumed. cmake
+refuses it unless `GGML_BACKEND_DL=ON`, and that requires shared backends, so
+"all variants" means shipping a set of `libggml-cpu-*.so` files next to the
+binary and loading one at runtime. That is not one binary, and it is a runtime
+dependency we would then have to install correctly on his machine.
+
+The simpler ship shape: one static binary compiled at the floor his CPU has,
+`-msse4.2 -mno-avx -mno-avx2 -mno-fma`, `-DGGML_NATIVE=OFF`. It runs on the
+i3-370M and on anything newer. No dispatch, no extra files.
+
+What that costs, measured (same model, same question, one thread, sandbox):
+
+| build | first question | repeat, prefix cached | back to back |
+|---|---|---|---|
+| native kernels (this sandbox's CPU) | 0.71 s | 0.50 s | 0.47 s |
+| SSE4.2 floor, `-mno-avx` (what ships) | 2.62 s | 1.26 s | 0.70 s |
+
+So the floor build is 3.7x slower on a cold question and about 1.5x slower with
+the prefix cached. That is not a regression we can code around: the quantised
+matmul kernels are written for AVX2 and the SSE path is simply the slower one.
+It also means **sandbox timings taken on native kernels overstate his machine
+badly**; the SSE4.2 column is the honest expectation for the Dell, before his
+own slower clock and memory are counted.
+
+Both builds are static, MIT-attributed, and produce the same answers.
+
+The numbers above were taken with `PAWLINE_LLAMA_BUILD_DIR` pointing at each
+cmake tree, so both came from the same crate and the same example.
 
 ## Status
 
