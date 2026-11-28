@@ -291,6 +291,75 @@ fn deck(t: &[Tok]) -> Option<String> {
     }
 }
 
+/// Presentation draft edits in Arabic (item 11f): "احذف الشريحة 3",
+/// "غير عنوان الشريحة 3 الى X", "غير السطر 2 في الشريحة 3 الى X". The shape is turned into the
+/// English edit command the draft editor already understands; the new text is passed through
+/// byte for byte (it is never folded, corrected or trimmed beyond outer spaces).
+fn slide_word(w: &str) -> bool {
+    matches!(w, "الشريحه" | "شريحه" | "السلايد" | "سلايد" | "الشرايح" | "شرايح" | "البريزنتيشن" | "بريزنتيشن")
+}
+
+/// Does this read as a slide being the target of a delete or a rename?
+fn slide_shaped(t: &[Tok]) -> bool {
+    let r = skip_filler(t);
+    let head = r.first().map(|x| x.1.as_str()).unwrap_or("");
+    if !(DELETE.contains(&head) || RENAME.contains(&head)) {
+        return false;
+    }
+    match (r.get(1).map(|x| x.1.as_str()), r.get(2).map(|x| x.1.as_str()), r.get(3).map(|x| x.1.as_str())) {
+        (Some(w), _, _) if slide_word(w) => true,
+        (Some("العنوان" | "عنوان" | "السطر" | "سطر" | "الخط" | "خط"), Some(w), _) if slide_word(w) => true,
+        (Some("العنوان" | "عنوان" | "السطر" | "سطر" | "الخط" | "خط"), Some(_), Some(w)) if slide_word(w) => true,
+        _ => false,
+    }
+}
+
+fn deck_edit(t: &[Tok]) -> Option<String> {
+    let t = skip_filler(t);
+    let head = t.first()?.1.as_str();
+    let num = |w: &str| w.parse::<usize>().ok().filter(|n| *n >= 1 && *n <= 99);
+    let at = |i: usize| t.get(i).map(|x| x.1.as_str());
+    let to = |w: &str| w == "الي" || w == "ل";
+    if DELETE.contains(&head) && at(1).is_some_and(slide_word) {
+        if t.len() != 3 {
+            return None;
+        }
+        return Some(format!("delete slide {}", num(at(2)?)?));
+    }
+    if !(RENAME.contains(&head) || head == "اجعل") {
+        return None;
+    }
+    // "غير السطر M في الشريحة N الى TEXT"
+    if matches!(at(1), Some("السطر" | "سطر" | "الخط" | "خط")) {
+        let line = num(at(2)?)?;
+        if !at(3).is_some_and(|w| matches!(w, "في" | "من" | "داخل")) || !at(4).is_some_and(slide_word) {
+            return None;
+        }
+        let slide = num(at(5)?)?;
+        if !at(6).is_some_and(to) || t.len() < 8 {
+            return None;
+        }
+        let text = join_orig(&t[7..]).trim().to_string();
+        if text.is_empty() {
+            return None;
+        }
+        return Some(format!("change slide {slide} line {line} to {text}"));
+    }
+    // "غير عنوان الشريحة N الى TEXT"
+    if matches!(at(1), Some("العنوان" | "عنوان")) && at(2).is_some_and(slide_word) {
+        let slide = num(at(3)?)?;
+        if !at(4).is_some_and(to) || t.len() < 6 {
+            return None;
+        }
+        let text = join_orig(&t[5..]).trim().to_string();
+        if text.is_empty() {
+            return None;
+        }
+        return Some(format!("edit slide {slide} title to {text}"));
+    }
+    None
+}
+
 fn greeting(f: &str) -> Option<&'static str> {
     let f = f.trim().trim_end_matches(['!', '.', '?']).trim();
     match f {
@@ -346,7 +415,18 @@ pub fn translate(input: &str) -> Outcome {
     }
     let blocked = is_request_blocked(&t, input);
     if !blocked {
-        if let Some(c) = deck(&t).or_else(|| command(&t)) {
+        if let Some(c) = deck_edit(&t) {
+            return Outcome::Command(c);
+        }
+        if let Some(c) = deck(&t) {
+            return Outcome::Command(c);
+        }
+        // A delete or rename whose TARGET is a slide is never read as a file named "الشريحة":
+        // if the shape above did not match, say so and run nothing.
+        if slide_shaped(&t) {
+            return Outcome::Reply("لم أنفّذ شيئاً: ذكرت شريحة، وهذه الصيغة غير معروفة لي. اكتب مثلاً: احذف الشريحة 3، أو غير عنوان الشريحة 3 الى نص، أو غير السطر 2 في الشريحة 3 الى نص. (Nothing was run: that slide command is not one I know.)".into());
+        }
+        if let Some(c) = command(&t) {
             return Outcome::Command(c);
         }
     }

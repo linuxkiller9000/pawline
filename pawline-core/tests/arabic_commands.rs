@@ -209,3 +209,20 @@ fn arabic_howto_questions_get_an_example_and_run_nothing() {
         }
     }
 }
+
+/// Item 11f: presentation draft edits. Author-written after the code (regression, not independent evidence).
+#[test]
+fn arabic_presentation_edits_become_the_english_edit_commands() {
+    assert_eq!(cmd("احذف الشريحة 3"), "delete slide 3");
+    assert_eq!(cmd("امسح شريحة ٢"), "delete slide 2");
+    assert_eq!(cmd("غير عنوان الشريحة 3 الى مقدمة"), "edit slide 3 title to مقدمة");
+    assert_eq!(cmd("عدّل عنوان السلايد 4 إلى الخلاصة"), "edit slide 4 title to الخلاصة");
+    assert_eq!(cmd("غير السطر 2 في الشريحة 3 الى نص جديد"), "change slide 3 line 2 to نص جديد");
+    assert_eq!(cmd("غير السطر ١ من الشريحة ٢ الى رقم ٣"), "change slide 2 line 1 to رقم ٣");
+    // Questions and negations never run; a wrong shape stays un-understood rather than guessed.
+    assert!(matches!(translate("كيف أحذف الشريحة 3؟"), Outcome::Reply(_)));
+    assert!(matches!(translate("لا تحذف الشريحة 3"), Outcome::Reply(_)));
+    assert!(matches!(translate("احذف الشريحة"), Outcome::Reply(_)));
+    assert!(matches!(translate("غير عنوان الشريحة 3"), Outcome::Reply(_)));
+    assert!(matches!(translate("احذف الشريحة 3 من الملف"), Outcome::Reply(_)));
+}

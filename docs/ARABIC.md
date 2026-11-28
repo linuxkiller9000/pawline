@@ -34,5 +34,21 @@ After an Arabic command, a fixed Arabic line is added: "تم." after a finished 
 ## 11d: small Arabic chat (partial)
 A fixed set of whole-message Arabic chat inputs gets a fixed Arabic reply: how are you, who are you, what can you do (the help text), and a tell-me-a-joke set of 4 jokes. Deterministic, nothing runs, nothing is read or sent. It is NOT open Arabic conversation: no follow-up memory, no Arabic discussion of actions (a how-to or question still gets the generic "nothing was run" line), no dialect coverage measured, confirm cards and errors stay English.
 
+## 11f: presentation draft edits (partial)
+"احذف الشريحة 3" -> "delete slide 3"; "غير عنوان الشريحة 3 الى X" (also عدّل/السلايد/شريحة) -> "edit slide 3 title to X";
+"غير السطر 2 في الشريحة 3 الى X" (في/من/داخل) -> "change slide 3 line 2 to X". Numbers may be Arabic-Indic (٢, ٣) or ASCII;
+the new text is passed through byte for byte (a test keeps Arabic-Indic digits inside the new text intact). Slide words:
+شريحة/الشريحة/سلايد/السلايد/شرايح/الشرايح/بريزنتيشن. The English edit command's own rules then apply unchanged: only while a
+draft exists, Contents slide and split slides refused, outline syntax refused, typed text never corrected.
+
+Also fixed here: "احذف الشريحة" or "احذف الشريحة 3 من الملف" used to become "delete الشريحة ..." (a FILE named الشريحة, with the
+number in the name). A delete or rename whose target is a slide word now either matches one of the exact shapes above or gets an
+Arabic "that slide command is not one I know, nothing was run" reply, with the three example shapes. Files genuinely named
+شريحة are unaffected: "احذف ملف اسمه شريحة" still targets the file.
+
+Tests: `pawline-core/tests/arabic_commands.rs::arabic_presentation_edits_become_the_english_edit_commands` (12 assertions:
+6 shapes, 3 questions/negations, 3 malformed shapes refused). Author-written after the code, so regression only, not independent
+evidence. Not done: image, chart and source lines have no Arabic shape.
+
 ## 11e: Arabic how-to / negation replies (partial)
 A question or negation that contains a known Arabic action word (delete, create, rename, move, copy) gets an Arabic reply saying nothing was run, with a fixed example command. The example is generic, never built from the user's words. Other questions get the generic line.
