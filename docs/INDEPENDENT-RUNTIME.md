@@ -95,7 +95,25 @@ mmproj (104 MB) makes the download about 380 MB and needs no model files on the
 machine at all. That is a product call, not an engineering one, so it goes to
 him rather than being assumed.
 
+## Interim: Pawline starts the runner itself (implemented)
+
+Until the engine is inside Pawline, Pawline starts `llama-server` itself, so
+nothing is launched by hand:
+
+- the local llama.cpp provider plus a vision file the user pointed at is enough
+- a server that already answers on that address is never started twice
+- the child carries a kernel parent-death signal, so it cannot outlive Pawline
+- a missing `llama-server`, or one that exits straight away because the port is
+  taken by something else, is reported in one sentence instead of a 90 second wait
+
+Verified in the running app, not only in tests: with the provider pointed at
+127.0.0.1:8098 and the real SmolVLM-256M files, a screen question started the
+runner (/props answered 200), and two seconds after Pawline exited the same
+endpoint answered nothing (000). The module test does the same thing with a real
+llama-server: start, answer, no second copy, gone after a signal.
+
 ## Status
 
-Research and measurements only. Nothing in this file is implemented yet; the
-shipped build still talks to `llama-server` over HTTP.
+The managed runner above is implemented and in the app. The in-process engine in
+the first half of this file is not: the shipped build still talks to
+llama-server over HTTP, it just starts it now.
