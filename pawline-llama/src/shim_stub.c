@@ -19,4 +19,15 @@ int pl_apply_template(pl_engine * e, const char * system, const char * user, cha
     (void)e; (void)system; (void)user; (void)out; (void)out_len;
     return -1;
 }
+int pl_vision_enable(pl_engine * e, const char * mmproj, char * err, int err_len) {
+    (void)e; (void)mmproj; (void)err; (void)err_len;
+    return -1;
+}
+int pl_vision_ready(pl_engine * e) { (void)e; return 0; }
+int pl_vision_ask(pl_engine * e, const unsigned char * img, size_t img_len, const char * question,
+                  int max_tokens, int top_k, float top_p, float temp, char * out, int out_len) {
+    (void)e; (void)img; (void)img_len; (void)question; (void)max_tokens;
+    (void)top_k; (void)top_p; (void)temp; (void)out; (void)out_len;
+    return -1;
+}
 void pl_destroy(pl_engine * e) { (void)e; }

@@ -45,6 +45,25 @@ extern "C" {
         out_len: c_int,
     ) -> c_int;
     fn pl_destroy(engine: *mut Engine);
+    fn pl_vision_enable(
+        engine: *mut Engine,
+        mmproj: *const c_char,
+        err: *mut c_char,
+        err_len: c_int,
+    ) -> c_int;
+    fn pl_vision_ready(engine: *mut Engine) -> c_int;
+    fn pl_vision_ask(
+        engine: *mut Engine,
+        img: *const u8,
+        img_len: usize,
+        question: *const c_char,
+        max_tokens: c_int,
+        top_k: c_int,
+        top_p: c_float,
+        temp: c_float,
+        out: *mut c_char,
+        out_len: c_int,
+    ) -> c_int;
 }
 
 /// True when this build really contains llama.cpp.
@@ -182,6 +201,74 @@ impl LocalModel {
         let prompt = self.chat_prompt(system, user);
         self.generate(&prompt, max_tokens, 40, 0.95, 0.0)
     }
+
+    /// Load the mmproj projector so this engine can answer questions about an
+    /// image. Same model, same context, no server and no port.
+    pub fn load_vision(&mut self, mmproj_path: &str) -> Result<(), EngineError> {
+        let p = CString::new(mmproj_path)
+            .map_err(|_| EngineError("the projector path contains a NUL byte".into()))?;
+        let mut err = vec![0 as c_char; 512];
+        let rc = unsafe {
+            pl_vision_enable(self.raw, p.as_ptr(), err.as_mut_ptr(), err.len() as c_int)
+        };
+        if rc != 0 {
+            let msg = unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy().into_owned();
+            return Err(EngineError(if msg.is_empty() {
+                format!("could not load the projector: {mmproj_path}")
+            } else {
+                format!("{msg}: {mmproj_path}")
+            }));
+        }
+        Ok(())
+    }
+
+    /// True once a projector is loaded.
+    pub fn vision_ready(&self) -> bool {
+        unsafe { pl_vision_ready(self.raw) == 1 }
+    }
+
+    /// Ask a question about an image given as PNG or JPEG bytes.
+    pub fn ask_image(
+        &mut self,
+        image: &[u8],
+        question: &str,
+        max_tokens: u32,
+    ) -> Result<String, EngineError> {
+        if image.is_empty() {
+            return Err(EngineError("no image bytes to look at".into()));
+        }
+        let q = CString::new(question)
+            .map_err(|_| EngineError("the question contains a NUL byte".into()))?;
+        let mut out = vec![0 as c_char; 64 * 1024];
+        let n = unsafe {
+            pl_vision_ask(
+                self.raw,
+                image.as_ptr(),
+                image.len(),
+                q.as_ptr(),
+                max_tokens as c_int,
+                40,
+                0.95,
+                0.0,
+                out.as_mut_ptr(),
+                out.len() as c_int,
+            )
+        };
+        let bytes: Vec<u8> = out
+            .iter()
+            .take_while(|c| **c != 0)
+            .map(|c| *c as u8)
+            .collect();
+        let text = String::from_utf8_lossy(&bytes).trim().to_string();
+        if n < 0 {
+            return Err(EngineError(if text.is_empty() {
+                "the vision model failed".into()
+            } else {
+                text
+            }));
+        }
+        Ok(text)
+    }
 }
 
 impl Drop for LocalModel {
@@ -219,5 +306,20 @@ mod tests {
     fn engine_version_is_readable_text() {
         let v = engine_version();
         assert!(!v.is_empty());
+    }
+
+    #[test]
+    fn an_empty_image_is_refused_before_any_model_work() {
+        // A loaded model is needed for the rest, so this checks the cheap guard
+        // that runs before the model is touched at all.
+        let mut m = match LocalModel::load("/nonexistent/model.gguf", 512, 1) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        let err = match m.ask_image(&[], "what is this?", 8) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("an empty image must not be sent to the model"),
+        };
+        assert!(err.contains("no image bytes"), "unexpected: {err}");
     }
 }

@@ -66,6 +66,7 @@ fn main() {
     shim.file("src/shim.c")
         .include(src.join("include"))
         .include(src.join("ggml/include"))
+        .include(src.join("tools/mtmd"))
         .warnings(false)
         .opt_level(2);
     shim.compile("pawline_shim");
@@ -73,7 +74,14 @@ fn main() {
     for d in find_lib_dirs(&build) {
         println!("cargo:rustc-link-search=native={}", d.display());
     }
-    for lib in ["llama", "ggml-cpu", "ggml", "ggml-base"] {
+    // mtmd links these privately, so a static archive does not carry them: the
+    // sha-256 helper it uses for image ids lives here.
+    let vendor_hash = build.join("vendor/hash");
+    if vendor_hash.is_dir() {
+        println!("cargo:rustc-link-search=native={}", vendor_hash.display());
+        println!("cargo:rustc-link-lib=static=vendor-hash");
+    }
+    for lib in ["mtmd", "llama", "ggml-cpu", "ggml", "ggml-base"] {
         println!("cargo:rustc-link-lib=static={lib}");
     }
     println!("cargo:rustc-link-lib=dylib=stdc++");
@@ -109,7 +117,7 @@ fn find_lib_dirs(root: &Path) -> Vec<PathBuf> {
             if p.is_dir() {
                 stack.push(p);
             } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("libllama.a") || name.starts_with("libggml.a") {
+                if name.starts_with("libllama.a") || name.starts_with("libggml.a") || name.starts_with("libmtmd.a") {
                     if let Some(parent) = p.parent() {
                         if !out.iter().any(|d| d == parent) {
                             out.push(parent.to_path_buf());

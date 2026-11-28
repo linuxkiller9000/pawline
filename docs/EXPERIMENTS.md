@@ -1050,3 +1050,24 @@ The kernels for quantised matmul are written for AVX2; without AVX the SSE path
 is what runs, and it is 3.7x slower on a cold question. Any timing measured on
 this sandbox's native kernels overstates the Dell, so the floor column is the
 number to quote for him.
+
+### Vision inside the process, and what the image encode costs (2026-11-28)
+
+mtmd now runs in the same crate: the projector loads next to the model and the
+image bytes go straight in. Shipping SSE4.2 floor build, SmolVLM-256M Q8,
+4096 context, one thread, sandbox:
+
+| image | first question | second question, same image |
+|---|---|---|
+| 787-byte test image | 39.2 s | 0.43 s |
+| 18 KB screenshot, 960 px | 56.4 s | 0.64 s |
+
+The second column is real only because the engine keeps the image encode: the
+bitmap's sha-256 id and the position after its image tokens are remembered, so a
+second question about the same picture trims the old words and decodes only the
+new ones. A different picture pays the encode again.
+
+Two honest consequences: a first look at a new screen is expensive on a CPU
+without AVX (tens of seconds here, and his Dell is slower than this sandbox), and
+the win from asking twice about one screen is large (39 s -> 0.43 s), which is
+exactly the case the screen-share pill creates.

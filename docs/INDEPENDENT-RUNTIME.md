@@ -183,10 +183,43 @@ Both builds are static, MIT-attributed, and produce the same answers.
 The numbers above were taken with `PAWLINE_LLAMA_BUILD_DIR` pointing at each
 cmake tree, so both came from the same crate and the same example.
 
+## Vision in the process: mtmd (2026-11-28)
+
+The same crate now loads the projector and answers questions about an image
+with no server: `pl_vision_enable` loads the mmproj through mtmd on the model
+and context already in memory, and `pl_vision_ask` takes the image bytes (PNG or
+JPEG), wraps "<media> + question" in the model's chat template, tokenises with
+mtmd, evaluates the chunks and samples the reply. The picture never leaves the
+process, and there is no port, no HTTP and no base64 in a request body.
+
+Measured with the shipping SSE4.2 floor build (SmolVLM-256M Q8 + its mmproj,
+4096 context, one thread, sandbox):
+
+| image | first question (image encoded) | second question, same image |
+|---|---|---|
+| 787-byte test image | 39.2 s | 0.43 s |
+| 18 KB screenshot, 960 px wide | 56.4 s | 0.64 s |
+
+Projector load 0.07-0.29 s. The answers were correct for both ("a square with a
+solid blue background"; a line of text read from the screenshot).
+
+The second column is the number that matters for the screen feature, and it
+exists because the engine now keeps the image encode: the bitmap carries a
+sha-256 id, the position just after its image tokens is remembered, and a second
+question about the same picture drops the old question's tokens
+(`llama_memory_seq_rm`) and decodes only the new words. A different picture
+clears the cache and pays the full encode again, which is the honest behaviour:
+changed pixels are a new picture.
+
+What this means for his machine: a first look at a new screen is expensive
+(tens of seconds on the floor build in this sandbox, and the Dell's clock is
+slower), and a second question about the same screen is fast. That is the same
+shape llama-server had, with the encode cache now in our own code.
+
 ## Status
 
 The managed runner above is implemented and in the app. The in-process engine is
-a working crate at parity with llama-server, not yet wired into the app: the
-shipped build still talks to llama-server over HTTP, it just starts it now. Next
-steps, in order: the all-variants static build for the i3, then swapping the
-vision path (mtmd) over to the same in-process engine, then the app switch.
+a working crate with text and vision, at parity with llama-server and not yet
+wired into the app: the shipped build still talks to llama-server over HTTP, it
+just starts it now. Next step: the app switch, so the screen feature uses the
+engine in the process and llama-server is no longer needed at all.
