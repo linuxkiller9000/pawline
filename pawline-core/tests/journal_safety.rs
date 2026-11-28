@@ -248,3 +248,33 @@ fn failed_move_leaves_source_in_place_no_stray_files_and_nothing_to_undo() {
     let j = std::fs::read_to_string(root.join(".local/share/pawline/journal.jsonl")).unwrap_or_default();
     assert!(pawline_core::journal::pending(&j).is_empty(), "no intent left dangling: {j}");
 }
+
+/// Item 17: undo after the folder changed underneath it. Deleting a file and then making a new one
+/// with the same name must never be undone by overwriting the new one.
+#[test]
+fn undo_of_a_delete_never_overwrites_a_file_made_since() {
+    let (root, mut e) = setup("del-recreate");
+    let f = root.join("a.txt");
+    std::fs::write(&f, b"original").unwrap();
+    let be = DirectFsBackend::new(&root).unwrap();
+    match go(&mut e, &be, "delete the file a.txt") {
+        Response::Confirm(p) => {
+            e.execute_plan(p, &be).unwrap();
+        }
+        Response::Executed(_) => {} // the card belongs to the UI layer; the engine may run it directly
+        _ => panic!("the delete did not run"),
+    }
+    assert!(!f.exists(), "the delete ran");
+    // The user makes a new file with the same name before saying undo.
+    std::fs::write(&f, b"mine").unwrap();
+    let _ = go(&mut e, &be, "undo");
+    assert_eq!(std::fs::read(&f).unwrap(), b"mine", "undo must not overwrite a file the user made since the delete");
+    // and it must not leave a renamed copy or any other stray file behind either
+    let names: Vec<String> = std::fs::read_dir(&root)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| !n.starts_with('.')) // Pawline's own .local data folder lives in the test root too
+        .collect();
+    assert_eq!(names, vec!["a.txt".to_string()], "no stray file from the refused undo: {names:?}");
+}

@@ -255,6 +255,13 @@ signing or release commitment without approval. Publishing needs the user's expl
 - Assist timeout is now visible: the next reply says the local AI assist is off until restart, that the answer shown is the parser's, and that the stuck work cannot be stopped from here and may still use CPU (shown once per session; test).
 - The structural history/bridge test now splits at an explicit "END OF PRODUCTION CODE" marker comment in bridge.rs instead of the first #[cfg(test)] (and fails if the marker is removed).
 
+### 17 filesystem stress, slice 4 (2026-11-28): undo after the folder changed underneath it
+- New test `journal_safety::undo_of_a_delete_never_overwrites_a_file_made_since`: delete a file, then make a NEW file with the same
+  name, then undo. The new file must survive byte for byte and no stray file (a renamed copy, a temp) may be left behind. Both hold:
+  the undo refuses rather than restoring over the user's file, and the folder ends with exactly the one file. Behavioural, real files.
+  This closes the "undo after files have been externally modified" bullet for the delete case; the "touched since" case for created
+  files was already covered (`create_file_undo_refuses_when_touched_even_if_truncated_back_to_empty`).
+
 ### 17 filesystem stress, slice 1 (PARTIAL)
 - BUG FIXED: `rename a to "new name.txt"` created a file whose name literally contained the quote characters. Quotes wrapped around the whole new name are now syntax (straight, single, backtick, curly); quotes inside a name are kept. Unit-tested in intent.rs.
 - New matrix `pawline-core/tests/fs_stress.rs` on real temp homes (Linux, running as a normal user): rename + undo with spaces, Arabic, emoji, an apostrophe and double spaces; no overwrite on rename/copy/move onto an existing name; symlinks (directory and file) pointing outside the home cannot be deleted, renamed, moved, copied through, or used as a target, and absolute/dotted escapes are refused (refusal messages checked in a debug run, so the tests are not vacuous); read-only target folders fail with Permission denied and leave no temp or partial files; undo of a create does not delete a file that gained content, and undo of a rename does not overwrite a re-created old name.
