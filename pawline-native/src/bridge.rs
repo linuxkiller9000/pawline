@@ -343,7 +343,13 @@ fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str, share
         if let Some(v) = vision_file.as_ref() {
             let has = |b: &str| pawline_core::screencap::binary_on_path(b);
             let data = home.as_deref().map(|h| h.join(".local/share/pawline"));
-            if let Some(bin) = pawline_core::runner::find_binary(&has, v, data.as_deref()) {
+            // A copy Pawline installed itself comes first: it is the one the user
+            // already agreed to download, and it lives under their home.
+            let bin = home
+                .as_deref()
+                .and_then(|h| pawline_core::llamainstall::installed_at(h, pawline_core::llamainstall::TAG))
+                .or_else(|| pawline_core::runner::find_binary(&has, v, data.as_deref()));
+            if let Some(bin) = bin {
                 let probe = |u: &str| {
                     let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_millis(800));
                     pawline_core::imagegen::Http::get(&http, u, &[]).is_ok()
