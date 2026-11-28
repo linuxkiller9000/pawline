@@ -1329,6 +1329,9 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             state.llama_setup_pending = true;
             return reply("confirm", pawline_core::llamainstall::card_text(&c, &home));
         }
+        if matches!(low, "permissions" | "privacy" | "permission summary" | "privacy summary" | "show permissions" | "what am i allowing") {
+            return reply("message", permissions_text());
+        }
         #[cfg(all(feature = "laya", not(windows)))]
         if matches!(low, "laya on" | "turn on laya" | "enable laya" | "laya on please" | "laya setup" | "set up laya" | "install laya") {
             let on_text = "Laya suggestions are ON for this session only (EXPERIMENTAL). When my normal parser does not understand a message, a small local model may suggest a command. Nothing runs by itself: every suggestion still needs your pick, Enter and the usual confirmation. Local only, English only, and slow on an old CPU (a few seconds per suggestion). Say \"laya off\" to stop.";
@@ -1937,6 +1940,30 @@ fn laya_setup_exec(state: &mut UiState) -> UiReply {
         }
         Err(e) => reply("error", format!("Laya setup did not finish: {e}. Nothing was installed and Laya stays off.")),
     }
+}
+
+/// What Pawline is currently allowed to do, in one place. Read-only: it changes nothing and sends
+/// nothing. The mic and AI switches live in the GUI's settings file; internet and file changes also
+/// have live gates, and those are asked directly so the answer matches what would really happen.
+fn permissions_text() -> String {
+    let settings = crate::settings_path().map(|p| crate::theme::load(&p)).unwrap_or_default();
+    let mic = if settings.mic_blocked { "BLOCKED (voice input is off)".to_string() } else { "allowed when you press the mic button or F2".to_string() };
+    let files = if pawline_core::filesgate::is_read_only() { "BLOCKED - Pawline stays read-only, no file is changed, saved or deleted".to_string() } else { "allowed - every change still shows the full path and waits for your Do it".to_string() };
+    let net = if pawline_core::netgate::is_offline() { "OFF - offline mode is on, so Pawline's own online features send nothing".to_string() } else { "on - online features ask on a card first and send nothing before your Do it".to_string() };
+    let ai = if settings.assist { "on - local, on this computer; a suggestion never runs by itself".to_string() } else { "off".to_string() };
+    let saved = if settings.keep_history { "on - typed messages and plain replies are kept in a local file, not encrypted" } else { "off - nothing from the conversation is written to disk" };
+    format!(
+        "Permissions right now (nothing was sent, nothing was changed):\n\
+         \n\
+         Microphone: {mic}\n\
+         File changes: {files}\n\
+         Internet: {net}\n\
+         Local AI assist: {ai}\n\
+         Saved conversation: {saved}\n\
+         \n\
+         Change any of these in Settings (Ctrl+,), then Enter on the row; each one is saved for next start.\n\
+         Pawline cannot control: apps you open, and any recorder, speech-to-text or speech command you set yourself."
+    )
 }
 
 /// The llama-server card was approved: download the pinned official build, check it
@@ -3468,6 +3495,29 @@ mod memory_tests {
             assert!(line.contains("AI-generated") && line.contains("unchecked"), "{line}");
             assert!(line.contains("/home/u/Pictures/x.png"), "detail kept: {line}");
         }
+    }
+
+    #[test]
+    fn the_permissions_summary_names_every_switch_and_follows_the_live_gates() {
+        let root = org_root("perms1");
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "permissions");
+        assert_eq!(r.kind, "message", "{}", r.text);
+        for row in ["Microphone:", "File changes:", "Internet:", "Local AI assist:", "Saved conversation:"] {
+            assert!(r.text.contains(row), "{row} missing: {}", r.text);
+        }
+        assert!(r.text.contains("nothing was sent, nothing was changed"), "{}", r.text);
+        assert!(r.text.contains("Ctrl+,"), "it says where to change them: {}", r.text);
+        assert!(r.text.contains("cannot control"), "it says what it cannot control: {}", r.text);
+        // The live gates decide the two that can be flipped here, so the answer cannot drift from reality.
+        pawline_core::netgate::set_offline_for_this_thread(Some(true));
+        pawline_core::filesgate::set_read_only_for_this_thread(Some(true));
+        let r = handle_text(&mut st, "privacy");
+        pawline_core::netgate::set_offline_for_this_thread(None);
+        pawline_core::filesgate::set_read_only_for_this_thread(None);
+        assert!(r.text.contains("Internet: OFF") && r.text.contains("File changes: BLOCKED"), "{}", r.text);
+        // Nothing about a summary may change anything.
+        assert!(st.pending.is_none());
     }
 
     #[test]
