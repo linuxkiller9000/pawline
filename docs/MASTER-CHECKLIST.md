@@ -26,9 +26,9 @@ Legend: DONE = done for the scope written, not hardware-verified. PARTIAL = some
 | 12 | Voice/audio completion | new | OPEN (runtime gates). Audit in docs/VOICE.md: real sherpa+Moonshine STT run on 3 sample WAVs only; no mic, no TTS, no Arabic voice. 12a (2026-11-28): Arabic model licences read and recorded - English Moonshine is MIT, moonshine-tiny-ar is the Moonshine AI Community Licence (free non-commercial, commercial under US $1M revenue, revocable, distribution needs the agreement, a Notice file and a visible "Powered by Moonshine AI"). Earlier note corrected. Still open: mic, TTS, accuracy set, target hardware, sherpa-onnx Arabic bundle licence |
 | 13 | Desktop polish and accessibility | section 25 + extras | OPEN |
 | 14 | Privacy and permissions | section 17 | PARTIAL: disclosure cards, secret-text block, offline mode (14a/b), files block with revocation (14c), structural privacy audit (14d), permissions summary command (14e). Open: runtime traffic audit on hardware, per-folder file permissions, permissions panel in Settings |
-| 15 | Failure recovery | section 18 | OPEN (parts exist) |
+| 15 | Failure recovery | section 18 | PARTIAL: undo journal + start-up recovery notes (15.1), opt-in conversation history (15.2, off by default), rename/move/copy undo across restart + pending-confirm restore (15.3), partial-run explanation with "undo all" (15.4). Open: crash recovery of conversation/pending tasks needs the user decision |
 | 16 | AI reliability | section 19 | OPEN (parts exist) |
-| 17 | Filesystem safety stress testing | section 20 | OPEN (parts exist) |
+| 17 | Filesystem safety stress testing | section 20 | PARTIAL: stress slice 1, gap list, slice 3, and undo-after-external-change coverage (slice 4, 2026-11-28) |
 | 18 | Performance and resource management | section 21 | OPEN |
 | 19 | Conversation management | section 22 | OPEN |
 | 20 | Settings and customization | section 23 | OPEN |
