@@ -25,6 +25,7 @@ pub mod finder;
 pub mod imagegen;
 pub mod intent;
 pub mod journal;
+pub mod llamainstall;
 pub mod math;
 pub mod models;
 pub mod netgate;
