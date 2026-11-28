@@ -10,7 +10,7 @@ The source is not committed (200 MB unpacked). Fetch the pinned tag and check
 the checksum before building:
 
     curl -fsSLO https://github.com/ggml-org/llama.cpp/archive/refs/tags/b12811.tar.gz
-    echo "PINNED_SHA256  b12811.tar.gz" | sha256sum -c -
+    echo "d7fc9bdd36e72c99f64e253fc581bc3deea73f27fded8fe1b2faf7e7fdef1252  b12811.tar.gz" | sha256sum -c -
     tar xzf b12811.tar.gz            # -> llama.cpp-b12811/
     export PAWLINE_LLAMA_SRC=$PWD/llama.cpp-b12811
 
