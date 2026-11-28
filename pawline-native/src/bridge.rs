@@ -1951,7 +1951,6 @@ fn permissions_text() -> String {
     let files = if pawline_core::filesgate::is_read_only() { "BLOCKED - Pawline stays read-only, no file is changed, saved or deleted".to_string() } else { "allowed - every change still shows the full path and waits for your Do it".to_string() };
     let net = if pawline_core::netgate::is_offline() { "OFF - offline mode is on, so Pawline's own online features send nothing".to_string() } else { "on - online features ask on a card first and send nothing before your Do it".to_string() };
     let ai = if settings.assist { "on - local, on this computer; a suggestion never runs by itself".to_string() } else { "off".to_string() };
-    let saved = if settings.keep_history { "on - typed messages and plain replies are kept in a local file, not encrypted" } else { "off - nothing from the conversation is written to disk" };
     format!(
         "Permissions right now (nothing was sent, nothing was changed):\n\
          \n\
@@ -1959,7 +1958,6 @@ fn permissions_text() -> String {
          File changes: {files}\n\
          Internet: {net}\n\
          Local AI assist: {ai}\n\
-         Saved conversation: {saved}\n\
          \n\
          Change any of these in Settings (Ctrl+,), then Enter on the row; each one is saved for next start.\n\
          Pawline cannot control: apps you open, and any recorder, speech-to-text or speech command you set yourself."
@@ -3503,7 +3501,7 @@ mod memory_tests {
         let mut st = new_state(root.clone());
         let r = handle_text(&mut st, "permissions");
         assert_eq!(r.kind, "message", "{}", r.text);
-        for row in ["Microphone:", "File changes:", "Internet:", "Local AI assist:", "Saved conversation:"] {
+        for row in ["Microphone:", "File changes:", "Internet:", "Local AI assist:"] {
             assert!(r.text.contains(row), "{row} missing: {}", r.text);
         }
         assert!(r.text.contains("nothing was sent, nothing was changed"), "{}", r.text);
