@@ -1311,6 +1311,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pawline-llama"
+version = "0.1.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "pawline-native"
 version = "0.3.0-test.1"
 dependencies = [

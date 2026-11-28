@@ -1008,3 +1008,23 @@ route line now added under every screen answer ("vision on the pixels, a new
 frame, pays the full encode" / "same pixels as last time, the runner can reuse
 its encode" / "screen text read with tesseract"). Then his next test gives a
 number that means something.
+
+### In-process llama.cpp, measured against llama-server (2026-11-28)
+
+The vendored engine crate (`pawline-llama`) links llama.cpp b12811 statically
+and answers from inside the process. Same model, same prompt, same sampling,
+one thread, sandbox:
+
+| path | load | first question | repeat, same prompt | max RSS |
+|---|---|---|---|---|
+| in-process | 0.18 s | 0.66 s | 0.52 s | 729 MiB |
+| llama-server, HTTP | - | 0.59 s | 0.29 s | 760 MiB |
+
+So independence costs nothing on a first question and currently costs 0.23 s on
+a repeat, because the shim clears the KV cache between answers while the server
+keeps the prompt prefix. Fixing that is our own code now (the context is in our
+hands), and it is the next step before the engine replaces the runner.
+
+Structural, not behavioural: the crate's own tests only check that a stub build
+refuses to load and that a real build loads; the numbers above come from
+`examples/answer.rs` run against the real GGUF.

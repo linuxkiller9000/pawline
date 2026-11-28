@@ -112,8 +112,50 @@ runner (/props answered 200), and two seconds after Pawline exited the same
 endpoint answered nothing (000). The module test does the same thing with a real
 llama-server: start, answer, no second copy, gone after a signal.
 
+## In-process engine: the crate exists and runs (2026-11-28)
+
+`pawline-llama` is now in the workspace and links llama.cpp b12811 into the
+process. Structure:
+
+- `pawline-llama/src/shim.c` is the only boundary: create, apply the model's own
+  chat template, generate, destroy. Rust never mirrors a llama.cpp struct, so a
+  llama.cpp update cannot silently break the layout of a params struct.
+- `build.rs` runs cmake on a vendored source tree (static `llama`, `ggml`,
+  `ggml-cpu`, `ggml-base`), compiles the shim against the vendored headers, and
+  links `stdc++`. With the `vendored` feature off it compiles a stub instead, so
+  the rest of the workspace still builds with no C++ toolchain.
+- Source location: `$PAWLINE_LLAMA_SRC`, else `vendor/llama.cpp`. An existing
+  cmake tree can be reused with `$PAWLINE_LLAMA_BUILD_DIR` (the build is minutes
+  long on one core, so dev runs should not repeat it).
+
+Measured in the sandbox (1 vCPU, 1 thread, qwen2.5-0.5b Q8, 2048 context,
+release C++ / debug Rust, same system prompt and greedy sampling both ways):
+
+| path | load | first question | repeat, same prompt | max RSS |
+|---|---|---|---|---|
+| in-process (`pawline-llama`) | 0.18 s | 0.66 s | 0.52 s | 729 MiB |
+| `llama-server` over HTTP | (server start) | 0.59 s | 0.29 s | 760 MiB |
+
+Two honest readings of that table:
+
+- **First question is the same, within noise.** Removing the process and HTTP
+  does not make the model faster, exactly as the earlier research said.
+- **The repeat is slower in-process**, 0.52 s against 0.29 s, because
+  `llama-server` keeps the prompt prefix in its cache and only generates, while
+  the current shim clears the KV cache after every answer. That is not a
+  limitation of the approach: the context is ours now, so prefix reuse becomes
+  code we write and test. Until it does, the in-process path is the slower one
+  for repeated questions.
+
+The shipping build needs `-DGGML_CPU_ALL_VARIANTS=ON` so the i3-370M picks the
+`sse42` kernel at runtime instead of hitting an illegal instruction; the numbers
+above were taken from a native-optimised tree, which is fine for speed and not
+what ships.
+
 ## Status
 
-The managed runner above is implemented and in the app. The in-process engine in
-the first half of this file is not: the shipped build still talks to
-llama-server over HTTP, it just starts it now.
+The managed runner above is implemented and in the app. The in-process engine is
+a working crate with measured numbers, not yet wired into the app: the shipped
+build still talks to llama-server over HTTP, it just starts it now. Next steps,
+in order: prompt-prefix reuse in the shim, the all-variants static build, then
+swapping the vision path (mtmd) over to the same in-process engine.

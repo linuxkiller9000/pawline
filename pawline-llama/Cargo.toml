@@ -1,0 +1,20 @@
+[package]
+name = "pawline-llama"
+version = "0.1.0"
+edition = "2021"
+description = "In-process llama.cpp engine for Pawline (vendored, MIT). Same GGUF files, no server, no port."
+license = "Apache-2.0"
+build = "build.rs"
+
+[features]
+# Build the vendored llama.cpp source in this crate's build script. Without it
+# the crate compiles a stub that reports the engine as unavailable, so the rest
+# of the workspace builds with no C++ toolchain present.
+vendored = []
+
+[build-dependencies]
+cc = "1"
+
+[lib]
+name = "pawline_llama"
+path = "src/lib.rs"
