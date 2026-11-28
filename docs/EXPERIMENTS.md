@@ -1012,19 +1012,23 @@ number that means something.
 ### In-process llama.cpp, measured against llama-server (2026-11-28)
 
 The vendored engine crate (`pawline-llama`) links llama.cpp b12811 statically
-and answers from inside the process. Same model, same prompt, same sampling,
-one thread, sandbox:
+and answers from inside the process. Same model, the same question on both sides
+so answer lengths match, greedy, one thread, sandbox:
 
-| path | load | first question | repeat, same prompt | max RSS |
-|---|---|---|---|---|
-| in-process | 0.18 s | 0.66 s | 0.52 s | 729 MiB |
-| llama-server, HTTP | - | 0.59 s | 0.29 s | 760 MiB |
+| question | in-process | llama-server, HTTP |
+|---|---|---|
+| first question, cold (7 tokens out) | 0.71 s | 0.80 s |
+| different question (3 tokens out) | 0.26 s | 0.26 s |
+| first question again (24-token prefix cached) | 0.50 s | 0.50 s |
+| first question, back to back (34-token cached) | 0.47 s | 0.47 s |
 
-So independence costs nothing on a first question and currently costs 0.23 s on
-a repeat, because the shim clears the KV cache between answers while the server
-keeps the prompt prefix. Fixing that is our own code now (the context is in our
-hands), and it is the next step before the engine replaces the runner.
+Load 0.18 s in-process, 729 MiB resident against the server's 760 MiB.
+
+The shim keeps the KV cache and reuses the shared prefix, so independence costs
+nothing measurable and removes the process, the port and the "is it running?"
+failure. An earlier draft of this entry claimed the repeat was 0.23 s slower:
+that was two different questions with different answer lengths, not a finding.
 
 Structural, not behavioural: the crate's own tests only check that a stub build
-refuses to load and that a real build loads; the numbers above come from
-`examples/answer.rs` run against the real GGUF.
+refuses to load and that a real build loads. The numbers come from
+`examples/answer.rs` against the real GGUF.

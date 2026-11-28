@@ -15,6 +15,11 @@ struct pl_engine {
     struct llama_context * ctx;
     const struct llama_vocab * vocab;
     int n_ctx;
+    /* Prefix reuse: the tokens currently in the KV cache, so a question that
+       shares a prefix with the previous one (the same screenshot, the same
+       system prompt) does not pay to decode that prefix again. */
+    llama_token * cached;
+    int32_t n_cached;
 };
 
 int pl_available(void) { return 1; }
@@ -61,6 +66,8 @@ struct pl_engine * pl_create(const char * model_path, int n_ctx, int n_threads, 
     e->ctx = ctx;
     e->vocab = llama_model_get_vocab(model);
     e->n_ctx = (int) cp.n_ctx;
+    e->cached = malloc(sizeof(llama_token) * (size_t) cp.n_ctx);
+    e->n_cached = 0;
     return e;
 }
 
@@ -117,11 +124,30 @@ int pl_generate(struct pl_engine * e, const char * prompt, int max_tokens, int t
         return -1;
     }
 
-    if (llama_decode(e->ctx, llama_batch_get_one(toks, n_toks)) != 0) {
+    /* How much of this prompt is already in the cache? Always leave at least
+       one token to decode so the context has fresh logits. */
+    int32_t keep = 0;
+    int32_t max_keep = n_toks - 1;
+    if (max_keep > e->n_cached) max_keep = e->n_cached;
+    while (keep < max_keep && e->cached[keep] == toks[keep]) keep++;
+
+    llama_memory_t mem = llama_get_memory(e->ctx);
+    if (keep == 0) {
+        llama_memory_clear(mem, true);
+    } else if (keep < e->n_cached) {
+        llama_memory_seq_rm(mem, 0, keep, -1);
+    }
+    e->n_cached = keep;
+
+    if (llama_decode(e->ctx, llama_batch_get_one(toks + keep, n_toks - keep)) != 0) {
         free(toks);
+        e->n_cached = 0;
+        llama_memory_clear(mem, true);
         snprintf(out, (size_t) out_len, "decode of the prompt failed");
         return -1;
     }
+    memcpy(e->cached, toks, sizeof(llama_token) * (size_t) n_toks);
+    e->n_cached = n_toks;
     free(toks);
 
     struct llama_sampler * smpl = make_sampler(top_k, top_p, temp);
@@ -140,16 +166,21 @@ int pl_generate(struct pl_engine * e, const char * prompt, int max_tokens, int t
             out[used] = 0;
         }
         generated++;
+        if (e->n_cached < e->n_ctx) {
+            e->cached[e->n_cached++] = id;
+        }
         if (llama_decode(e->ctx, llama_batch_get_one(&id, 1)) != 0) break;
     }
 
     llama_sampler_free(smpl);
-    llama_memory_clear(llama_get_memory(e->ctx), true);
+    /* The cache stays: the next question reuses whatever prefix it shares with
+       this one. It is trimmed, not cleared, when a prompt diverges. */
     return generated;
 }
 
 void pl_destroy(struct pl_engine * e) {
     if (!e) return;
+    free(e->cached);
     if (e->ctx) llama_free(e->ctx);
     if (e->model) llama_model_free(e->model);
     free(e);

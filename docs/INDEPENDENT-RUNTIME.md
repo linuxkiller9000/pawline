@@ -129,23 +129,28 @@ process. Structure:
   long on one core, so dev runs should not repeat it).
 
 Measured in the sandbox (1 vCPU, 1 thread, qwen2.5-0.5b Q8, 2048 context,
-release C++ / debug Rust, same system prompt and greedy sampling both ways):
+release C++, same system prompt, greedy, and the same question asked both ways
+so the answer lengths match):
 
-| path | load | first question | repeat, same prompt | max RSS |
-|---|---|---|---|---|
-| in-process (`pawline-llama`) | 0.18 s | 0.66 s | 0.52 s | 729 MiB |
-| `llama-server` over HTTP | (server start) | 0.59 s | 0.29 s | 760 MiB |
+| question | in-process | `llama-server` over HTTP |
+|---|---|---|
+| first question, cold (7 tokens out) | 0.71 s | 0.80 s |
+| different question (3 tokens out) | 0.26 s | 0.26 s |
+| the first question again (24-token prefix cached) | 0.50 s | 0.50 s |
+| the first question, back to back (34-token prefix cached) | 0.47 s | 0.47 s |
 
-Two honest readings of that table:
+Load into the process: 0.18 s, max RSS 729 MiB (the server's resident was
+760 MiB for the same model).
 
-- **First question is the same, within noise.** Removing the process and HTTP
-  does not make the model faster, exactly as the earlier research said.
-- **The repeat is slower in-process**, 0.52 s against 0.29 s, because
-  `llama-server` keeps the prompt prefix in its cache and only generates, while
-  the current shim clears the KV cache after every answer. That is not a
-  limitation of the approach: the context is ours now, so prefix reuse becomes
-  code we write and test. Until it does, the in-process path is the slower one
-  for repeated questions.
+The shim now keeps the KV cache and reuses whatever prefix a new prompt shares
+with the last one, trimming instead of clearing when the prompt diverges. With
+that in, in-process and llama-server are the same speed to two decimals, and the
+process, the port and the "is it running?" failure mode are gone.
+
+An earlier version of this table said the repeat was 0.23 s slower. That was a
+measurement mistake, not a finding: the two paths were asked different questions
+and produced answers of different length, so the comparison was really
+"7 tokens against 3". The table above asks the same question on both sides.
 
 The shipping build needs `-DGGML_CPU_ALL_VARIANTS=ON` so the i3-370M picks the
 `sse42` kernel at runtime instead of hitting an illegal instruction; the numbers
@@ -155,7 +160,7 @@ what ships.
 ## Status
 
 The managed runner above is implemented and in the app. The in-process engine is
-a working crate with measured numbers, not yet wired into the app: the shipped
-build still talks to llama-server over HTTP, it just starts it now. Next steps,
-in order: prompt-prefix reuse in the shim, the all-variants static build, then
-swapping the vision path (mtmd) over to the same in-process engine.
+a working crate at parity with llama-server, not yet wired into the app: the
+shipped build still talks to llama-server over HTTP, it just starts it now. Next
+steps, in order: the all-variants static build for the i3, then swapping the
+vision path (mtmd) over to the same in-process engine, then the app switch.

@@ -37,4 +37,19 @@ fn main() {
         Ok(reply) => println!("second ({:.2} s): {reply}", t2.elapsed().as_secs_f64()),
         Err(e) => println!("second failed: {e}"),
     }
+
+    // Same prompt again: the prefix is already in the KV cache, so this is the
+    // number that matters for a second question about the same screenshot.
+    let t3 = Instant::now();
+    match m.answer(system, &question, 48) {
+        Ok(reply) => println!("same prompt again ({:.2} s): {reply}", t3.elapsed().as_secs_f64()),
+        Err(e) => println!("repeat failed: {e}"),
+    }
+
+    // Twice in a row, exactly as a second look at the same screenshot would be.
+    let t4 = Instant::now();
+    match m.answer(system, &question, 48) {
+        Ok(reply) => println!("back to back ({:.2} s): {reply}", t4.elapsed().as_secs_f64()),
+        Err(e) => println!("back to back failed: {e}"),
+    }
 }
