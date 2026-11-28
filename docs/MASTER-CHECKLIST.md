@@ -233,6 +233,17 @@ signing or release commitment without approval. Publishing needs the user's expl
 - Tests: 2 core tests (round trip incl. fingerprint mismatch) and 3 bridge tests (restore+confirm executes, changed file drops, cancel/replacement clears). GUI pixel proof in Xvfb: killed app with a card up, relaunched, the restored card renders with Do it / Cancel (Cancel focused). Simulated kill -9, not a real power cut; the card text comes from a fresh engine run of the saved request, not the original card bitmap.
 - Still NOT done: conversation persistence needs the user's decision on the scope conflict in section 15 (text on disk vs memory-only promise); saved-action cards that were mid-setup are not restored.
 
+### 15 slice 4: a plan that stops partway is explained and can be undone (2026-11-28)
+- Before this, only an "organize" run that failed partway told the user the completed steps stay done and armed "undo organize". Any other
+  multi-step plan that stopped partway (the validator catches most of these before running, but a write can still fail at execution time,
+  e.g. a move into a folder that is not writable) left the completed steps in place with no way offered to reverse them.
+- Now: when a plan fails with completed steps and every completed step is a file change, the reply adds "The N completed step(s) stay done
+  and each one is in the undo journal. Say "undo all" to put them back.", and the journal batch is armed so "undo all" walks them back.
+  Steps that are not file changes (an online answer, a read) never arm it, so "undo all" cannot claim to reverse something the journal does not hold.
+- Test: bridge `a_plan_that_stops_partway_says_so_and_undo_all_puts_the_steps_back` - real files in a temp home, a move into a 0555 folder
+  fails after the create succeeded; asserts the folder exists, the message says "stay done" and "undo all", the batch is armed, and "undo all"
+  removes the folder. Behavioural, not a pixel check (the text is the existing failed-reply bubble).
+
 ### 16 AI reliability, slice 1 (PARTIAL)
 - Found by a new test: an EMPTY assist proposal produced an empty confirm card. Fixed: an empty proposal is a failed proposal and the user gets the parser's plain explanation.
 - A panicking assist is now caught in `Engine::plan_with` (std::panic::catch_unwind): same outcome as an error, nothing runs. Needs panic=unwind (the workspace does not set panic=abort).

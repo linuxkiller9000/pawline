@@ -2073,6 +2073,15 @@ fn confirm_exec(state: &mut UiState) -> UiReply {
                 // The steps that did happen are in the journal; the failed and unrun ones are not.
                 state.undo_batch = Some(completed.len());
                 text.push_str(&format!("\nThe {} completed step(s) stay done. Say \"undo organize\" to put them back.", completed.len()));
+            } else if !completed.is_empty() && completed.iter().all(|o| pawline_core::filesgate::changes_files(&o.op)) {
+                // Any other plan that stopped partway: every completed step is a file change, so the
+                // journal holds its reverse. Say so instead of leaving the user to guess, and let
+                // "undo all" walk them back in reverse order.
+                state.undo_batch = Some(completed.len());
+                text.push_str(&format!(
+                    "\nThe {} completed step(s) stay done and each one is in the undo journal. Say \"undo all\" to put them back.",
+                    completed.len()
+                ));
             }
             reply(if error.to_string().contains("Cancelled.") { "message" } else { "failed" }, text)
         }
@@ -3492,6 +3501,40 @@ mod memory_tests {
             let line = picture_ready_label(&p, "/home/u/Pictures/x.png");
             assert!(line.contains("AI-generated") && line.contains("unchecked"), "{line}");
             assert!(line.contains("/home/u/Pictures/x.png"), "detail kept: {line}");
+        }
+    }
+
+    #[test]
+    fn a_plan_that_stops_partway_says_so_and_undo_all_puts_the_steps_back() {
+        let root = org_root("partial1");
+        let mut st = new_state(root.clone());
+        // Step 1 is a real file change; step 2 is a move into a folder that cannot be written, so it
+        // fails after the folder already exists. That is the shape of a partial run.
+        std::fs::write(root.join("ro-src.txt"), b"x").unwrap();
+        let locked = root.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o555);
+        }
+        std::fs::set_permissions(&locked, perms).unwrap();
+        let r = handle_text(&mut st, "make a folder called partial-a and move ro-src.txt to locked");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        let r = confirm_inner(&mut st);
+        assert_eq!(r.kind, "failed", "{}", r.text);
+        assert!(root.join("partial-a").is_dir(), "the first step really ran");
+        assert!(r.text.contains("stay done") && r.text.contains("undo all"), "it says what happened and how to reverse it: {}", r.text);
+        assert_eq!(st.undo_batch, Some(1), "the journal batch is armed for undo all");
+        let r = handle_text(&mut st, "undo all");
+        assert!(!root.join("partial-a").exists(), "undo all put the completed step back: {}", r.text);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = std::fs::metadata(&locked).unwrap().permissions();
+            p.set_mode(0o755);
+            let _ = std::fs::set_permissions(&locked, p);
         }
     }
 
