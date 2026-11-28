@@ -156,6 +156,116 @@ pub fn install(
     Ok(bin)
 }
 
+/// The real thing: download with a progress line and a running sha-256, refuse
+/// anything that does not match the pin, extract with the system `tar`, then
+/// prove the binary starts before anyone is told it worked.
+pub fn install_live(
+    c: &Candidate,
+    home: &Path,
+    cancel: &std::sync::atomic::AtomicBool,
+    progress: &dyn Fn(&str),
+) -> Result<PathBuf, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    use std::sync::atomic::Ordering::SeqCst;
+
+    if let Some(p) = installed_at(home, c.tag) {
+        return Ok(p);
+    }
+    crate::netgate::check().map_err(|e| format!("download llama-server: {e}"))?;
+    let dir = dest_dir(home, c.tag);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    let tmp = dir.join(".llama-server.tar.gz.tmp");
+
+    let result = (|| -> Result<PathBuf, String> {
+        progress(&format!("Downloading llama-server ({} MB)...", c.bytes / (1024 * 1024)));
+        let mut resp = ureq::get(c.url)
+            .header("User-Agent", "pawline")
+            .call()
+            .map_err(|e| format!("download llama-server: {e}"))?;
+        let mut reader = resp.body_mut().as_reader();
+        let mut file = std::io::BufWriter::new(
+            std::fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?,
+        );
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut done: u64 = 0;
+        let mut last_mb = u64::MAX;
+        loop {
+            if cancel.load(SeqCst) {
+                return Err("cancelled".into());
+            }
+            let n = reader.read(&mut buf).map_err(|e| format!("download llama-server: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            done += n as u64;
+            if done > c.bytes {
+                return Err("the download is larger than the pinned size - not using it".into());
+            }
+            hasher.update(&buf[..n]);
+            std::io::Write::write_all(&mut file, &buf[..n]).map_err(|e| format!("write: {e}"))?;
+            let mb = done / (1024 * 1024);
+            if mb != last_mb {
+                last_mb = mb;
+                progress(&format!("Downloading llama-server: {mb} of {} MB...", c.bytes / (1024 * 1024)));
+            }
+        }
+        std::io::Write::flush(&mut file).map_err(|e| format!("write: {e}"))?;
+        if done != c.bytes {
+            return Err(format!("the download is {done} bytes, expected {} - not extracting a partial file", c.bytes));
+        }
+        let got: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        if got != c.sha256 {
+            return Err(format!("the download does not match its checksum (got {got})"));
+        }
+        progress("Unpacking llama-server...");
+        let out = std::process::Command::new("tar")
+            .arg("-xzf")
+            .arg(&tmp)
+            .arg("-C")
+            .arg(&dir)
+            .output()
+            .map_err(|e| format!("could not run tar: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("tar failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        let bin = dir.join(format!("llama-{}", c.tag)).join("llama-server");
+        if !bin.is_file() {
+            return Err(format!("the archive did not contain {}", bin.display()));
+        }
+        progress("Checking that llama-server starts...");
+        check_starts(&bin)?;
+        Ok(bin)
+    })();
+
+    let _ = std::fs::remove_file(&tmp);
+    if result.is_err() {
+        // Never leave a half-install that later looks installed.
+        let _ = std::fs::remove_file(dir.join(format!("llama-{}", c.tag)).join("llama-server"));
+    }
+    result
+}
+
+/// Does the extracted binary actually start? A file that cannot run is not an
+/// install, however good its checksum was.
+pub fn check_starts(bin: &Path) -> Result<(), String> {
+    let out = std::process::Command::new(bin)
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("{} did not start: {e}", bin.display()))?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if out.status.success() || text.to_lowercase().contains("version") {
+        Ok(())
+    } else {
+        Err(format!("{} started but did not report a version: {}", bin.display(), text.trim()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
