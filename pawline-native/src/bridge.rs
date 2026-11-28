@@ -15,6 +15,7 @@ static CANCEL_UPTO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 pub fn request_cancel() {
     use std::sync::atomic::Ordering::SeqCst;
     CANCEL_UPTO.store(GEN.load(SeqCst), SeqCst);
+    LLAMA_CANCEL.store(true, SeqCst);
     #[cfg(all(feature = "laya", not(windows)))]
     LAYA_CANCEL.store(true, SeqCst);
 }
@@ -23,6 +24,28 @@ pub fn request_cancel() {
 /// and stops instead of suggesting. The model call itself is not interrupted.
 #[cfg(all(feature = "laya", not(windows)))]
 pub static LAYA_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Esc during a llama-server download: the download loop stops at the next block
+/// and the partial file is removed, so a cancelled install leaves nothing behind.
+pub static LLAMA_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+// Progress lines for the llama-server install ("Downloading 12 of 23 MB..."). The GUI
+// installs a hook so they show while it runs; terminal mode prints them itself.
+std::thread_local! {
+    static INSTALL_PROGRESS: std::cell::RefCell<Option<Box<dyn Fn(&str)>>> = const { std::cell::RefCell::new(None) };
+}
+
+pub fn set_install_progress(f: Option<Box<dyn Fn(&str)>>) {
+    INSTALL_PROGRESS.with(|c| *c.borrow_mut() = f);
+}
+
+fn notify_install(text: &str) {
+    INSTALL_PROGRESS.with(|c| {
+        if let Some(f) = c.borrow().as_ref() {
+            f(text);
+        }
+    });
+}
 
 // The GUI worker installs a hook here so a visible "thinking" line appears while the
 // model loads or routes. Terminal mode installs nothing and behaves exactly as before.
@@ -838,6 +861,8 @@ pub struct UiState {
     /// One-time model download+convert card is on screen; only the card's Approve sets it off.
     #[cfg(all(feature = "laya", not(windows)))]
     pub laya_setup_pending: bool,
+    /// The llama-server install card is on screen; only the card's Approve sets it off.
+    pub llama_setup_pending: bool,
     pub online_ctx: Vec<String>,
     pub online_pending: Option<String>,
 }
@@ -1273,6 +1298,36 @@ fn handle_text_inner(state: &mut UiState, input: &str) -> UiReply {
             state.online_chat = true;
             let provider = current_chat_provider();
             return reply("message", format!("Online chat is ON for this session only. Nothing was sent. Commands and offline help still run first and locally. When something is not a command, I will show you a card with the exact messages (up to {} earlier lines of this session, kept in memory only) before anything goes out. {} Your files, location and saved history are never sent; texts with paths, addresses, long numbers, file names, passwords or other credentials are not offered. Replies are AI-written and may be wrong. Say \"chat off\" to stop, \"forget our chat\" to clear the lines, or \"chat provider\" to change where answers come from.", pawline_core::textfallback::CHAT_CONTEXT_LINES, provider.destination_line()));
+        }
+        if matches!(
+            low,
+            "get a llama-server"
+                | "get llama-server"
+                | "get llama server"
+                | "get me a llama-server"
+                | "install llama-server"
+                | "install llama server"
+                | "llama-server install"
+                | "llama server install"
+                | "set up llama-server"
+                | "set up llama server"
+        ) {
+            if pawline_core::netgate::is_offline() {
+                return reply("message", "Offline mode is on, so I did not download anything. llama-server is not installed. Turn offline mode off in Settings and ask again if you want it.".into());
+            }
+            let Some(home) = pawline_core::platform::home_dir() else {
+                return reply("message", "I could not find your home folder, so there is nowhere to install llama-server. Nothing was done.".into());
+            };
+            // Detection first: an existing copy is never replaced or second-guessed.
+            let has = |b: &str| pawline_core::screencap::binary_on_path(b);
+            if let Some(bin) = pawline_core::llamainstall::find_existing(&home, &has, None) {
+                return reply("message", format!("A llama-server is already here: {}. Nothing was downloaded. Pawline uses it for screen questions when it can.", bin.display()));
+            }
+            let Some(c) = pawline_core::llamainstall::candidate(std::env::consts::OS, std::env::consts::ARCH) else {
+                return reply("message", format!("I have no llama-server build pinned for this computer ({} {}), so there is nothing I can safely download. Nothing was done.", std::env::consts::OS, std::env::consts::ARCH));
+            };
+            state.llama_setup_pending = true;
+            return reply("confirm", pawline_core::llamainstall::card_text(&c, &home));
         }
         #[cfg(all(feature = "laya", not(windows)))]
         if matches!(low, "laya on" | "turn on laya" | "enable laya" | "laya on please" | "laya setup" | "set up laya" | "install laya") {
@@ -1884,7 +1939,37 @@ fn laya_setup_exec(state: &mut UiState) -> UiReply {
     }
 }
 
+/// The llama-server card was approved: download the pinned official build, check it
+/// against the pin, unpack it under the user's home, prove it starts, and stop there.
+/// Esc cancels; a cancelled or failed run leaves no half-install behind.
+fn llama_setup_exec() -> UiReply {
+    use std::sync::atomic::Ordering::SeqCst;
+    let Some(home) = pawline_core::platform::home_dir() else {
+        return reply("error", "I could not find your home folder, so there is nowhere to install llama-server. Nothing was done.".into());
+    };
+    let Some(c) = pawline_core::llamainstall::candidate(std::env::consts::OS, std::env::consts::ARCH) else {
+        return reply("error", "I have no llama-server build for this computer. Nothing was done.".into());
+    };
+    LLAMA_CANCEL.store(false, SeqCst);
+    match pawline_core::llamainstall::install_live(&c, &home, &LLAMA_CANCEL, &notify_install) {
+        Ok(bin) => reply("message", format!(
+            "llama-server is installed at {} ({} MB downloaded, checksum matched, and it started when asked). No root was needed and nothing system-wide was touched. Pawline now uses it for screen questions when it can, and deleting that folder removes it. Any llama-server you already had is untouched.",
+            bin.display(),
+            c.bytes / (1024 * 1024)
+        )),
+        Err(e) if e == "cancelled" => reply(
+            "message",
+            "llama-server install cancelled. The partial download was removed and nothing was installed.".into(),
+        ),
+        Err(e) => reply("error", format!("llama-server was not installed: {e}. Nothing was changed and the partial download was removed.")),
+    }
+}
+
 fn confirm_exec(state: &mut UiState) -> UiReply {
+    if state.llama_setup_pending {
+        state.llama_setup_pending = false;
+        return llama_setup_exec();
+    }
     #[cfg(all(feature = "laya", not(windows)))]
     if state.laya_setup_pending {
         state.laya_setup_pending = false;
@@ -1985,6 +2070,7 @@ pub fn new_state(root: std::path::PathBuf) -> UiState {
         laya_tried: false,
         #[cfg(all(feature = "laya", not(windows)))]
         laya_setup_pending: false,
+        llama_setup_pending: false,
         online_ctx: vec![],
         online_pending: None,
         organize_pending: None,
@@ -2467,6 +2553,7 @@ pub fn cancel(state: &mut UiState) -> UiReply {
     {
         state.laya_setup_pending = false;
     }
+    state.llama_setup_pending = false;
     state.pending = None;
     state.pending_request = None;
             pawline_core::pending::clear(&state.root); // a card that is not remembered replaces any remembered one
@@ -3381,6 +3468,62 @@ mod memory_tests {
             assert!(line.contains("AI-generated") && line.contains("unchecked"), "{line}");
             assert!(line.contains("/home/u/Pictures/x.png"), "detail kept: {line}");
         }
+    }
+
+    #[test]
+    fn asking_for_a_llama_server_offers_a_card_and_never_downloads_by_itself() {
+        let root = org_root("llama1");
+        let mut st = new_state(root.clone());
+        // Offline mode refuses instead of offering a download.
+        pawline_core::netgate::set_offline_for_this_thread(Some(true));
+        let r = handle_text(&mut st, "get a llama-server");
+        pawline_core::netgate::set_offline_for_this_thread(Some(false));
+        assert!(r.kind == "message" && r.text.contains("Offline mode") && !st.llama_setup_pending, "{}", r.text);
+        // With the gate open: an existing copy is named and nothing is downloaded, or the card
+        // names the pinned build. Which one this machine sees depends on what is installed, so
+        // both are accepted here; the card's exact wording is covered in llamainstall's tests.
+        let r = handle_text(&mut st, "install llama-server");
+        let home = pawline_core::platform::home_dir().expect("a home folder");
+        let has = |b: &str| pawline_core::screencap::binary_on_path(b);
+        if pawline_core::llamainstall::find_existing(&home, &has, None).is_some() {
+            assert_eq!(r.kind, "message", "{}", r.text);
+            assert!(r.text.contains("already here") && !st.llama_setup_pending, "{}", r.text);
+        } else if let Some(c) = pawline_core::llamainstall::candidate(std::env::consts::OS, std::env::consts::ARCH) {
+            assert_eq!(r.kind, "confirm", "{}", r.text);
+            assert!(r.text.contains("github.com/ggml-org/llama.cpp"), "{}", r.text);
+            assert!(r.text.contains("checked against a fixed sha256"), "the pin is named on the card: {}", r.text);
+            assert!(r.text.contains("Nothing is downloaded until you say yes"), "{}", r.text);
+            assert!(st.llama_setup_pending, "{}", r.text);
+            // Typing again never approves it; Cancel clears it.
+            let r = cancel(&mut st);
+            assert!(r.text.contains("Cancelled") && !st.llama_setup_pending, "{}", r.text);
+        } else {
+            assert_eq!(r.kind, "message", "no build for this platform: {}", r.text);
+            assert!(!st.llama_setup_pending, "{}", r.text);
+        }
+    }
+
+    /// The approved card really installs (download, checksum, unpack, start check) and
+    /// then says so. Ignored by default: it downloads 22.4 MB. Run it by hand with a throwaway
+    /// HOME, e.g. `HOME=/tmp/pw-home3 cargo test -p pawline-native --bin pawline -- --ignored
+    /// --exact bridge::memory_tests::an_approved_llama_card_installs_for_real`.
+    #[test]
+    #[ignore]
+    fn an_approved_llama_card_installs_for_real() {
+        let root = org_root("llama2");
+        let mut st = new_state(root.clone());
+        let r = handle_text(&mut st, "get a llama-server");
+        assert_eq!(r.kind, "confirm", "{}", r.text);
+        assert!(st.llama_setup_pending);
+        let r = confirm_inner(&mut st);
+        assert_eq!(r.kind, "message", "{}", r.text);
+        assert!(r.text.contains("llama-server is installed at"), "{}", r.text);
+        let home = pawline_core::platform::home_dir().expect("a home folder");
+        let bin = pawline_core::llamainstall::installed_at(&home, pawline_core::llamainstall::TAG);
+        assert!(bin.is_some(), "{}", r.text);
+        // Asking again is answered from what is installed, with no second download.
+        let r = handle_text(&mut st, "get a llama-server");
+        assert!(r.kind == "message" && r.text.contains("already here"), "{}", r.text);
     }
 
     #[cfg(all(feature = "laya", not(windows)))]

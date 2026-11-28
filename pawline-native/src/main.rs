@@ -3782,6 +3782,8 @@ fn run_terminal() {
     }
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
+    // A download with no visible progress looks like a hang in a terminal.
+    bridge::set_install_progress(Some(Box::new(|text: &str| println!("{text}"))));
     loop {
         print!("> ");
         let _ = std::io::stdout().flush();
@@ -3803,6 +3805,7 @@ fn run_terminal() {
         {
             st.laya_setup_pending = false;
         }
+        st.llama_setup_pending = false;
         let r = bridge::handle_text(&mut st, t);
         let r = bridge::with_notes(&mut st, r);
         println!("{}", r.text);
@@ -3832,6 +3835,13 @@ fn run_terminal() {
 fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<(UiReply, Vec<Vec<u8>>)>) {
     let root = work_root();
     let mut st = bridge::new_state(root);
+    // llama-server install progress (download, unpack, start check) gets a visible line.
+    {
+        let install_tx = back.clone();
+        bridge::set_install_progress(Some(Box::new(move |text: &str| {
+            let _ = install_tx.send((bridge::reply("thinking", text.to_string()), Vec::new()));
+        })));
+    }
     // Experimental Laya: the wait for the local model gets a visible line; the reply replaces it.
     #[cfg(all(feature = "laya", not(windows)))]
     {
@@ -3859,6 +3869,7 @@ fn worker(rx: mpsc::Receiver<Req>, back: channel::Sender<(UiReply, Vec<Vec<u8>>)
         {
             st.laya_setup_pending = false;
         }
+                st.llama_setup_pending = false;
                 let r = bridge::handle_text_in(&mut st, &t, dir.as_deref());
                 bridge::with_notes(&mut st, r)
             }

@@ -65,11 +65,49 @@ used, and the folder is not treated as present unless the binary is.
 - The screen path now looks for a Pawline-installed copy before PATH or the model
   folder, so an install made here is used without any further setup.
 
-## What is not wired yet
+## How the user asks for it
 
-The card itself, and the download button behind it: that needs the existing
-confirmation-card plumbing in the bridge, so a "yes" approves exactly the asset,
-size and checksum the card showed, and nothing else. Until that exists the module
-is used for detection only, and a machine with no server still gets the honest
-"nothing can look at the screen" message. That is the next piece of work, and it
-gets the same rule as every other download: the user's yes first.
+Typing any of `get a llama-server`, `install llama-server`, `llama server install`
+or `set up llama-server` (and the close variants) runs detection first:
+
+1. **Offline mode on** -> a plain refusal, nothing downloaded, no card.
+2. **A llama-server already there** (Pawline's own install, then `PATH`) -> the
+   path is named and nothing is downloaded. An existing server is never replaced.
+3. **No build pinned for this platform** -> said plainly, nothing downloaded.
+4. **Otherwise** -> the confirmation card, which names the source, the exact
+   size, where it goes, that no root is needed, that the download is checked
+   against a fixed sha256 and that the binary has to start before Pawline calls
+   it installed. Focus starts on **Cancel**; only `Do it` (or Left/Right then
+   Enter) starts the download. Typing never approves it, Esc cancels.
+
+After a yes: `install_live` streams progress lines (`Downloading 12 of 23 MB...`,
+`Unpacking...`, `Checking that llama-server starts...`), checks size and sha256,
+extracts with the system `tar`, runs `--version` once, and only then reports the
+path. Esc during the download stops it at the next block and the partial file is
+removed, so a cancelled or failed run leaves no half-install. Asking again after
+an install answers from the installed copy, with no second download.
+
+## Measured end to end (sandbox, this branch)
+
+- Card shown for `install llama-server` with a throwaway `HOME`; approved with the
+  keyboard; message: "llama-server is installed at
+  `<home>/.local/share/pawline/llama/b12811/llama-b12811/llama-server` (22 MB
+  downloaded, checksum matched, and it started when asked)".
+- 58 MB on disk after extraction; 14 `libggml-cpu-*.so` backends including
+  `libggml-cpu-sse42.so`, which is what makes a no-AVX CPU work.
+- `llama-server --version` -> `version: 1.1.0-dev (build 12811, commit 00d5c142c)`,
+  `built with GNU 11.4.0 for Linux x86_64`.
+- Wall clock for download + verify + unpack + start check in this sandbox: 1.9 s
+  (fast link). On a limited data plan the 22.4 MB download is the real cost, which
+  is exactly why the size is on the card before anything starts.
+
+## Tests
+
+- `pawline-core` (7 pure tests): pinned asset, card wording, short download
+  refused, wrong checksum refused, no extraction on a bad download, a verified
+  download lands where expected, detection order.
+- `pawline-native`: `asking_for_a_llama_server_offers_a_card_and_never_downloads_by_itself`
+  covers the offline refusal, the existing-copy answer, the card, and that Cancel
+  clears it. `an_approved_llama_card_installs_for_real` is `#[ignore]`d because it
+  downloads 22.4 MB; run it by hand with a throwaway home:
+  `HOME=/tmp/pw-home cargo test -p pawline-native --bin pawline -- --ignored --exact bridge::memory_tests::an_approved_llama_card_installs_for_real`

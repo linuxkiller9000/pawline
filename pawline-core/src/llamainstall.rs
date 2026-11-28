@@ -92,19 +92,16 @@ pub fn find_existing(
 pub fn card_text(c: &Candidate, home: &Path) -> String {
     let mb = c.bytes as f64 / (1024.0 * 1024.0);
     format!(
-        "No llama-server was found on this computer. Pawline can install one for you.\n\
+        "No llama-server was found on this computer. Pawline can install the official one.\n\
          \n\
-         Source: the official llama.cpp release {}, CPU build, from github.com/ggml-org/llama.cpp\n\
-         Download: {:.1} MB ({})\n\
-         Checked against sha256 {}\n\
-         Goes to: {} (your home folder, no root, nothing system-wide)\n\
+         From: github.com/ggml-org/llama.cpp, release {}, CPU build\n\
+         Size: {:.1} MB ({})\n\
+         Goes to: {} (your home folder; no root, nothing system-wide)\n\
          \n\
-         It is the CPU build, so it runs on a processor without AVX by picking the right kernel at start.\n\
-         Nothing is downloaded until you say yes, and deleting that one folder removes it.",
+         It is the CPU build, so it picks the right kernel at start and works on a processor without AVX. The download is checked against a fixed sha256 before anything is unpacked, and the program has to start before Pawline calls it installed. Nothing is downloaded until you say yes, and deleting that one folder removes it.",
         c.tag,
         mb,
         c.asset,
-        c.sha256,
         dest_dir(home, c.tag).display()
     )
 }
@@ -294,7 +291,7 @@ mod tests {
         assert!(t.contains("github.com/ggml-org/llama.cpp"));
         assert!(t.contains("22.4 MB"), "size in the card: {t}");
         assert!(t.contains("/home/someone/.local/share/pawline/llama/b12811"));
-        assert!(t.contains(&c.sha256[..16]));
+        assert!(t.contains("checked against a fixed sha256"), "the pin is named: {t}");
         assert!(t.contains("no root"));
         assert!(t.contains("Nothing is downloaded until you say yes"));
     }
