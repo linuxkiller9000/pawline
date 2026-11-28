@@ -13,6 +13,8 @@ path = "src/main.rs"
 tiny-skia = "0.11"
 fontdue = "0.9"
 pawline-core = { path = "../pawline-core" }
+# In-process llama.cpp engine (a stub unless built with the "engine" feature).
+pawline-llama = { path = "../pawline-llama" }
 pawline-needle = { path = "../pawline-needle" }
 jpeg-decoder = { version = "0.3", default-features = false }
 png = "0.17"
@@ -24,6 +26,9 @@ calloop = "0.14"
 
 [features]
 default = ["laya"]
+# Build llama.cpp into the binary: the no-install fallback when no llama-server
+# is present. Off by default so an ordinary build needs no C++ toolchain.
+engine = ["pawline-llama/vendored"]
 # Experimental Laya intent router (Linux only): tract + tokenizers never build for Windows.
 laya = ["dep:tract-onnx", "dep:tokenizers", "dep:regex"]
 

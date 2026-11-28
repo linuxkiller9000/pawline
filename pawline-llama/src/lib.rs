@@ -99,6 +99,11 @@ pub struct LocalModel {
     raw: *mut Engine,
 }
 
+// A llama.cpp context must not be used from two threads at once, but moving it
+// to another thread is fine. Every caller that moves it serialises its calls
+// (the app holds it behind a Mutex), so ownership transfer is safe.
+unsafe impl Send for LocalModel {}
+
 impl LocalModel {
     /// Load a GGUF file into this process.
     pub fn load(model_path: &str, n_ctx: u32, n_threads: u16) -> Result<LocalModel, EngineError> {

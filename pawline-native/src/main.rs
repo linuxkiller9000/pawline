@@ -2,6 +2,7 @@
 //! buffers on a Wayland layer-shell surface (xdg-toplevel fallback). No
 //! OpenGL, EGL, GTK or WebKit is loaded.
 mod bridge;
+mod engine;
 mod dropin;
 mod edit;
 mod shape;

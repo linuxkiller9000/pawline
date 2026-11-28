@@ -328,33 +328,40 @@ fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str, share
     // Pawline starts it with the files the user pointed at, so nothing is launched by hand.
     // A server that already answers is never started twice, and the child dies with Pawline
     // (kernel parent-death signal), so a crash cannot leave an orphan holding the model.
+    // Which path answers the pixels, in order of measured speed on his machine:
+    //   1. a llama-server that is running or can be started here - it uses every core,
+    //      and the vision encoder is the whole cost of a first look;
+    //   2. the engine built into this binary - no install, no port, one process;
+    //   3. nothing, said plainly instead of pretending.
+    let home = pawline_core::platform::home_dir();
+    let paths = pawline_core::models::store_path().map(|p| pawline_core::models::load(&p)).unwrap_or_default();
+    let env = |k: &str| std::env::var(k).ok();
+    let vision_file = pawline_core::models::configured(pawline_core::models::Kind::Vision, &paths, &env, home.as_deref());
+    let mmproj_file = pawline_core::models::configured(pawline_core::models::Kind::Mmproj, &paths, &env, home.as_deref());
+    let mut server_ok = false;
     if provider.local && provider.spec().name.to_lowercase().contains("llama") {
-        let home = pawline_core::platform::home_dir();
-        let paths = pawline_core::models::store_path().map(|p| pawline_core::models::load(&p)).unwrap_or_default();
-        let env = |k: &str| std::env::var(k).ok();
-        if let Some(v) = pawline_core::models::configured(pawline_core::models::Kind::Vision, &paths, &env, home.as_deref()) {
-            let mm = pawline_core::models::configured(pawline_core::models::Kind::Mmproj, &paths, &env, home.as_deref());
+        if let Some(v) = vision_file.as_ref() {
             let has = |b: &str| pawline_core::screencap::binary_on_path(b);
             let data = home.as_deref().map(|h| h.join(".local/share/pawline"));
-            match pawline_core::runner::find_binary(&has, &v, data.as_deref()) {
-                Some(bin) => {
-                    let probe = |u: &str| {
-                        let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_millis(800));
-                        pawline_core::imagegen::Http::get(&http, u, &[]).is_ok()
-                    };
-                    if let Err(e) = pawline_core::runner::ensure_running(&provider.spec().url, &v, mm.as_deref(), &bin, &probe, std::time::Duration::from_secs(90)) {
-                        return Err(PawError::Exec(e));
-                    }
-                }
-                None => {
-                    return Err(PawError::Exec(format!(
-                        "Pawline would start the runner itself with {}, but llama-server was not found on this computer (not on PATH, not next to the model). Install it, or start your own server. Nothing was captured.",
-                        v.display()
-                    )));
-                }
+            if let Some(bin) = pawline_core::runner::find_binary(&has, v, data.as_deref()) {
+                let probe = |u: &str| {
+                    let http = pawline_core::imagegen::UreqHttp::new(std::time::Duration::from_millis(800));
+                    pawline_core::imagegen::Http::get(&http, u, &[]).is_ok()
+                };
+                // A failure here is not fatal any more: the built-in engine may still
+                // answer, so this only decides which of the two runs.
+                server_ok = pawline_core::runner::ensure_running(
+                    &provider.spec().url, v, mmproj_file.as_deref(), &bin, &probe,
+                    std::time::Duration::from_secs(90),
+                )
+                .is_ok();
             }
         }
     }
+    let engine_files = match (vision_file, mmproj_file) {
+        (Some(v), Some(m)) if crate::engine::available() => Some((v, m)),
+        _ => None,
+    };
     let now = provider.spec();
     if now.name != spec.name || now.url != spec.url || now.model != spec.model {
         return Err(PawError::Exec(format!(
@@ -413,6 +420,11 @@ fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str, share
     if let Some(why) = refuse {
         return Err(PawError::Exec(why));
     }
+    if !server_ok && engine_files.is_some() && matches!(route, sc::ScreenRoute::Ocr) {
+        // The text route needs a server for its text model; the built-in engine
+        // reads the pixels itself, slowly but honestly.
+    }
+    let route = if server_ok { route } else { sc::ScreenRoute::Vision };
     let local = provider.local;
     let label = provider.answer_label();
     let q = question.to_string();
@@ -425,7 +437,7 @@ fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str, share
             })?;
             ("Read the screen text", a)
         }
-        _ => {
+        _ if server_ok => {
             let shrunk = sc::downscale_png(&bytes, sc::SCREEN_VISION_MAX_WIDTH)?;
             let image = pawline_core::textfallback::ChatImage::from_bytes(&shrunk)?;
             let a = run_cancellable_with(ticket, move |cancelled, commit| {
@@ -434,11 +446,41 @@ fn screen_qa(spec: &pawline_core::providers::ProviderSpec, question: &str, share
             })?;
             ("Looked at the screen", a)
         }
+        _ => {
+            // No server, so the engine in this binary answers, or nothing does.
+            let (vision, mmproj) = match engine_files {
+                Some(f) => f,
+                None => {
+                    return Err(PawError::Exec(format!(
+                        "No model can look at the screen right now: no llama-server is running, this build has no built-in engine, and the vision files are not set. Point Settings at your SmolVLM and mmproj files, or start your server. Nothing was captured."
+                    )));
+                }
+            };
+            let shrunk = sc::downscale_png(&bytes, sc::SCREEN_VISION_MAX_WIDTH)?;
+            let question = q.clone();
+            let a = run_cancellable_with(ticket, move |cancelled, commit| {
+                if cancelled() {
+                    return Err(PawError::Exec(
+                        "Cancelled. Nothing was saved, and a late answer will be discarded.".into(),
+                    ));
+                }
+                let answer = crate::engine::ask_image(&vision, &mmproj, &shrunk, &question, 64)
+                    .map_err(PawError::Exec)?;
+                if cancelled() || !commit() {
+                    return Err(PawError::Exec(
+                        "Cancelled. Nothing was saved, and a late answer will be discarded.".into(),
+                    ));
+                }
+                Ok(answer)
+            })?;
+            ("Looked at the screen with the engine inside Pawline", a)
+        }
     };
     *LAST_CHAT_ANSWER.lock().unwrap() = Some(answer.clone());
     let route_text = match route {
         sc::ScreenRoute::Ocr => "screen text read with tesseract, then the small text model",
-        _ => "the vision model on the pixels",
+        _ if server_ok => "the vision model on the pixels, through your llama-server",
+        _ => "the vision model on the pixels, through the engine built into Pawline",
     };
     let mut out = format!("{prefix} - {label}:\n{answer}\n\n{}", route_note(route_text, same_frame));
     if sc::answer_is_unsure(&answer) {

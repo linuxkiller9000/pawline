@@ -1326,6 +1326,7 @@ dependencies = [
  "image-webp",
  "jpeg-decoder",
  "pawline-core",
+ "pawline-llama",
  "pawline-needle",
  "png",
  "regex",
