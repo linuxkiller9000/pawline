@@ -202,6 +202,16 @@ int pl_vision_enable(struct pl_engine * e, const char * mmproj, char * err, int 
     p.print_timings = false;
     p.n_threads = e->n_threads;
     p.warmup = false;
+    /* How many image tokens the projector may spend. Fewer tokens means fewer
+       encoder slices: on a CPU without AVX each slice is seconds. */
+    const char * it = getenv("PAWLINE_LLAMA_IMAGE_TOKENS");
+    if (it) {
+        int n = atoi(it);
+        if (n > 0) {
+            p.image_max_tokens = n;
+            p.image_min_tokens = n;
+        }
+    }
     e->mctx = mtmd_init_from_file(mmproj, e->model, p);
     if (!e->mctx) {
         set_err(err, err_len, "could not load the projector (mmproj) file");

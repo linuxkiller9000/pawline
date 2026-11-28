@@ -1071,3 +1071,20 @@ Two honest consequences: a first look at a new screen is expensive on a CPU
 without AVX (tens of seconds here, and his Dell is slower than this sandbox), and
 the win from asking twice about one screen is large (39 s -> 0.43 s), which is
 exactly the case the screen-share pill creates.
+
+### The vision encoder is the whole first-look cost (2026-11-28)
+
+Measured, not guessed, because the floor build's first look was far slower than
+the native-kernel numbers suggested. Same crate and example, SmolVLM-256M Q8 +
+mmproj, 960 px screenshot, one thread:
+
+| build | first look | image encode | image decode |
+|---|---|---|---|
+| native kernels | 10.3 s | 3.1 s/slice | 0.23 s/slice |
+| SSE4.2 floor (ships) | 55.7 s | 17.1 s/slice | 1.2 s/slice |
+
+The projector's f16 matmuls are 5.5x slower without AVX/F16C, and they are 50 of
+the 56 seconds. Tried: image_max_tokens=64 (no fewer slices, worse answers);
+-O3 (already the Release default, no change); LTO (builds, does not link into the
+crate). Threads are the untested lever: one vCPU here, two cores on his machine,
+and a distro llama-server uses both.

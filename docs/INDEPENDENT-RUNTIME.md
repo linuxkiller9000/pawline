@@ -216,6 +216,42 @@ What this means for his machine: a first look at a new screen is expensive
 slower), and a second question about the same screen is fast. That is the same
 shape llama-server had, with the encode cache now in our own code.
 
+## Where the SSE4.2 floor loses the first look (2026-11-28)
+
+A first look at a new screen is much slower in the floor build than the
+native-kernel numbers suggested, so it was measured instead of guessed. Same
+crate, same example, SmolVLM-256M Q8 + mmproj, 960 px screenshot, one thread:
+
+| build | first look | of which: image encode | of which: image decode |
+|---|---|---|---|
+| native kernels (this sandbox's CPU) | 10.3 s | 3.1 s per slice | 0.23 s per slice |
+| SSE4.2 floor, `-mno-avx` (ships) | 55.7 s | 17.1 s per slice | 1.2 s per slice |
+
+The encoder, not the language model, is the cost: 2-3 slices of 17 s each is
+about 50 of the 56 seconds. It is the projector's f16 matmuls; on a CPU with no
+AVX and no F16C there is no fast path for them.
+
+Levers that were tried, and what they did:
+
+- **Fewer image tokens** (`image_max_tokens=64`): no change. The projector still
+  splits the picture into two 64-token slices, and the answers got worse
+  ("Computer screen." instead of the text on it). Not worth it.
+- **`-O3`**: already llama.cpp's Release default. The archive came out
+  byte-for-byte the same size and the timing did not move.
+- **LTO** (`CMAKE_INTERPROCEDURAL_OPTIMIZATION=ON`): builds, but the resulting
+  static archives do not link into our crate (undefined sampler symbols), so it
+  is not a free flag; it would need a different link arrangement.
+- **Threads**: the real lever that this sandbox cannot measure. It has one
+  vCPU, and the floor build runs one thread. His i3-370M has two cores, and a
+  distro `llama-server` uses them by default, which is the likeliest reason his
+  current setup feels fast on the same silicon.
+
+So the honest conclusion for the app switch: the built-in engine is the
+no-install path, not the fast path on his CPU. A `llama-server` he already has
+should stay preferred when it is there and answering, with the in-process engine
+as the fallback that removes the install step. The engine should also default to
+one thread per core rather than one thread.
+
 ## Status
 
 The managed runner above is implemented and in the app. The in-process engine is
