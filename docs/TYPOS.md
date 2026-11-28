@@ -29,6 +29,16 @@ as expected and 29/29 negative controls left alone. Known misses, left as they a
 understood by the parser, so nothing is suggested) and "copy the flie a.txt to docs" (the original already parses as copying a thing named
 "flie a.txt", so it is not touched; it then fails safe as not found). This is a small set, not an accuracy rate.
 
+## Re-measured 2026-11-28 (how-to typos)
+The two how-to misses recorded in the chat section below ("how do i delte a folder", "how can i reanme a file") no longer miss: both now
+get the hint for the word they meant (Delete / Rename) with "Nothing was done", because the hint lookup already tolerates a one-edit
+command word. Re-measured directly on the chat state, not through the GUI. The note below is history, not current behaviour.
+
+One real gap found and left open: "how do i mve a file" gets the MAKE hint, not the move hint, because a 3-letter misspelling is never
+corrected by policy (distance 0 for words of 3 or fewer letters) and the word "file" then matches the make entry. Short words are left
+alone on purpose; the cost is that a very short misspelled verb can pick the wrong topic. A fix would have to relax that rule, so it stays
+a decision, not a patch.
+
 Tests: `cargo test -p pawline-core typo` (a 26-sentence typo list plus names/ties/quotes/yes cases) and the bridge test
 `typo_suggestion_never_acts_and_a_pick_still_needs_the_card`.
 

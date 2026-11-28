@@ -27,6 +27,17 @@ fn collect(dir: &Path, out: &mut Vec<(String, String)>) {
     }
 }
 
+/// Production code only: everything from the first `#[cfg(test)]` to the end of the file is a test
+/// module, and a test's own sockets are not a sender Pawline ships (runner.rs uses one to wait for
+/// a port). This is a text rule, not a parser: a test block in the middle of a file would hide the
+/// code after it, so test modules stay at the end of their file (bridge.rs says so in a comment).
+fn production(src: &str) -> &str {
+    match src.find("#[cfg(test)]") {
+        Some(i) => &src[..i],
+        None => src,
+    }
+}
+
 fn file_name(f: &str) -> &str {
     f.rsplit('/').next().unwrap_or(f)
 }
@@ -34,7 +45,8 @@ fn file_name(f: &str) -> &str {
 #[test]
 fn http_client_primitives_live_only_in_the_two_gated_senders() {
     for (f, src) in srcs() {
-        let known_sender = file_name(&f) == "imagegen.rs" || file_name(&f) == "search.rs" || file_name(&f) == "laya_setup.rs";
+        let src = production(&src);
+        let known_sender = matches!(file_name(&f), "imagegen.rs" | "search.rs" | "laya_setup.rs" | "llamainstall.rs");
         let n = src.matches("ureq::").count();
         if known_sender {
             assert!(n > 0, "{f} lost its ureq client - did the sender change without updating this audit?");
@@ -47,6 +59,7 @@ fn http_client_primitives_live_only_in_the_two_gated_senders() {
 #[test]
 fn no_raw_sockets_or_other_http_crates_anywhere() {
     for (f, src) in srcs() {
+        let src = production(&src);
         for bad in ["TcpStream", "UdpSocket", "reqwest", "isahc", "curl::", "hyper::"] {
             assert!(!src.contains(bad), "{f} mentions {bad} - Pawline's own requests go through the two gate-checked senders only");
         }
@@ -56,8 +69,8 @@ fn no_raw_sockets_or_other_http_crates_anywhere() {
 #[test]
 fn both_known_senders_call_the_gate_before_sending() {
     for (f, src) in srcs() {
-        if file_name(&f) == "imagegen.rs" || file_name(&f) == "search.rs" {
-            assert!(src.contains("netgate::check"), "{f} sends without netgate::check - offline mode would be bypassed");
+        if matches!(file_name(&f), "imagegen.rs" | "search.rs" | "laya_setup.rs" | "llamainstall.rs") {
+            assert!(production(&src).contains("netgate::check"), "{f} sends without netgate::check - offline mode would be bypassed");
         }
     }
     // and the gate itself still exists with its refusal message
