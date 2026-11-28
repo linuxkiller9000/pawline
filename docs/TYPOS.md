@@ -37,7 +37,8 @@ command word. Re-measured directly on the chat state, not through the GUI. The n
 One real gap found and left open: "how do i mve a file" gets the MAKE hint, not the move hint, because a 3-letter misspelling is never
 corrected by policy (distance 0 for words of 3 or fewer letters) and the word "file" then matches the make entry. Short words are left
 alone on purpose; the cost is that a very short misspelled verb can pick the wrong topic. A fix would have to relax that rule, so it stays
-a decision, not a patch.
+a decision, not a patch. Decision (main, 2026-11-28): short words stay safe, so the wrong-topic hint for a 3-letter
+misspelling is accepted and documented rather than fixed.
 
 Tests: `cargo test -p pawline-core typo` (a 26-sentence typo list plus names/ties/quotes/yes cases) and the bridge test
 `typo_suggestion_never_acts_and_a_pick_still_needs_the_card`.

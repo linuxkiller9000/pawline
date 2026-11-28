@@ -5,8 +5,9 @@
 //! every one of them must appear in the source file for the line to be reported as found.
 //! What this is NOT: understanding. A line can match every word and still be wrong, and a
 //! correct line can be reported missing when the file words the same fact differently.
-//! Tables and charts are not checked in this slice (their numbers come from the user's own
-//! outline table); image lines carry no facts. The "Contents" slide is generated and skipped.
+//! Table rows are checked cell by cell too, and a chart is drawn from those same numbers, so a
+//! chart slide's rows are checked the same way. Image lines carry no facts and source notes are
+//! the user's own labels, so neither is checked. The "Contents" slide is generated and skipped.
 
 /// One checked line of the draft.
 #[derive(Debug, PartialEq, Eq)]
@@ -99,6 +100,24 @@ pub fn check_slides_against_source(
         for (_, b) in &s.bullets {
             line(false, b);
         }
+        // Table and chart values are facts too: every cell's words and numbers are checked. The
+        // label is added for the review only, never tokenised (its own words are not facts).
+        for row in &s.table {
+            let cells: Vec<String> = row.iter().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect();
+            if cells.is_empty() {
+                continue;
+            }
+            let mut missing: Vec<String> = Vec::new();
+            for cell in &cells {
+                for t in tokens(cell) {
+                    if !have.contains(&t) && !missing.contains(&t) {
+                        missing.push(t);
+                    }
+                }
+            }
+            let label = if s.chart.is_some() { "chart row" } else { "table row" };
+            out.push(LineCheck { slide: i + 1, title: false, text: format!("{label}: {}", cells.join(" | ")), missing });
+        }
     }
     out
 }
@@ -109,7 +128,7 @@ pub fn check_review_text(file: &str, checks: &[LineCheck]) -> String {
     let not_found = checks.iter().filter(|c| !c.found()).count();
     let mut t = format!(
         "Checked the draft against {file}: {} of {total} lines were NOT found there.\n\
-         This is a word-level match, not understanding: a line can match and still be wrong, and a correct line can be flagged when the file words it differently. Tables and charts are not checked. The draft is unchanged.\n",
+         This is a word-level match, not understanding: a line can match and still be wrong, and a correct line can be flagged when the file words it differently. Table and chart values are checked cell by cell; images and source notes are not. The draft is unchanged.\n",
         not_found
     );
     let mut last_slide = 0usize;
@@ -341,6 +360,34 @@ mod tests {
         assert!(b.missing.contains(&"million".to_string()));
         assert!(b.missing.contains(&"monorail".to_string()));
         assert!(!b.missing.contains(&"cairo".to_string()));
+    }
+
+    #[test]
+    fn table_and_chart_values_are_checked_cell_by_cell() {
+        let src = "Rainfall by month: January 12 mm, February 8 mm. The water cycle moves water.";
+        let mut t = slide("Rainfall", &["Rainfall by month"]);
+        t.table = vec![
+            vec!["Month".into(), "mm".into()],
+            vec!["January".into(), "12".into()],
+            vec!["February".into(), "31".into()],
+        ];
+        let r = check_slides_against_source(&[t], src);
+        let rows: Vec<&LineCheck> = r.iter().filter(|c| c.text.starts_with("table row:")).collect();
+        assert_eq!(rows.len(), 3, "{r:?}");
+        assert!(rows[0].found(), "header cells are in the source: {rows:?}");
+        assert!(rows[1].found(), "January 12 is in the source: {rows:?}");
+        assert!(!rows[2].found(), "31 is invented: {rows:?}");
+        assert_eq!(rows[2].missing, vec!["31".to_string()], "only the invented value is named: {rows:?}");
+        // A chart draws the same numbers, so it is checked the same way and labelled as a chart row.
+        let mut c = slide("Rainfall chart", &[]);
+        c.table = vec![vec!["January".into(), "12".into()]];
+        c.chart = Some(crate::deck::ChartKind::Bar);
+        let r = check_slides_against_source(&[c], src);
+        assert!(r.iter().any(|x| x.text.starts_with("chart row: January | 12") && x.found()), "{r:?}");
+        // The review says what is and is not covered, and no longer claims tables are unchecked.
+        let text = check_review_text("notes.txt", &r);
+        assert!(text.contains("checked cell by cell"), "{text}");
+        assert!(!text.contains("Tables and charts are not checked"), "{text}");
     }
 
     #[test]
